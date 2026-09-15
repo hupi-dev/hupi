@@ -55,22 +55,22 @@ function required. Deploy it with any of:
   HUPI `deploy/k8s/` or Helm chart (this site has no dependency on
   Postgres or anything else HUPI itself needs — it's a static page).
 
-## Placeholders to replace before this goes live
+## Placeholders
 
-Centralized in `src/lib/links.js`:
+Centralized in `src/lib/links.js`. All resolved:
 
-- `GITHUB_URL` — set to `https://github.com/samuel-sujith/hupi`. **That
-  repo is currently private** — the "View on GitHub" CTA will 404 for
-  anyone without access until it's made public. Make it public before
-  pointing real traffic at this site, or swap this link out temporarily.
-- `DOCS_URL` — currently `${GITHUB_URL}/tree/main/docs` (no standalone docs
-  site exists yet, so this points into the repo itself — same visibility
-  caveat as `GITHUB_URL` above applies here too).
-- `CONTACT_EMAIL` — currently `hello@REPLACE_ME.example`.
+- `GITHUB_URL` — `https://github.com/samuel-sujith/hupi` (public).
+- `DOCS_URL` — `${GITHUB_URL}/tree/main/docs` (no standalone docs site
+  exists yet, so this points into the repo itself).
+- `CONTACT_EMAIL` — `samuel.sujith@gmail.com`.
+- `LICENSE_LABEL`/`LICENSE_URL` — MIT, linked from the footer
+  (`src/components/FinalCta.astro`) to the repo's `LICENSE` file.
 
-`LICENSE_LABEL`/`LICENSE_URL` are resolved — the repository root now has a
-real `LICENSE` file (MIT), linked from the footer
-(`src/components/FinalCta.astro`).
+## Live deployment
+
+Deployed at [hupi.dev](https://hupi.dev) (Vercel project `hupi/site`,
+auto-deploys on every push to `main` via the GitHub integration — see the
+root-level `vercel.json` for why that's needed in this monorepo).
 
 `astro.config.mjs`'s `site` field (`https://example.com/REPLACE_ME`) should
 also be updated to the real production URL once known — it's only used for

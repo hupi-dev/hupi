@@ -11,8 +11,7 @@ export const GITHUB_URL = 'https://github.com/samuel-sujith/hupi';
 // GITHUB_URL itself already is: replace GITHUB_URL and this stays correct.
 export const DOCS_URL = `${GITHUB_URL}/tree/main/docs`;
 
-// TODO(replace-before-launch): real contact address.
-export const CONTACT_EMAIL = 'hello@REPLACE_ME.example';
+export const CONTACT_EMAIL = 'samuel.sujith@gmail.com';
 
 export const LICENSE_LABEL = 'MIT';
 export const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;
