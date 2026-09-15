@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hupi.fullname" . }}
+  labels:
+    {{- include "hupi.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "hupi.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "hupi.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: hupi
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8787
+              name: http
+          env:
+            - name: HUPI_LISTEN_ADDR
+              value: {{ .Values.gateway.listenAddr | quote }}
+            - name: HUPI_REQUIRE_AUTH
+              value: {{ .Values.gateway.requireAuth | quote }}
+            - name: HUPI_PROVIDERS_CONFIG
+              value: "/app/config/providers.yaml"
+          envFrom:
+            - secretRef:
+                name: {{ include "hupi.appSecretName" . }}
+          volumeMounts:
+            - name: providers-config
+              mountPath: /app/config
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: providers-config
+          configMap:
+            name: {{ include "hupi.fullname" . }}-providers

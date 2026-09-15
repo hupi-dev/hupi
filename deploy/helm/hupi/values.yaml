@@ -1,0 +1,103 @@
+image:
+  repository: sujithsamuel/hupi
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+gateway:
+  listenAddr: "0.0.0.0:8787"
+  requireAuth: true
+
+# Every entry becomes an env var on the gateway, cronjobs, and admin UI
+# via envFrom — the app-role DB DSN, the field-encryption key, and each
+# provider's API key all live here. Two ways to supply it:
+#   1. secrets.app.create: true and fill in the values below (fine for a
+#      quick try, not for anything holding real data — Helm values end
+#      up in `helm get values` / release history in plaintext).
+#   2. secrets.app.create: false (default) and pre-create a Secret named
+#      secrets.app.existingSecretName yourself (kubectl, sealed-secrets,
+#      external-secrets, etc.) — see deploy/k8s/02-secret-app.example.yaml
+#      for its exact shape. Recommended for anything real.
+secrets:
+  app:
+    create: false
+    existingSecretName: hupi-app
+    appDatabaseURL: ""
+    kek: ""
+    extraEnv: {}
+  # The superuser/owner Postgres DSN used only by the migrate Job — a
+  # deliberately separate, higher-privilege credential from secrets.app
+  # above (see deploy/k8s/01-secret-admin-db.example.yaml for why).
+  adminDB:
+    create: false
+    existingSecretName: hupi-admin-db
+    adminDatabaseURL: ""
+
+# Non-secret provider configuration, rendered verbatim into the
+# hupi-providers ConfigMap and mounted at /app/config/providers.yaml —
+# see providers.yaml.example at the repo root and ARCHITECTURE.md §
+# Provider abstraction.
+providers:
+  config: |
+    active_chat_provider: main
+    active_consolidation_provider: main
+    active_grounding_provider: main
+    active_embedding_provider: main
+
+    providers:
+      main:
+        kind: openai_compat
+        vendor: openai
+        api_base: https://api.openai.com/v1
+        api_key_env: OPENAI_API_KEY
+        model: gpt-4.1
+
+# Runs once per install/upgrade, before the Deployment rolls, via Helm's
+# pre-install/pre-upgrade hooks — migrations are idempotent
+# (schema/migrate.sh's own doc comment) so re-running on every upgrade is
+# safe and correct, not just convenient.
+migrate:
+  enabled: true
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Deliberately no TLS/certificate fields: the cluster's own ingress
+# controller terminates TLS in front of this Service. Do not add a tls:
+# block or cert-manager annotations here.
+ingress:
+  enabled: true
+  className: nginx
+  host: hupi.example.com
+  annotations: {}
+
+resources: {}
+
+# Nightly consolidation + weekly/monthly/yearly rollups (no separate
+# schedule for rollups — cmd/hupi-consolidate computes those itself, see
+# docs/GAP_CLOSURE_PLAN.md §4.1).
+consolidate:
+  schedule: "0 3 * * *"
+
+# Weekly memory-probe self-check (ARCHITECTURE.md § Retrieval
+# observability). Probes must be hand-written against facts *your*
+# deployment's memory actually holds — never generated — so this chart
+# ships a placeholder that will fail until you replace it.
+selfcheck:
+  enabled: true
+  schedule: "0 6 * * 1"
+  probesConfig: |
+    - id: example-probe
+      query: "replace this with a question your memory should answer"
+      expect_substring: "replace this with the expected substring"
+      expect_min_gate: full
+
+# Optional (docs/ADMIN_UI.md), off by default. Auth is per-named-operator
+# (docs/GAP_CLOSURE_PLAN.md Phase 2), but every action it exposes is
+# destructive-adjacent, so even when enabled it gets no Ingress — reach
+# it via `kubectl port-forward` or your own restricted Ingress.
+adminUI:
+  enabled: false
+  listenAddr: "0.0.0.0:8788"

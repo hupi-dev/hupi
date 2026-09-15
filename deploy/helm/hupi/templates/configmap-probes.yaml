@@ -1,0 +1,11 @@
+{{- if .Values.selfcheck.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hupi.fullname" . }}-probes
+  labels:
+    {{- include "hupi.labels" . | nindent 4 }}
+data:
+  probes.yaml: |
+{{ .Values.selfcheck.probesConfig | indent 4 }}
+{{- end }}

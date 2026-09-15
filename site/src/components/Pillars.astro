@@ -1,0 +1,51 @@
+---
+const pillars = [
+  {
+    title: 'Provider-independence',
+    body:
+      "Switch from GPT to Claude to a locally hosted model — your memory doesn't move or need re-indexing beyond a one-time re-embed, because it's stored as plain decrypted text and metadata, not tied to any one vendor's format.",
+    icon: 'M4 12h16M4 12l4-4M4 12l4 4M20 12l-4-4M20 12l-4 4',
+  },
+  {
+    title: 'Integrity over convenience',
+    body:
+      "Every “memory” the system asserts as fact is independently double-checked against its source text before being trusted. The system is designed to be honest about what it doesn't know, rather than confidently making things up about your own history.",
+    icon: 'M12 4l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V7l7-3z',
+  },
+  {
+    title: 'Auditability',
+    body:
+      'Every retrieval decision is recorded. You can ask, for any past AI response, "what exactly did it remember, and from where" and get a real, decryptable answer — not a guess.',
+    icon: 'M9 12h6M9 16h6M9 8h6M6 4h12v16l-3-2-3 2-3-2-3 2V4z',
+  },
+];
+---
+
+<section class="border-b border-white/5 bg-navy-950/40">
+  <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
+    <div class="max-w-2xl">
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">
+        Three pillars
+      </h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        What HUPI is built around.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-8 md:grid-cols-3">
+      {
+        pillars.map((p) => (
+          <div class="flex flex-col">
+            <div class="flex h-11 w-11 items-center justify-center rounded-lg border border-ember-500/30 bg-ember-500/10 text-ember-500">
+              <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                <path d={p.icon} stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </div>
+            <h3 class="mt-4 text-lg font-semibold text-fog-100">{p.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">{p.body}</p>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>

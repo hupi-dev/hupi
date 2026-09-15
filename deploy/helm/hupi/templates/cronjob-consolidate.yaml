@@ -1,0 +1,38 @@
+# Nightly consolidation for the previous day, across every active scope.
+# Also runs weekly/monthly/yearly rollups automatically when the date
+# being consolidated crosses one of those boundaries — no separate cron
+# entry needed (cmd/hupi-consolidate/main.go's own doc comment, and
+# docs/GAP_CLOSURE_PLAN.md §4.1).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "hupi.fullname" . }}-consolidate
+  labels:
+    {{- include "hupi.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.consolidate.schedule | quote }}
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: consolidate
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["hupi-consolidate"]
+              env:
+                - name: HUPI_PROVIDERS_CONFIG
+                  value: "/app/config/providers.yaml"
+              envFrom:
+                - secretRef:
+                    name: {{ include "hupi.appSecretName" . }}
+              volumeMounts:
+                - name: providers-config
+                  mountPath: /app/config
+                  readOnly: true
+          volumes:
+            - name: providers-config
+              configMap:
+                name: {{ include "hupi.fullname" . }}-providers

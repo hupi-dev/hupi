@@ -1,0 +1,46 @@
+# Optional: the admin UI (docs/ADMIN_UI.md), now backed by named-operator
+# auth (Phase 2 of docs/GAP_CLOSURE_PLAN.md) rather than a single shared
+# token, so per-actor audit attribution works even here. Still deliberately
+# not given an Ingress by default — every action it exposes is
+# destructive-adjacent (correct/forget/export/import/rotate), so reach it
+# via `kubectl port-forward svc/hupi-admin-ui 8788:80` or a
+# network-policy-restricted Ingress of your own, not the public one.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hupi-admin-ui
+  labels:
+    app: hupi-admin-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hupi-admin-ui
+  template:
+    metadata:
+      labels:
+        app: hupi-admin-ui
+    spec:
+      containers:
+        - name: hupi-admin-ui
+          image: sujithsamuel/hupi:latest
+          command: ["hupi-admin-ui"]
+          ports:
+            - containerPort: 8788
+              name: http
+          env:
+            - name: HUPI_ADMIN_UI_LISTEN_ADDR
+              value: "0.0.0.0:8788"
+            - name: HUPI_PROVIDERS_CONFIG
+              value: "/app/config/providers.yaml"
+          envFrom:
+            - secretRef:
+                name: hupi-app
+          volumeMounts:
+            - name: providers-config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: providers-config
+          configMap:
+            name: hupi-providers

@@ -1,0 +1,53 @@
+---
+const layers = [
+  {
+    title: 'Scope filtering',
+    body:
+      'Built into every query the application makes. Even with a leaked API key, an attacker can only act as the user that key belongs to — they see that user’s private memory and whatever teams that user belongs to, nothing else.',
+  },
+  {
+    title: 'Row-level security',
+    body:
+      'Enforced by Postgres itself, independent of the application code. Even if a future bug in the application forgets to filter a query correctly, the database refuses to return rows outside the requesting session’s declared scope — a second, independent safety net, verified with tests that deliberately try to break it.',
+  },
+  {
+    title: 'Per-team encryption keys',
+    body:
+      'Every team’s data is encrypted separately. Someone with raw access to the encrypted database contents cannot read any team’s data without that specific team’s key — a compromised key exposes only that one team, not the whole deployment.',
+  },
+  {
+    title: 'Insert-only audit log',
+    body:
+      'Every write, retrieval, investigation, and admin action lands in the same audit_log table, attributed to a named operator rather than a shared credential. It’s insert-only for the running application by design, so an attacker who compromises the app’s own database credential still can’t erase their own trail from it.',
+  },
+];
+---
+
+<section id="security" class="border-b border-white/5 bg-navy-950/40">
+  <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
+    <div class="max-w-2xl">
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">
+        Security &amp; multi-tenancy
+      </h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        What actually protects you if a key leaks or a database is compromised.
+      </p>
+      <p class="mt-4 leading-relaxed text-fog-300">
+        HUPI assumes any one layer can fail, so it doesn't rely on a single one. Here's what
+        each independent layer actually does.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-px overflow-hidden rounded-xl border border-white/10 bg-white/5 sm:grid-cols-2">
+      {
+        layers.map((layer, i) => (
+          <div class="bg-navy-950 p-6 sm:p-8">
+            <span class="font-mono-tight text-xs text-ember-500">0{i + 1}</span>
+            <h3 class="mt-2 text-lg font-semibold text-fog-100">{layer.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">{layer.body}</p>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>

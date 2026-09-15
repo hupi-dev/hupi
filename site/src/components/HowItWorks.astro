@@ -1,0 +1,23 @@
+---
+import FlowDiagram from '../islands/FlowDiagram.jsx';
+---
+
+<section id="how-it-works" class="border-b border-white/5">
+  <div class="mx-auto max-w-5xl px-6 py-20 sm:py-28">
+    <div class="max-w-2xl">
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">
+        How it works
+      </h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        Five steps, running quietly behind every conversation.
+      </p>
+      <p class="mt-4 leading-relaxed text-fog-300">
+        Click a step, or let it cycle on its own.
+      </p>
+    </div>
+
+    <div class="mt-12">
+      <FlowDiagram client:visible />
+    </div>
+  </div>
+</section>

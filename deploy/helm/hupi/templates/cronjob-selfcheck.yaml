@@ -1,0 +1,46 @@
+{{- if .Values.selfcheck.enabled }}
+# Weekly memory-probe self-check (ARCHITECTURE.md § Retrieval
+# observability). Non-zero exit on any failed probe surfaces as a failed
+# Job, so ordinary Kubernetes-native alerting on Job failures is enough.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "hupi.fullname" . }}-selfcheck
+  labels:
+    {{- include "hupi.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.selfcheck.schedule | quote }}
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: selfcheck
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["hupi-selfcheck", "/app/config/probes.yaml"]
+              env:
+                - name: HUPI_PROVIDERS_CONFIG
+                  value: "/app/config/providers.yaml"
+              envFrom:
+                - secretRef:
+                    name: {{ include "hupi.appSecretName" . }}
+              volumeMounts:
+                - name: providers-config
+                  mountPath: /app/config/providers.yaml
+                  subPath: providers.yaml
+                  readOnly: true
+                - name: probes-config
+                  mountPath: /app/config/probes.yaml
+                  subPath: probes.yaml
+                  readOnly: true
+          volumes:
+            - name: providers-config
+              configMap:
+                name: {{ include "hupi.fullname" . }}-providers
+            - name: probes-config
+              configMap:
+                name: {{ include "hupi.fullname" . }}-probes
+{{- end }}

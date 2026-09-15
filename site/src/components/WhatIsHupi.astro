@@ -1,0 +1,47 @@
+---
+---
+
+<section class="border-b border-white/5">
+  <div class="mx-auto grid max-w-6xl gap-12 px-6 py-20 sm:py-28 md:grid-cols-2 md:items-center">
+    <div>
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">What HUPI is</h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        Point your existing client at HUPI instead of the vendor. That's the integration.
+      </p>
+      <p class="mt-5 leading-relaxed text-fog-300">
+        HUPI is a small self-hosted server that speaks the standard OpenAI-compatible chat
+        API on both sides. Change your client's <code class="font-mono-tight rounded bg-navy-800 px-1.5 py-0.5 text-ember-400">base_url</code> to
+        point at HUPI instead of OpenAI, Anthropic, or whichever vendor you use today —
+        nothing else in your application changes.
+      </p>
+      <p class="mt-4 leading-relaxed text-fog-300">
+        Underneath, HUPI enriches every turn with relevant memory before forwarding the
+        request to whichever real LLM vendor is actually configured, and durably records
+        the exchange afterward so future turns can draw on it.
+      </p>
+    </div>
+
+    <div class="rounded-xl border border-white/10 bg-navy-900/70 p-6 shadow-2xl shadow-black/40">
+      <p class="font-mono-tight mb-3 text-xs text-fog-700">before</p>
+      <div class="font-mono-tight rounded-lg border border-white/10 bg-ink px-4 py-3 text-sm text-fog-300">
+        base_url = <span class="text-fog-100">"https://api.openai.com/v1"</span>
+      </div>
+
+      <div class="my-4 flex items-center gap-3 text-fog-700">
+        <span class="h-px flex-1 bg-white/10"></span>
+        <span class="text-xs uppercase tracking-widest">one line changes</span>
+        <span class="h-px flex-1 bg-white/10"></span>
+      </div>
+
+      <p class="font-mono-tight mb-3 text-xs text-fog-700">after</p>
+      <div class="font-mono-tight rounded-lg border border-ember-500/30 bg-ink px-4 py-3 text-sm text-fog-300">
+        base_url = <span class="text-ember-400">"https://your-hupi-host/v1"</span>
+      </div>
+
+      <p class="mt-5 text-xs leading-relaxed text-fog-700">
+        Your client, prompts, and application code stay exactly as they are. HUPI forwards
+        each request to the LLM vendor you've configured in <code class="font-mono-tight">providers.yaml</code>.
+      </p>
+    </div>
+  </div>
+</section>

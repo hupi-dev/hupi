@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hupi.local/spec/episode.schema.json",
+  "title": "HUPI Episode Record",
+  "type": "object",
+  "required": ["id", "ts", "type", "provider", "hash"],
+  "properties": {
+    "id": {"type": "string", "description": "ULID/UUID, monotonically sortable"},
+    "ts": {"type": "string", "format": "date-time"},
+    "type": {"type": "string", "enum": ["interaction", "note", "event", "feedback"]},
+    "refers_to": {"type": "string", "description": "episode id this record gives feedback on; required when type=feedback"},
+    "rating": {"type": "string", "enum": ["memory_correct", "memory_wrong", "memory_missing"], "description": "used when type=feedback"},
+    "note": {"type": "string", "description": "free-text, used when type=feedback"},
+    "memory_gate": {"type": "string", "enum": ["skipped", "partial", "full"], "description": "what the retrieval engine decided for this turn"},
+    "retrieved_summary_ids": {"type": "array", "items": {"type": "string"}},
+    "retrieved_entity_ids": {"type": "array", "items": {"type": "string"}},
+    "retrieved_episode_ids": {"type": "array", "items": {"type": "string"}, "description": "other high-importance episodes matched by vector search, see docs/DESIGN_VS_BUILT.md #3"},
+    "provider": {
+      "type": "object",
+      "required": ["vendor", "model"],
+      "properties": {
+        "vendor": {"type": "string"},
+        "model": {"type": "string"},
+        "endpoint": {"type": "string"}
+      }
+    },
+    "context_tags": {"type": "array", "items": {"type": "string"}},
+    "input_text": {"type": "string"},
+    "output_text": {"type": "string"},
+    "importance": {"type": "number", "minimum": 0, "maximum": 1},
+    "hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "supersedes": {"type": ["string", "null"]},
+    "externalized": {"type": "boolean", "default": false},
+    "truncated": {
+      "type": "boolean",
+      "default": false,
+      "description": "true if a streamed response was cut off before completion"
+    }
+  }
+}

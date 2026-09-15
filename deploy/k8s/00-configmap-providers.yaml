@@ -1,0 +1,23 @@
+# Non-secret provider configuration — vendor, base URL, model names,
+# and which env var name each profile's API key comes from (the key
+# itself lives in 02-secret-app.yaml, not here). Copy providers.yaml.example
+# and edit it, or edit the inline example below directly. See
+# ARCHITECTURE.md § Provider abstraction.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hupi-providers
+data:
+  providers.yaml: |
+    active_chat_provider: main
+    active_consolidation_provider: main
+    active_grounding_provider: main
+    active_embedding_provider: main
+
+    providers:
+      main:
+        kind: openai_compat
+        vendor: openai
+        api_base: https://api.openai.com/v1
+        api_key_env: OPENAI_API_KEY
+        model: gpt-4.1

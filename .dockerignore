@@ -1,0 +1,12 @@
+.git
+.gotmp
+bin/
+docs/
+memory/
+spec/
+*.md
+providers.yaml
+hupi.env
+hupi.dek.wrapped
+hupi.out
+hupi.pid

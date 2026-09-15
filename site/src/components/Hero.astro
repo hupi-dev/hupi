@@ -1,0 +1,48 @@
+---
+import { GITHUB_URL, DOCS_URL } from '../lib/links.js';
+---
+
+<section id="top" class="relative overflow-hidden border-b border-white/5">
+  <div class="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"></div>
+  <div
+    class="pointer-events-none absolute left-1/2 top-[-10rem] h-[28rem] w-[28rem] -translate-x-1/2 rounded-full bg-ember-600/20 blur-[120px]"
+    aria-hidden="true"
+  >
+  </div>
+
+  <div class="relative mx-auto max-w-4xl px-6 pb-24 pt-20 text-center sm:pt-28">
+    <p class="font-mono-tight mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-navy-800/60 px-4 py-1.5 text-xs uppercase tracking-widest text-fog-300">
+      Self-hosted memory infrastructure
+    </p>
+
+    <h1 class="text-balance text-4xl font-extrabold tracking-tight text-fog-100 sm:text-5xl md:text-6xl">
+      Long-term memory for your AI product,
+      <span class="text-ember-500">without the vendor lock-in.</span>
+    </h1>
+
+    <p class="text-balance mx-auto mt-6 max-w-2xl text-lg text-fog-300 sm:text-xl">
+      HUPI is a drop-in gateway that gives any OpenAI-API-compatible client durable,
+      fact-checked, and auditable memory across conversations — self-hosted, on your
+      own Postgres, with any LLM vendor you choose.
+    </p>
+
+    <div class="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
+      <a
+        href={GITHUB_URL}
+        class="w-full rounded-lg bg-ember-500 px-6 py-3 text-center text-base font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400 hover:shadow-ember-500/30 focus-visible:bg-ember-400 sm:w-auto"
+      >
+        View on GitHub
+      </a>
+      <a
+        href={DOCS_URL}
+        class="w-full rounded-lg border border-white/15 px-6 py-3 text-center text-base font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5 sm:w-auto"
+      >
+        Read the docs
+      </a>
+    </div>
+
+    <p class="mt-6 text-xs text-fog-700">
+      Open source · Docker, Kubernetes &amp; Helm ready · Bring your own Postgres
+    </p>
+  </div>
+</section>

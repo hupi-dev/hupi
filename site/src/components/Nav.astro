@@ -1,0 +1,39 @@
+---
+import { GITHUB_URL, DOCS_URL } from '../lib/links.js';
+---
+
+<header class="sticky top-0 z-50 border-b border-white/5 bg-ink/80 backdrop-blur">
+  <nav
+    class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4"
+    aria-label="Primary"
+  >
+    <a href="#top" class="flex items-center gap-2 text-lg font-bold tracking-tight text-fog-100">
+      <span class="flex h-7 w-7 items-center justify-center rounded-md bg-navy-700 text-ember-500">
+        <svg viewBox="0 0 32 32" class="h-4 w-4" aria-hidden="true">
+          <path
+            d="M9 7v18M23 7v18M9 16h14"
+            stroke="currentColor"
+            stroke-width="2.6"
+            stroke-linecap="round"
+            fill="none"
+          ></path>
+        </svg>
+      </span>
+      HUPI
+    </a>
+
+    <div class="hidden items-center gap-8 text-sm text-fog-300 md:flex">
+      <a href="#how-it-works" class="transition-colors hover:text-fog-100">How it works</a>
+      <a href="#security" class="transition-colors hover:text-fog-100">Security</a>
+      <a href="#deploy" class="transition-colors hover:text-fog-100">Deploy</a>
+      <a href={DOCS_URL} class="transition-colors hover:text-fog-100">Docs</a>
+    </div>
+
+    <a
+      href={GITHUB_URL}
+      class="rounded-md border border-white/10 px-3 py-1.5 text-sm font-medium text-fog-100 transition-colors hover:border-ember-500/60 hover:text-ember-400"
+    >
+      GitHub
+    </a>
+  </nav>
+</header>

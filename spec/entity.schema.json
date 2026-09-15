@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hupi.local/spec/entity.schema.json",
+  "title": "HUPI Entity Record",
+  "type": "object",
+  "required": ["id", "kind", "name"],
+  "properties": {
+    "id": {"type": "string", "description": "e.g. project:hupi, person:jane-doe"},
+    "kind": {"type": "string", "enum": ["person", "project", "preference", "skill", "place", "organization", "self_model"]},
+    "name": {"type": "string"},
+    "first_seen": {"type": "string", "format": "date"},
+    "last_updated": {"type": "string", "format": "date"},
+    "attributes": {"type": "object"}
+  }
+}

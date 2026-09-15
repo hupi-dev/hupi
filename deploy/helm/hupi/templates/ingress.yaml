@@ -1,0 +1,28 @@
+{{- if .Values.ingress.enabled }}
+# Deliberately no TLS/certificate config: the cluster's existing ingress
+# controller terminates TLS in front of this Service and routes plaintext
+# HTTP to it. Do not add a tls: block or cert-manager annotations here.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "hupi.fullname" . }}
+  labels:
+    {{- include "hupi.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "hupi.fullname" . }}
+                port:
+                  name: http
+{{- end }}

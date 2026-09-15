@@ -1,0 +1,64 @@
+{{- if .Values.adminUI.enabled }}
+# Optional (docs/ADMIN_UI.md). No Ingress by default — every action it
+# exposes is destructive-adjacent, so reach it via
+# `kubectl port-forward svc/{{ include "hupi.fullname" . }}-admin-ui 8788:80`
+# or a network-policy-restricted Ingress of your own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hupi.fullname" . }}-admin-ui
+  labels:
+    {{- include "hupi.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "hupi.name" . }}-admin-ui
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "hupi.name" . }}-admin-ui
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: hupi-admin-ui
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["hupi-admin-ui"]
+          ports:
+            - containerPort: 8788
+              name: http
+          env:
+            - name: HUPI_ADMIN_UI_LISTEN_ADDR
+              value: {{ .Values.adminUI.listenAddr | quote }}
+            - name: HUPI_PROVIDERS_CONFIG
+              value: "/app/config/providers.yaml"
+          envFrom:
+            - secretRef:
+                name: {{ include "hupi.appSecretName" . }}
+          volumeMounts:
+            - name: providers-config
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: providers-config
+          configMap:
+            name: {{ include "hupi.fullname" . }}-providers
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hupi.fullname" . }}-admin-ui
+  labels:
+    {{- include "hupi.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "hupi.name" . }}-admin-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}

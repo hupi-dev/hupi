@@ -1,0 +1,62 @@
+---
+const options = [
+  {
+    title: 'Docker',
+    body:
+      'One image contains every HUPI binary — the gateway runs as the default entrypoint, and the nightly consolidation job, self-check, export/import, and key-rotation tools all run from the same image via a command override. One thing to build, version, and scan.',
+  },
+  {
+    title: 'Kubernetes manifests',
+    body:
+      'Plain, numbered manifests under deploy/k8s/ — apply in order, including a migration Job, the gateway Deployment/Service/Ingress, and CronJobs for nightly consolidation and self-check.',
+  },
+  {
+    title: 'Helm chart',
+    body:
+      'The same resources, parameterized through values.yaml, with migrations wired in as a pre-install/pre-upgrade hook. Run helm template or --dry-run first to see exactly what it creates.',
+  },
+];
+---
+
+<section id="deploy" class="border-b border-white/5">
+  <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
+    <div class="max-w-2xl">
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">
+        Deploy your way
+      </h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        Self-hosted. Bring your own Postgres. Container-native.
+      </p>
+      <p class="mt-4 leading-relaxed text-fog-300">
+        There's no hosted-only version of HUPI to sign up for. Nothing here bundles a
+        database — you point HUPI at whatever Postgres (with the <code class="font-mono-tight rounded bg-navy-800 px-1.5 py-0.5 text-ember-400">pgvector</code> extension)
+        you already run or operate, and TLS is handled by whatever reverse proxy or
+        ingress controller already sits in front of your deployment.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-6 md:grid-cols-3">
+      {
+        options.map((o) => (
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-6">
+            <h3 class="text-lg font-semibold text-fog-100">{o.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">{o.body}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <div class="mt-8 rounded-xl border border-white/10 bg-ink p-6">
+      <p class="font-mono-tight text-xs text-fog-700">quick start</p>
+      <pre class="font-mono-tight mt-3 overflow-x-auto text-sm text-fog-300"><code>kubectl apply -f deploy/k8s/00-configmap-providers.yaml
+kubectl apply -f deploy/k8s/01-secret-admin-db.yaml -f deploy/k8s/02-secret-app.yaml
+kubectl apply -f deploy/k8s/03-migrate-job.yaml
+kubectl apply -f deploy/k8s/04-deployment.yaml -f deploy/k8s/05-service.yaml
+
+<span class="text-fog-700"># or, with Helm:</span>
+helm install hupi deploy/helm/hupi \
+  --set secrets.app.existingSecretName=hupi-app \
+  --set secrets.adminDB.existingSecretName=hupi-admin-db</code></pre>
+    </div>
+  </div>
+</section>

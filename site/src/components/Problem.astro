@@ -1,0 +1,47 @@
+---
+const points = [
+  {
+    label: '01',
+    title: 'Memory resets every session',
+    body:
+      "An AI's memory of a user normally disappears the moment a conversation ends, or gets capped by whatever fits in one context window — so your product either forgets, or pays to re-explain itself every time.",
+  },
+  {
+    label: '02',
+    title: 'One vendor’s memory feature, one vendor’s lock-in',
+    body:
+      'Bolt a memory feature onto a specific model provider and you’ve quietly tied your product’s entire history to that vendor — switching AI providers later means a data migration, not a config change.',
+  },
+  {
+    label: '03',
+    title: 'Rolling your own inherits every hard problem at once',
+    body:
+      'Building an ad hoc memory or RAG store for user data means you’re now also on the hook for encryption, multi-tenant isolation, and audit trails — from scratch, on your own timeline.',
+  },
+];
+---
+
+<section class="border-b border-white/5 bg-navy-950/40">
+  <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
+    <div class="max-w-2xl">
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">The problem</h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        Every team building on top of LLM APIs runs into the same wall.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-6 md:grid-cols-3">
+      {
+        points.map((p) => (
+          <div class="group rounded-xl border border-white/10 bg-navy-900/60 p-6 transition-colors hover:border-ember-500/30">
+            <span class="font-mono-tight text-sm text-fog-700 transition-colors group-hover:text-ember-500">
+              {p.label}
+            </span>
+            <h3 class="mt-3 text-lg font-semibold text-fog-100">{p.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">{p.body}</p>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>

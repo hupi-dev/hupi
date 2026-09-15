@@ -1,0 +1,23 @@
+# Run once per deploy, before rolling the Deployment forward — apply this
+# and wait for it to complete (kubectl wait --for=condition=complete) as
+# part of your release pipeline. Uses the superuser DSN (hupi-admin-db)
+# because schema/migrate.sh creates roles/extensions/tables that hupi_app
+# itself isn't privileged to create — see 01-secret-admin-db.example.yaml.
+# Re-running is safe: every migration is guarded by an "already applied"
+# probe query (schema/migrate.sh's own doc comment).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hupi-migrate
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: sujithsamuel/hupi:latest
+          command: ["/app/schema/migrate.sh"]
+          envFrom:
+            - secretRef:
+                name: hupi-admin-db

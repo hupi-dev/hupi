@@ -1,0 +1,39 @@
+# Copy to providers.yaml and fill in / adjust for your deployment.
+# See ARCHITECTURE.md § Provider abstraction for what each field means.
+# API keys are never written here directly — api_key_env names an
+# environment variable the gateway reads at startup instead.
+
+active_chat_provider: work-openai               # what you talk to day to day
+active_consolidation_provider: personal-claude  # what writes your memory — change rarely, on purpose
+active_grounding_provider: groq-fast            # optional — omit this line to reuse the consolidation profile
+active_embedding_provider: local-ollama
+
+providers:
+  work-openai:
+    kind: openai_compat        # openai_compat | anthropic
+    vendor: openai              # recorded on every episode's provider_vendor column
+    api_base: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4.1
+
+  personal-claude:
+    kind: anthropic
+    vendor: anthropic
+    api_base: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    api_version: "2023-06-01"
+    model: claude-sonnet-5
+
+  groq-fast:
+    kind: openai_compat
+    vendor: groq
+    api_base: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    model: llama-3.1-8b-instant  # grounding is a yes/no fact check per claim, not prose generation
+
+  local-ollama:
+    kind: openai_compat
+    vendor: ollama
+    api_base: http://localhost:11434/v1
+    api_key_env: ""             # unauthenticated local endpoint
+    model: nomic-embed-text

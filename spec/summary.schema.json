@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hupi.local/spec/summary.schema.json",
+  "title": "HUPI Summary Record",
+  "type": "object",
+  "required": ["id", "period", "level", "status", "summary", "key_facts", "grounding_checked"],
+  "properties": {
+    "id": {"type": "string", "description": "e.g. sum_2026-09-09_daily_v1, unique per version"},
+    "period": {"type": "string", "description": "ISO date, ISO week, YYYY-MM, or YYYY"},
+    "level": {"type": "string", "enum": ["daily", "weekly", "monthly", "yearly"]},
+    "status": {"type": "string", "enum": ["draft", "reviewed"], "default": "draft"},
+    "generated_by": {
+      "type": "object",
+      "properties": {
+        "vendor": {"type": "string"},
+        "model": {"type": "string"}
+      }
+    },
+    "source_episode_ids": {"type": "array", "items": {"type": "string"}},
+    "source_summary_periods": {"type": "array", "items": {"type": "string"}},
+    "summary": {"type": "string", "description": "free-text prose, for human skimming only, not treated as retrievable fact"},
+    "key_facts": {
+      "type": "array",
+      "description": "each entry must be traceable to source text; only grounded facts are used for retrieval",
+      "items": {
+        "type": "object",
+        "required": ["fact", "grounded"],
+        "properties": {
+          "fact": {"type": "string"},
+          "source_episode_ids": {"type": "array", "items": {"type": "string"}},
+          "grounded": {"type": "boolean", "description": "result of the post-generation grounding check"}
+        }
+      }
+    },
+    "entities_touched": {"type": "array", "items": {"type": "string"}},
+    "grounding_checked": {"type": "boolean", "default": false, "description": "whether the grounding-check pass has run on this record"},
+    "supersedes": {"type": ["string", "null"], "description": "id of the prior version this record corrects, if any"},
+    "correction_reason": {"type": ["string", "null"]}
+  }
+}

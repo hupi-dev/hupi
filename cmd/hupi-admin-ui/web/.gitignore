@@ -1,0 +1,11 @@
+node_modules/
+
+# dist/ is the npm build output that Go embeds (see cmd/hupi-admin-ui/assets.go).
+# A minimal placeholder dist/index.html is committed so `go build
+# ./cmd/hupi-admin-ui` never fails with a go:embed error on a fresh clone
+# that hasn't run `npm run build` yet. Real build output (hashed JS/CSS
+# bundles, the real index.html) is produced locally/in CI by `npm run
+# build` and is NOT meant to be committed back — only the placeholder is
+# tracked.
+dist/*
+!dist/index.html

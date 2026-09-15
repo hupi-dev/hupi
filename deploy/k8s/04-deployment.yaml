@@ -1,0 +1,58 @@
+# The gateway itself. HUPI_LISTEN_ADDR must be set to a non-loopback
+# address here — cmd/hupi/main.go defaults to 127.0.0.1:8787, which is
+# unreachable from the Service in front of it (see the Dockerfile's
+# EXPOSE comment). HUPI_REQUIRE_AUTH=true because this is a real
+# deployment, not a laptop default (cmd/hupi/main.go's own doc comment
+# on that flag).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hupi
+  labels:
+    app: hupi
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hupi
+  template:
+    metadata:
+      labels:
+        app: hupi
+    spec:
+      containers:
+        - name: hupi
+          image: sujithsamuel/hupi:latest
+          ports:
+            - containerPort: 8787
+              name: http
+          env:
+            - name: HUPI_LISTEN_ADDR
+              value: "0.0.0.0:8787"
+            - name: HUPI_REQUIRE_AUTH
+              value: "true"
+            - name: HUPI_PROVIDERS_CONFIG
+              value: "/app/config/providers.yaml"
+          envFrom:
+            - secretRef:
+                name: hupi-app
+          volumeMounts:
+            - name: providers-config
+              mountPath: /app/config
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: providers-config
+          configMap:
+            name: hupi-providers

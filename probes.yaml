@@ -1,0 +1,12 @@
+# Example memory probes for hupi-selfcheck (ARCHITECTURE.md § Retrieval
+# observability). Hand-written against facts you know are durably true —
+# don't generate these, the point is an independent check on retrieval.
+- id: hupi-working-directory
+  query: "what's the working directory for the HUPI project?"
+  expect_substring: "~/repos/hupi"
+  expect_min_gate: full
+
+- id: hupi-vector-index-decision
+  query: "what did we decide to use for the vector index?"
+  expect_substring: "pgvector"
+  expect_min_gate: full

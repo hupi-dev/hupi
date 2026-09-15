@@ -1,0 +1,16 @@
+# EXAMPLE ONLY — copy to 07-configmap-probes.yaml and replace with
+# probes written against facts *your* deployment's memory actually
+# holds (see probes.yaml at the repo root and its own comment: these
+# must be hand-written against known-true facts, never generated, since
+# the point is an independent check on retrieval — ARCHITECTURE.md §
+# Retrieval observability).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hupi-probes
+data:
+  probes.yaml: |
+    - id: example-probe
+      query: "replace this with a question your memory should answer"
+      expect_substring: "replace this with the expected substring"
+      expect_min_gate: full

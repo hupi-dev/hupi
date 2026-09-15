@@ -1,0 +1,22 @@
+# Deliberately no TLS/certificate config here: this cluster's existing
+# ingress controller terminates TLS in front of this Service and routes
+# plaintext HTTP to it — per the user's explicit direction, do not add a
+# tls: block or cert-manager annotations to this manifest. Edit `host`
+# and the ingressClassName below to match your controller.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hupi
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: hupi.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hupi
+                port:
+                  name: http

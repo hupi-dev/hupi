@@ -1,0 +1,51 @@
+---
+import { GITHUB_URL, DOCS_URL, CONTACT_EMAIL, LICENSE_LABEL } from '../lib/links.js';
+const year = new Date().getFullYear();
+---
+
+<section class="relative overflow-hidden border-b border-white/5">
+  <div
+    class="pointer-events-none absolute left-1/2 top-1/2 h-[24rem] w-[24rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-ember-600/15 blur-[120px]"
+    aria-hidden="true"
+  >
+  </div>
+  <div class="relative mx-auto max-w-3xl px-6 py-24 text-center sm:py-28">
+    <p class="text-balance text-2xl font-bold text-fog-100 sm:text-3xl">
+      Give your AI product memory it doesn't have to trust blindly.
+    </p>
+    <p class="mx-auto mt-4 max-w-xl text-fog-300">
+      Self-hosted, open, and provider-independent — read the code, run it on your own
+      infrastructure, point your own Postgres at it.
+    </p>
+    <div class="mt-8 flex flex-col items-center justify-center gap-4 sm:flex-row">
+      <a
+        href={GITHUB_URL}
+        class="w-full rounded-lg bg-ember-500 px-6 py-3 text-center text-base font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400 sm:w-auto"
+      >
+        View on GitHub
+      </a>
+      <a
+        href={DOCS_URL}
+        class="w-full rounded-lg border border-white/15 px-6 py-3 text-center text-base font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5 sm:w-auto"
+      >
+        Read the docs
+      </a>
+    </div>
+  </div>
+</section>
+
+<footer class="mx-auto max-w-6xl px-6 py-10 text-sm text-fog-700">
+  <div class="flex flex-col items-center gap-4 sm:flex-row sm:justify-between">
+    <p>&copy; {year} HUPI. All rights reserved.</p>
+    <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
+      <a href={GITHUB_URL} class="transition-colors hover:text-fog-300">GitHub</a>
+      <a href={DOCS_URL} class="transition-colors hover:text-fog-300">Docs</a>
+      <a href={`mailto:${CONTACT_EMAIL}`} class="transition-colors hover:text-fog-300">
+        {CONTACT_EMAIL}
+      </a>
+      <span>
+        License: <a href={GITHUB_URL} class="underline decoration-dotted hover:text-fog-300">{LICENSE_LABEL}</a>
+      </span>
+    </div>
+  </div>
+</footer>
