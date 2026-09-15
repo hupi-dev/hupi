@@ -1,0 +1,95 @@
+{
+  "name": "hupi-vscode",
+  "displayName": "HUPI",
+  "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "hupi",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "HUPI",
+      "properties": {
+        "hupi.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:8787",
+          "description": "Root URL of your HUPI gateway (cmd/hupi), no trailing slash and no /v1 suffix — e.g. http://localhost:8787 or https://your-hupi-host."
+        },
+        "hupi.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model/profile name to request, matching a profile in your HUPI deployment's providers.yaml. Leave blank to let HUPI use its default chat provider."
+        },
+        "hupi.teamId": {
+          "type": "string",
+          "default": "",
+          "description": "If set, routes requests through HUPI's team endpoint (/v1/team/{id}/chat/completions) instead of the private one — for a team-shared HUPI deployment (Tier 3)."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "hupi.setApiKey",
+        "title": "HUPI: Set API Key"
+      },
+      {
+        "command": "hupi.inlineEdit",
+        "title": "HUPI: Inline Edit"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "hupi.inlineEdit",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "hupi",
+          "title": "HUPI",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "hupi": [
+        {
+          "type": "webview",
+          "id": "hupi.chatView",
+          "name": "Chat"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "smoke": "tsx src/smoke-test.ts"
+  },
+  "dependencies": {
+    "openai": "^4.104.0",
+    "marked": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.17.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

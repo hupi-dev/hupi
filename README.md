@@ -43,6 +43,7 @@ schema/               numbered Postgres migrations, applied in order
 deploy/k8s/           plain Kubernetes manifests
 deploy/helm/hupi/     the same, as a Helm chart
 site/                 marketing/landing website (Astro + Tailwind) — see site/README.md
+vscode-extension/     VS Code extension: chat sidebar + inline edit, backed by HUPI
 docs/                 design docs, install guide, API reference, code guide
 install.sh            interactive/scriptable bare-metal installer
 Dockerfile            one image containing every Go binary above
@@ -57,6 +58,12 @@ API backend, with its React frontend in
 [cmd/hupi-admin-ui/web/](cmd/hupi-admin-ui/web/). The frontend is built
 separately (`npm run build`) and embedded into the Go binary via
 `go:embed`; see [docs/ADMIN_UI.md](docs/ADMIN_UI.md) for the full picture.
+
+**VS Code extension code**: [vscode-extension/](vscode-extension/) — a
+plain VS Code extension (not a fork of VS Code), using the official
+`openai` npm SDK pointed at a HUPI gateway instead of a vendor directly.
+See [vscode-extension/README.md](vscode-extension/README.md) for setup and
+how to run it locally.
 
 ## Getting started
 
@@ -81,7 +88,7 @@ See [docs/INSTALL.md](docs/INSTALL.md) for the full manual walkthrough
 
 ## Status
 
-This is a private, in-development project — see
+This is an in-development project — see
 [docs/GAP_CLOSURE_PLAN.md](docs/GAP_CLOSURE_PLAN.md) for what's been closed
 recently and [docs/DESIGN_VS_BUILT.md](docs/DESIGN_VS_BUILT.md) for an
 honest accounting of design vs. what's actually implemented. Licensed under
