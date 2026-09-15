@@ -84,5 +84,5 @@ See [docs/INSTALL.md](docs/INSTALL.md) for the full manual walkthrough
 This is a private, in-development project — see
 [docs/GAP_CLOSURE_PLAN.md](docs/GAP_CLOSURE_PLAN.md) for what's been closed
 recently and [docs/DESIGN_VS_BUILT.md](docs/DESIGN_VS_BUILT.md) for an
-honest accounting of design vs. what's actually implemented. No `LICENSE`
-file exists yet.
+honest accounting of design vs. what's actually implemented. Licensed under
+the [MIT License](LICENSE).

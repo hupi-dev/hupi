@@ -67,11 +67,10 @@ Centralized in `src/lib/links.js`:
   site exists yet, so this points into the repo itself — same visibility
   caveat as `GITHUB_URL` above applies here too).
 - `CONTACT_EMAIL` — currently `hello@REPLACE_ME.example`.
-- `LICENSE_LABEL` — currently `see repository` (linking to `GITHUB_URL`);
-  no `LICENSE` file existed at the repository root at the time this site
-  was built, so no specific license is asserted. Once one exists, change
-  this to the real license name (e.g. `MIT`). Shown in the footer
-  (`src/components/FinalCta.astro`).
+
+`LICENSE_LABEL`/`LICENSE_URL` are resolved — the repository root now has a
+real `LICENSE` file (MIT), linked from the footer
+(`src/components/FinalCta.astro`).
 
 `astro.config.mjs`'s `site` field (`https://example.com/REPLACE_ME`) should
 also be updated to the real production URL once known — it's only used for

@@ -1,5 +1,5 @@
 ---
-import { GITHUB_URL, DOCS_URL, CONTACT_EMAIL, LICENSE_LABEL } from '../lib/links.js';
+import { GITHUB_URL, DOCS_URL, CONTACT_EMAIL, LICENSE_LABEL, LICENSE_URL } from '../lib/links.js';
 const year = new Date().getFullYear();
 ---
 
@@ -36,7 +36,7 @@ const year = new Date().getFullYear();
 
 <footer class="mx-auto max-w-6xl px-6 py-10 text-sm text-fog-700">
   <div class="flex flex-col items-center gap-4 sm:flex-row sm:justify-between">
-    <p>&copy; {year} HUPI. All rights reserved.</p>
+    <p>&copy; {year} HUPI. Open source under the MIT License.</p>
     <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
       <a href={GITHUB_URL} class="transition-colors hover:text-fog-300">GitHub</a>
       <a href={DOCS_URL} class="transition-colors hover:text-fog-300">Docs</a>
@@ -44,7 +44,7 @@ const year = new Date().getFullYear();
         {CONTACT_EMAIL}
       </a>
       <span>
-        License: <a href={GITHUB_URL} class="underline decoration-dotted hover:text-fog-300">{LICENSE_LABEL}</a>
+        License: <a href={LICENSE_URL} class="underline decoration-dotted hover:text-fog-300">{LICENSE_LABEL}</a>
       </span>
     </div>
   </div>

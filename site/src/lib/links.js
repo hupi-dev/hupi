@@ -14,9 +14,5 @@ export const DOCS_URL = `${GITHUB_URL}/tree/main/docs`;
 // TODO(replace-before-launch): real contact address.
 export const CONTACT_EMAIL = 'hello@REPLACE_ME.example';
 
-// No LICENSE file was found at the repository root at the time this site
-// was built, so no specific license is asserted here — that text renders
-// on the live page, and showing visitors an internal "unconfirmed" note
-// would be its own bug. Once a real LICENSE file exists, replace this with
-// the actual license name (e.g. 'MIT').
-export const LICENSE_LABEL = 'see repository';
+export const LICENSE_LABEL = 'MIT';
+export const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;
