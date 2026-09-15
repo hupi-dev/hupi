@@ -1,0 +1,28 @@
+---
+---
+
+<section id="demo" class="border-b border-white/5 bg-navy-950/40">
+  <div class="mx-auto max-w-4xl px-6 py-20 sm:py-28">
+    <div class="text-center">
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">See it work</h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        A real terminal session against a live HUPI gateway — not a mockup.
+      </p>
+      <p class="mx-auto mt-4 max-w-2xl leading-relaxed text-fog-300">
+        One request, no mention of "Aurora" in it — HUPI recalls what it already knew, injects it
+        before forwarding to the model, and logs the retrieval so it's auditable afterward.
+      </p>
+    </div>
+
+    <div class="mt-10 overflow-hidden rounded-xl border border-white/10 bg-ink shadow-2xl shadow-black/40">
+      <img
+        src="/demo.gif"
+        alt="Terminal recording: a curl request to HUPI's chat completions endpoint returns a response referencing memory that wasn't in the request, followed by hupi-audit showing the retrieval was logged with a full-confidence gate."
+        width="1102"
+        height="567"
+        loading="lazy"
+        class="w-full"
+      />
+    </div>
+  </div>
+</section>
