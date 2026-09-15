@@ -48,22 +48,24 @@ function required. Deploy it with any of:
   docker run --rm -p 8080:80 hupi-site
   ```
 
-  A multi-stage build (`node:20-alpine` to build, `nginx:alpine` to serve
-  the static output) — see `Dockerfile` in this directory. This is an
-  independent, optional deployment path; it doesn't replace or require
-  Vercel/Netlify, and isn't wired into the main HUPI `deploy/k8s/` or Helm
-  chart (this site has no dependency on Postgres or anything else HUPI
-  itself needs — it's a static page).
+  A multi-stage build (`node:22-alpine` to build — Astro requires Node
+  >=22.12 — `nginx:alpine` to serve the static output) — see `Dockerfile`
+  in this directory. This is an independent, optional deployment path; it
+  doesn't replace or require Vercel/Netlify, and isn't wired into the main
+  HUPI `deploy/k8s/` or Helm chart (this site has no dependency on
+  Postgres or anything else HUPI itself needs — it's a static page).
 
 ## Placeholders to replace before this goes live
 
 Centralized in `src/lib/links.js`:
 
-- `GITHUB_URL` — currently `https://github.com/REPLACE_ME/hupi`. Every
-  other placeholder below is derived from or paired with this one.
+- `GITHUB_URL` — set to `https://github.com/samuel-sujith/hupi`. **That
+  repo is currently private** — the "View on GitHub" CTA will 404 for
+  anyone without access until it's made public. Make it public before
+  pointing real traffic at this site, or swap this link out temporarily.
 - `DOCS_URL` — currently `${GITHUB_URL}/tree/main/docs` (no standalone docs
-  site exists yet, so this points into the repo itself; update once one
-  does).
+  site exists yet, so this points into the repo itself — same visibility
+  caveat as `GITHUB_URL` above applies here too).
 - `CONTACT_EMAIL` — currently `hello@REPLACE_ME.example`.
 - `LICENSE_LABEL` — currently `see repository` (linking to `GITHUB_URL`);
   no `LICENSE` file existed at the repository root at the time this site

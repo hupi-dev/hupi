@@ -1,8 +1,7 @@
 // Central place for placeholder values that a human must replace before
 // this site goes live. Nothing else in the codebase should hardcode these.
 
-// TODO(replace-before-launch): real public repository URL.
-export const GITHUB_URL = 'https://github.com/REPLACE_ME/hupi';
+export const GITHUB_URL = 'https://github.com/samuel-sujith/hupi';
 
 // TODO(replace-before-launch): point at a real docs site/route once one
 // exists. Deliberately not a same-origin "/docs" path — this site has no
