@@ -1,6 +1,11 @@
 import * as esbuild from 'esbuild';
 
 const watch = process.argv.includes('--watch');
+// Minify for real (packaged) builds; skip it under --watch so stack traces
+// during local F5 development stay readable without needing sourcemaps
+// open. This also meaningfully shrinks the .vsix (extension.js bundles the
+// whole `openai` SDK — minification is most of what keeps that in check).
+const minify = !watch;
 
 // Two separate bundles: the extension host runs in Node and must not bundle
 // `vscode` (it's provided by the host at runtime); the webview runs in a
@@ -15,6 +20,7 @@ const extensionConfig = {
   target: 'node18',
   external: ['vscode'],
   sourcemap: true,
+  minify,
 };
 
 const webviewConfig = {
@@ -25,6 +31,7 @@ const webviewConfig = {
   format: 'iife',
   target: 'es2022',
   sourcemap: true,
+  minify,
 };
 
 async function run() {

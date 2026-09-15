@@ -50,9 +50,11 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
 - Inline autocomplete / Tab-style ghost text completions.
 - Agentic multi-file edits (planning and editing across several files
   autonomously).
-- Marketplace publishing — for now this runs from source via VS Code's
-  Extension Development Host, not an installable `.vsix`/Marketplace
-  listing.
+- Marketplace publishing — not done yet, though the extension is now
+  packaging-ready (`npm run package` produces an installable `.vsix`,
+  see [vscode-extension/README.md § Publishing](../vscode-extension/README.md#publishing-to-the-marketplace)
+  for the full walkthrough). Actually publishing needs a human-verified
+  Marketplace publisher account, which no agent can create.
 
 ## Setup
 

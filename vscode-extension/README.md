@@ -58,6 +58,33 @@ then try the chat sidebar and select-some-code-then-Ctrl+K.
 reload the Extension Development Host window (`Ctrl+R`/`Cmd+R` in it) to
 pick up changes.
 
+## Publishing to the Marketplace
+
+Not published yet. To do it:
+
+1. **Create a publisher** at https://marketplace.visualstudio.com/manage
+   (sign in with a Microsoft account) — the publisher ID must match
+   `package.json`'s `"publisher"` field (currently `hupi`; change it here
+   first if that ID is taken or you want a different one).
+2. **Get a Personal Access Token** from https://dev.azure.com — an
+   organization → User Settings → Personal Access Tokens → New Token,
+   scope: **Marketplace: Manage**.
+3. `npx vsce login <publisher>` and paste the token when prompted (only
+   needed once per machine).
+4. `npm run package` — builds and produces `hupi-vscode-<version>.vsix`
+   locally, with no network calls. **Install and try this file yourself
+   first**: Extensions view → `...` menu → "Install from VSIX...". This is
+   the actual artifact that would ship, so it's the last real check before
+   anyone else sees it.
+5. `npm run publish` — builds and pushes the current version live on the
+   Marketplace. Bump `"version"` in `package.json` (and add a
+   `CHANGELOG.md` entry) before publishing again — the Marketplace
+   rejects re-publishing the same version number.
+
+None of steps 1-2 can be done by an agent — they need your own Microsoft/
+Azure identity and a real payment-free but human-verified account. Steps
+3-5 are plain CLI commands once those exist.
+
 ## Verification
 
 ```bash
