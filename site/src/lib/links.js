@@ -11,7 +11,7 @@ export const GITHUB_URL = 'https://github.com/samuel-sujith/hupi';
 // GITHUB_URL itself already is: replace GITHUB_URL and this stays correct.
 export const DOCS_URL = `${GITHUB_URL}/tree/main/docs`;
 
-export const CONTACT_EMAIL = 'samuel.sujith@gmail.com';
+export const CONTACT_EMAIL = 'work@hupi.dev';
 
 export const LICENSE_LABEL = 'MIT';
 export const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;
