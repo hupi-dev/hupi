@@ -28,7 +28,10 @@ AI tools at instead of pointing them directly at OpenAI, Anthropic, or
 whichever vendor you use. From the outside, it looks exactly like a
 normal AI API. Underneath, every turn is enriched with relevant memories
 before being forwarded to the real AI, and recorded afterward for future
-turns to draw on.
+turns to draw on. One concrete example of an "existing AI tool" pointed at
+HUPI this way: the VS Code extension
+([VSCODE_EXTENSION.md](VSCODE_EXTENSION.md)) — a chat sidebar and inline
+code editing inside VS Code, backed by HUPI instead of a vendor directly.
 
 The three properties this is built around:
 

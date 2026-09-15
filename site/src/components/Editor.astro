@@ -1,0 +1,77 @@
+---
+import { GITHUB_URL } from '../lib/links.js';
+
+const features = [
+  {
+    title: 'Chat sidebar',
+    body:
+      'A HUPI panel in the activity bar. Every message automatically includes your active file or current selection as context — ask questions about your codebase without pasting anything in.',
+  },
+  {
+    title: 'Inline edit — Ctrl+K / Cmd+K',
+    body:
+      'Select some code, describe the change, and HUPI rewrites it. You get a real diff preview — original vs. proposed — before anything touches your file. Accept or reject, nothing applies silently.',
+  },
+];
+---
+
+<section id="editor" class="border-b border-white/5 bg-navy-950/40">
+  <div class="mx-auto grid max-w-6xl gap-12 px-6 py-20 sm:py-28 md:grid-cols-2 md:items-center">
+    <div>
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">In your editor</h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        A Cursor-style chat and inline edit for VS Code — backed by your own HUPI, not a vendor.
+      </p>
+      <p class="mt-5 leading-relaxed text-fog-300">
+        The HUPI VS Code extension is a plain extension built on the public VS Code API —
+        not a fork of the editor — so it stays compatible with every VS Code release with no
+        rebasing burden. It talks to HUPI the same way any other client does: the official
+        OpenAI SDK, pointed at your gateway's <code class="font-mono-tight rounded bg-navy-800 px-1.5 py-0.5 text-ember-400">base_url</code> instead of a vendor's.
+      </p>
+      <p class="mt-4 leading-relaxed text-fog-300">
+        Every conversation you have in the sidebar, and every inline edit you accept, is
+        captured, grounded, and retrievable the same way any other HUPI-backed
+        conversation is — the same memory your other tools already build on.
+      </p>
+    </div>
+
+    <div class="rounded-xl border border-white/10 bg-navy-900/70 p-6 shadow-2xl shadow-black/40">
+      <p class="font-mono-tight mb-3 text-xs text-fog-700">.vscode/settings.json</p>
+      <pre class="font-mono-tight overflow-x-auto rounded-lg border border-white/10 bg-ink px-4 py-3 text-sm text-fog-300"><code>{`{
+  "hupi.baseUrl": "https://your-hupi-host",
+  "hupi.model": ""
+}`}</code></pre>
+      <p class="mt-4 text-xs leading-relaxed text-fog-700">
+        Run <span class="text-ember-400">HUPI: Set API Key</span> from the Command Palette
+        to store your key in VS Code's secret storage — it's never written to a settings
+        file.
+      </p>
+    </div>
+  </div>
+
+  <div class="mx-auto max-w-6xl px-6 pb-20 sm:pb-28">
+    <div class="grid gap-6 md:grid-cols-2">
+      {
+        features.map((f) => (
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-6">
+            <h3 class="text-lg font-semibold text-fog-100">{f.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">{f.body}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <div class="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <p class="text-sm text-fog-300">
+        Not published to the Marketplace yet — build and run it from source
+        (<code class="font-mono-tight">vscode-extension/</code>, press F5 to try it).
+      </p>
+      <a
+        href={`${GITHUB_URL}/tree/main/vscode-extension`}
+        class="w-full rounded-lg border border-white/15 px-5 py-2.5 text-center text-sm font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5 sm:w-auto"
+      >
+        View extension source
+      </a>
+    </div>
+  </div>
+</section>

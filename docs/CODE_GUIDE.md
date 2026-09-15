@@ -55,6 +55,7 @@ docs/                      this file, and everything else under docs/
 Dockerfile                 one image, all 11 binaries — gateway is the default ENTRYPOINT, everything else runs via a `command:` override
 deploy/k8s/                 plain Kubernetes manifests, numbered in apply order
 deploy/helm/hupi/           the same resources as a Helm chart, values.yaml-parameterized
+vscode-extension/           VS Code extension (chat sidebar + inline edit) — see VSCODE_EXTENSION.md
 ```
 
 ## 2. Package dependency graph
@@ -307,3 +308,4 @@ single shared token, and why this exists at all despite
 | "How does encryption/RLS actually work?" | [HARDENING_PLAN.md](HARDENING_PLAN.md), §4 above |
 | "What does this product do, for whom?" | [BUSINESS_PROCESS.md](BUSINESS_PROCESS.md) |
 | "How do I deploy this to Kubernetes?" | [INSTALL.md § Containerized deployment](INSTALL.md#containerized-deployment), [Dockerfile](../Dockerfile), [deploy/k8s/](../deploy/k8s/), [deploy/helm/hupi/](../deploy/helm/hupi/) |
+| "How do I use HUPI from inside VS Code?" | [VSCODE_EXTENSION.md](VSCODE_EXTENSION.md), [vscode-extension/](../vscode-extension/) |
