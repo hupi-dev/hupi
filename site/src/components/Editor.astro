@@ -1,5 +1,5 @@
 ---
-import { GITHUB_URL } from '../lib/links.js';
+import { GITHUB_URL, VSCODE_MARKETPLACE_URL } from '../lib/links.js';
 
 const features = [
   {
@@ -33,6 +33,20 @@ const features = [
         captured, grounded, and retrievable the same way any other HUPI-backed
         conversation is — the same memory your other tools already build on.
       </p>
+      <div class="mt-6 flex flex-wrap gap-3">
+        <a
+          href={VSCODE_MARKETPLACE_URL}
+          class="rounded-lg bg-ember-500 px-5 py-2.5 text-center text-sm font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400"
+        >
+          Install from the VS Code Marketplace
+        </a>
+        <a
+          href={`${GITHUB_URL}/tree/main/vscode-extension`}
+          class="rounded-lg border border-white/15 px-5 py-2.5 text-center text-sm font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5"
+        >
+          View source
+        </a>
+      </div>
     </div>
 
     <div class="rounded-xl border border-white/10 bg-navy-900/70 p-6 shadow-2xl shadow-black/40">
@@ -61,17 +75,12 @@ const features = [
       }
     </div>
 
-    <div class="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <p class="text-sm text-fog-300">
-        Not published to the Marketplace yet — build and run it from source
-        (<code class="font-mono-tight">vscode-extension/</code>, press F5 to try it).
-      </p>
-      <a
-        href={`${GITHUB_URL}/tree/main/vscode-extension`}
-        class="w-full rounded-lg border border-white/15 px-5 py-2.5 text-center text-sm font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5 sm:w-auto"
-      >
-        View extension source
-      </a>
-    </div>
+    <p class="mt-8 text-sm text-fog-300">
+      Search "HUPI" in VS Code's Extensions view, or install directly from the
+      <a href={VSCODE_MARKETPLACE_URL} class="text-ember-400 underline decoration-dotted hover:text-ember-300">
+        Marketplace
+      </a>. Prefer to build it yourself? The source is open —
+      see <code class="font-mono-tight">vscode-extension/</code> in the repo.
+    </p>
   </div>
 </section>

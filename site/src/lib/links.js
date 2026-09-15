@@ -13,5 +13,8 @@ export const DOCS_URL = `${GITHUB_URL}/tree/main/docs`;
 
 export const CONTACT_EMAIL = 'work@hupi.dev';
 
+export const VSCODE_MARKETPLACE_URL =
+  'https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode';
+
 export const LICENSE_LABEL = 'MIT';
 export const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;

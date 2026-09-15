@@ -5,6 +5,10 @@ style) for VS Code, backed by a HUPI gateway instead of an LLM vendor
 directly — the same category of tool as Cursor/Continue/Cody, pointed at
 your own memory-aware backend.
 
+Published on the VS Code Marketplace: search "HUPI" in the Extensions
+view, or install directly from
+https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
+
 ## Why an extension, not a fork
 
 Cursor is a full fork of VS Code/Code-OSS, maintained by a dedicated team
@@ -50,29 +54,33 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
 - Inline autocomplete / Tab-style ghost text completions.
 - Agentic multi-file edits (planning and editing across several files
   autonomously).
-- Marketplace publishing — not done yet, though the extension is now
-  packaging-ready (`npm run package` produces an installable `.vsix`,
-  see [vscode-extension/README.md § Publishing](../vscode-extension/README.md#publishing-to-the-marketplace)
-  for the full walkthrough). Actually publishing needs a human-verified
-  Marketplace publisher account, which no agent can create.
+- A `.vsix`/Marketplace release process for updates is manual — see
+  [vscode-extension/README.md § Publishing](../vscode-extension/README.md#publishing-to-the-marketplace)
+  for how a new version actually goes out (bump the version, `npm run
+  publish` — needs the publisher's own Marketplace credentials, which no
+  agent holds).
 
 ## Setup
 
-1. Have a HUPI gateway running and reachable — see
+1. Install the extension — search "HUPI" in VS Code's Extensions view, or
+   install from
+   https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
+2. Have a HUPI gateway running and reachable — see
    [INSTALL.md](INSTALL.md).
-2. Get an API key: `hupi-admin create-key -user <your-user-id>`, or via the
+3. Get an API key: `hupi-admin create-key -user <your-user-id>`, or via the
    admin UI's user detail page ([ADMIN_UI.md](ADMIN_UI.md)) — shown once,
    save it.
-3. In VS Code, run **HUPI: Set API Key** from the Command Palette and
+4. In VS Code, run **HUPI: Set API Key** from the Command Palette and
    paste it — stored via `SecretStorage`, never in plain settings.
-4. In Settings, search "hupi" and set `hupi.baseUrl` (the gateway's root
+5. In Settings, search "hupi" and set `hupi.baseUrl` (the gateway's root
    URL, no `/v1` suffix), optionally `hupi.model` (a `providers.yaml`
    profile name — blank uses HUPI's default chat provider) and
    `hupi.teamId` (only for a Tier 3 shared-team deployment).
 
-## Building and running it
+## Building it from source (for development, not needed to just use it)
 
-Not published to the Marketplace — build and run from source:
+The Marketplace install above is all you need as a user. Build from source
+only if you're modifying the extension itself:
 
 ```bash
 cd vscode-extension
@@ -82,13 +90,15 @@ npm install
 Then open the `vscode-extension/` folder in VS Code and press **F5**
 (`.vscode/launch.json`'s `Run HUPI Extension` config) — this builds the
 extension (via `.vscode/tasks.json`'s pre-launch task) and opens a second
-VS Code window with it loaded. Set your API key and settings in *that*
-window, then try the chat sidebar and select-some-code-then-Ctrl+K.
+VS Code window with it loaded, running your local changes instead of the
+published version. Set your API key and settings in *that* window, then
+try the chat sidebar and select-some-code-then-Ctrl+K.
 
 `npm run watch` rebuilds on save while iterating; reload the Extension
 Development Host window (`Ctrl+R`/`Cmd+R` in it) to pick up changes. See
 [vscode-extension/README.md](../vscode-extension/README.md) for the full
-day-to-day development workflow.
+day-to-day development workflow, and its **Publishing to the Marketplace**
+section for how a new version actually ships.
 
 ## What it looks like
 

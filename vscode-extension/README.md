@@ -11,6 +11,9 @@ for what HUPI actually does underneath (memory capture, grounding,
 retrieval); this extension is just a client of HUPI's OpenAI-compatible
 `/v1/chat/completions` endpoint, using the official `openai` npm SDK.
 
+**Published**: search "HUPI" in VS Code's Extensions view, or install from
+https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
+
 ## What's included (v1)
 
 - **Chat sidebar** — a HUPI icon in the activity bar opens a chat panel.
@@ -25,11 +28,13 @@ autocomplete/Tab-style ghost text, and agentic multi-file edits.
 
 ## Setup
 
-1. Have a HUPI gateway running and reachable (`../docs/INSTALL.md`).
-2. Get an API key: `hupi-admin create-key -user <your-user-id>`, or via the
+1. Install the extension (Marketplace link above, or search "HUPI" in the
+   Extensions view).
+2. Have a HUPI gateway running and reachable (`../docs/INSTALL.md`).
+3. Get an API key: `hupi-admin create-key -user <your-user-id>`, or via the
    admin UI's user detail page (`../docs/ADMIN_UI.md`) — shown once, save it.
-3. In VS Code, run **HUPI: Set API Key** from the Command Palette and paste it.
-4. In Settings (`Ctrl+,`), search "hupi" and set:
+4. In VS Code, run **HUPI: Set API Key** from the Command Palette and paste it.
+5. In Settings (`Ctrl+,`), search "hupi" and set:
    - `hupi.baseUrl` — your gateway's root URL, e.g. `http://localhost:8787`
      (no trailing slash, no `/v1`).
    - `hupi.model` — a profile name from your deployment's `providers.yaml`,
@@ -40,8 +45,9 @@ autocomplete/Tab-style ghost text, and agentic multi-file edits.
 
 ## Running it locally (development)
 
-There's no published extension yet — run it from source via VS Code's
-Extension Development Host:
+The Marketplace install above is all you need to just use the extension.
+This section is only for working on the extension's own code — run it from
+source via VS Code's Extension Development Host:
 
 ```bash
 cd vscode-extension
@@ -58,32 +64,25 @@ then try the chat sidebar and select-some-code-then-Ctrl+K.
 reload the Extension Development Host window (`Ctrl+R`/`Cmd+R` in it) to
 pick up changes.
 
-## Publishing to the Marketplace
+## Publishing an update to the Marketplace
 
-Not published yet. To do it:
+Already published once (publisher `hupi`, extension id `hupi.hupi-vscode`).
+To ship a new version:
 
-1. **Create a publisher** at https://marketplace.visualstudio.com/manage
-   (sign in with a Microsoft account) — the publisher ID must match
-   `package.json`'s `"publisher"` field (currently `hupi`; change it here
-   first if that ID is taken or you want a different one).
-2. **Get a Personal Access Token** from https://dev.azure.com — an
-   organization → User Settings → Personal Access Tokens → New Token,
-   scope: **Marketplace: Manage**.
-3. `npx vsce login <publisher>` and paste the token when prompted (only
-   needed once per machine).
-4. `npm run package` — builds and produces `hupi-vscode-<version>.vsix`
+1. Bump `"version"` in `package.json` and add a `CHANGELOG.md` entry — the
+   Marketplace rejects re-publishing the same version number.
+2. `npm run package` — builds and produces `hupi-vscode-<version>.vsix`
    locally, with no network calls. **Install and try this file yourself
    first**: Extensions view → `...` menu → "Install from VSIX...". This is
    the actual artifact that would ship, so it's the last real check before
    anyone else sees it.
-5. `npm run publish` — builds and pushes the current version live on the
-   Marketplace. Bump `"version"` in `package.json` (and add a
-   `CHANGELOG.md` entry) before publishing again — the Marketplace
-   rejects re-publishing the same version number.
-
-None of steps 1-2 can be done by an agent — they need your own Microsoft/
-Azure identity and a real payment-free but human-verified account. Steps
-3-5 are plain CLI commands once those exist.
+3. `npm run publish` — builds and pushes the new version live. Needs
+   `vsce` to already be logged in as the `hupi` publisher
+   (`npx vsce login hupi`, prompts for a Personal Access Token from
+   https://dev.azure.com with **Marketplace: Manage** scope — a one-time
+   setup per machine, and not something an agent should do on your
+   behalf: run the login step yourself in a terminal so the token never
+   passes through a chat transcript).
 
 ## Verification
 
