@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.5
+
+- Fixed a real concurrency bug in the chat sidebar: nothing previously
+  stopped a second message (or "New Chat") from being sent while a
+  response was still streaming. Two overlapping streams both wrote into
+  the same in-progress assistant bubble, corrupting whatever was on
+  screen and leaving stray text arriving after you'd already moved on —
+  plausibly presenting as the sidebar "freezing"/acting unresponsive
+  reported after switching focus away and back. Fixed two ways: the
+  input box now disables while a response is streaming (so the UI can't
+  trigger the overlap), and the extension host now cancels any in-flight
+  request (`AbortController`) before starting a new one or clearing the
+  conversation, as defense in depth.
+- Note: this was investigated without being able to reproduce the
+  original freeze report directly (no display in this environment) —
+  this fixes a genuine bug found by code review, not a confirmed root
+  cause. Please retest and report back if the freeze still happens.
+
 ## 0.1.4
 
 - Found the actual root cause of the invisible activity bar icon: with

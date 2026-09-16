@@ -68,15 +68,30 @@ function appendMessage(text: string, cls: string): HTMLDivElement {
   return content;
 }
 
+// Guards against overlapping sends corrupting currentAssistantContent (see
+// chatViewProvider.ts's inFlight AbortController comment for the full
+// story) — this is the first line of defense: with the input disabled,
+// there's no click/Enter for the user to trigger a second send with while
+// one is already streaming, so the host-side abort-on-new-send logic is
+// belt-and-suspenders rather than the only thing preventing the race.
+function setStreaming(streaming: boolean): void {
+  input.disabled = streaming;
+  sendButton.disabled = streaming;
+  if (!streaming) {
+    input.focus();
+  }
+}
+
 function send(): void {
   const text = input.value;
-  if (text.trim() === '') {
+  if (text.trim() === '' || sendButton.disabled) {
     return;
   }
   appendMessage(text, 'user');
   input.value = '';
   currentAssistantContent = appendMessage('', 'assistant');
   currentAssistantRaw = '';
+  setStreaming(true);
   vscode.postMessage({ type: 'send', text });
 }
 
@@ -85,6 +100,7 @@ function newChat(): void {
   empty.style.display = '';
   currentAssistantContent = null;
   currentAssistantRaw = '';
+  setStreaming(false);
   vscode.postMessage({ type: 'clear' });
 }
 
@@ -117,6 +133,7 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       }
       currentAssistantContent = null;
       currentAssistantRaw = '';
+      setStreaming(false);
       break;
     }
     case 'error': {
@@ -128,6 +145,7 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       appendMessage(message.message, 'error');
       currentAssistantContent = null;
       currentAssistantRaw = '';
+      setStreaming(false);
       break;
     }
   }

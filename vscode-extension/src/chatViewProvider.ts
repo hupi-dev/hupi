@@ -36,6 +36,15 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
 
   private history: ChatMessage[] = [];
   private webviewView?: vscode.WebviewView;
+  // Only one response should ever be in flight at a time — without this,
+  // sending a second message (or hitting "New Chat") before the first
+  // finishes streaming leaves two concurrent streamChat loops both posting
+  // 'delta'/'done' messages at the same webview, both racing to mutate its
+  // single currentAssistantContent/currentAssistantRaw state. The webview
+  // now also disables input while streaming, so this is belt-and-suspenders
+  // against any message that slips through anyway (a stale click, a
+  // 'clear' arriving mid-stream).
+  private inFlight?: AbortController;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -52,10 +61,12 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.onDidReceiveMessage(async (message: FromWebview) => {
       if (message.type === 'clear') {
+        this.inFlight?.abort();
         this.history = [];
         return;
       }
       if (message.type === 'send') {
+        this.inFlight?.abort();
         await this.handleSend(message.text, webviewView.webview);
       }
     });
@@ -83,16 +94,24 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    const controller = new AbortController();
+    this.inFlight = controller;
     const client = createClient(cfg);
     let assistantText = '';
     try {
       assistantText = await streamChat(client, {
         model: cfg.model,
         messages: this.history,
+        signal: controller.signal,
         onDelta: (delta) => this.post(webview, { type: 'delta', text: delta }),
       });
       this.post(webview, { type: 'done' });
     } catch (err) {
+      // A deliberate abort (superseded by a newer send, or "New Chat") is
+      // not a failure worth surfacing — the webview already moved on.
+      if (controller.signal.aborted) {
+        return;
+      }
       this.post(webview, {
         type: 'error',
         message: `HUPI request failed: ${(err as Error).message}. Check hupi.baseUrl and your API key (HUPI: Set API Key).`,
@@ -101,6 +120,10 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       // silently poison the conversation history sent on the next try.
       this.history.pop();
       return;
+    } finally {
+      if (this.inFlight === controller) {
+        this.inFlight = undefined;
+      }
     }
     this.history.push({ role: 'assistant', content: assistantText });
   }
