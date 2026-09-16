@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- Switched the activity bar icon from SVG to a PNG. 0.1.2's SVG (a
+  single filled path, explicit color) still rendered blank on at least
+  one real install despite matching every documented requirement and
+  rendering correctly in isolation — switching format entirely to rule
+  out an SVG-specific rendering path.
+
 ## 0.1.2
 
 - 0.1.1's icon fix wasn't enough — the activity bar icon was still

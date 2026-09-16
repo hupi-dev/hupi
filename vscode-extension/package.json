@@ -2,7 +2,7 @@
   "name": "hupi-vscode",
   "displayName": "HUPI",
   "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "hupi",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
@@ -65,7 +65,7 @@
         {
           "id": "hupi",
           "title": "HUPI",
-          "icon": "resources/icon.svg"
+          "icon": "resources/activitybar-icon.png"
         }
       ]
     },
