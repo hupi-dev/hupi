@@ -248,8 +248,9 @@ func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, 
 
 	var latestPeriod string
 	err = q.QueryRowContext(ctx, `
-		select period from summaries
-		where level = 'daily' and supersedes is null and scope_kind = $1 and scope_owner = $2
+		select period from summaries s
+		where level = 'daily' and scope_kind = $1 and scope_owner = $2
+		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
 		order by period desc limit 1
 	`, workspace.Kind, workspace.Owner).Scan(&latestPeriod)
 	switch {
@@ -345,11 +346,24 @@ func (s *Store) formatEntity(ctx context.Context, q dbscope.Querier, scope ident
 // the summaries used. This is the primary retrieval surface — summaries
 // are what consolidation produces specifically to be searched (see
 // ARCHITECTURE.md § Retrieval Engine).
+//
+// "Current" means no other summary's supersedes column points at this
+// row's id — NOT "this row's own supersedes is null". A corrected
+// summary (hupi-correct) is a brand-new row whose *own* supersedes
+// column points backward at the row it replaces; the replaced row's
+// supersedes stays null forever, since it never gets updated in place
+// (internal/consolidation/store.go only ever inserts). Filtering on
+// `supersedes is null` — the original, wrong version of this query —
+// therefore returned exactly the superseded, pre-correction summaries
+// and silently excluded every corrected one, discovered by actually
+// running a correction end-to-end and watching the model answer with
+// the stale, "corrected-away" fact instead of the fix.
 func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, summary, key_version, (embedding <=> $1::vector) as distance
-		from summaries
-		where embedding is not null and supersedes is null
+		from summaries s
+		where embedding is not null
+		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4

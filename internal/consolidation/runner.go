@@ -377,10 +377,19 @@ func (r *Runner) summaryExists(ctx context.Context, q dbscope.Querier, scope ide
 	return exists, err
 }
 
+// loadSummaries feeds rollups (weekly from daily, monthly from weekly, ...)
+// — it must load the *current* version of each source period, not
+// whichever version happens to have never been superseded by anything.
+// "Current" is "no other row's supersedes points at this id", not "this
+// row's own supersedes is null" — see the long comment on
+// internal/store.vectorSearchSummaries for why those are different and
+// how getting this backwards silently feeds a rolled-back/corrected
+// version into every higher-level rollup.
 func (r *Runner) loadSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, level string, periods []string) ([]textSource, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, summary, key_version from summaries
-		where level = $1 and period = any($2::text[]) and supersedes is null
+		select id, summary, key_version from summaries s
+		where level = $1 and period = any($2::text[])
+		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
 		  and scope_kind = $3 and scope_owner = $4
 		order by period asc
 	`, level, pgfmt.TextArray(periods), scope.Kind, scope.Owner)
