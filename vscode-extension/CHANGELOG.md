@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.4
+
+- Found the actual root cause of the invisible activity bar icon: with
+  VS Code connected via Remote-SSH/WSL/Containers, this extension was
+  installing and running on the *remote* host (`.vscode-server`) by
+  default, since `extensionKind` was never declared. Custom activity bar
+  icons are a known weak spot for remotely-run extensions — the icon
+  file itself (in every one of 0.1.0-0.1.3's variants) was never the
+  problem. Added `"extensionKind": ["ui"]` so this extension always
+  installs and runs on the local/client side, where VS Code's own UI
+  process can load the icon directly, regardless of whether you're
+  connected to a remote workspace.
+- **If you were reaching the gateway via an SSH tunnel to a remote
+  HUPI instance, that tunnel is now required again** (previously,
+  running remotely meant `hupi.baseUrl=http://localhost:8787` resolved
+  on the remote host directly, which happened to work without one).
+
 ## 0.1.3
 
 - Switched the activity bar icon from SVG to a PNG. 0.1.2's SVG (a
