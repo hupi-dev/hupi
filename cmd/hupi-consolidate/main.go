@@ -10,6 +10,16 @@
 // docs/GAP_CLOSURE_PLAN.md §4.1. No separate cron entry: computing which
 // periods belong in a given week/month/year is calendar logic that
 // belongs in this scheduling layer, not a second binary.
+//
+// Re-running this for an already-consolidated date regenerates from that
+// day's full episode set and supersedes the existing draft, rather than
+// creating a second, unrelated one — safe to fire more than once as a
+// day accumulates more episodes. It is NOT a way to fix a wrong fact: the
+// regeneration is told to trust the existing draft as already-settled
+// (so a real hupi-correct survives being re-consolidated on top of), so
+// a wrong draft stays wrong across every future run until you correct it
+// yourself with hupi-correct — see MEMORY_FORMAT.md § Grounding &
+// correction's operator caveat.
 package main
 
 import (

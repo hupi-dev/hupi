@@ -258,6 +258,18 @@ the number of consolidation calls) — accepted deliberately, because the
 alternative is a memory system that can drift from truth with no way to
 detect it.
 
+**Caveat this doesn't cover**: re-consolidating a day (new episodes
+arrived, so `hupi-consolidate` regenerates and supersedes that day's
+current draft) tells the regeneration to treat the existing draft as an
+already-established, possibly-already-corrected record, rather than
+re-deriving it from raw episodes and risking exactly the kind of drift
+this section exists to prevent — see [MEMORY_FORMAT.md § Grounding &
+correction](docs/MEMORY_FORMAT.md#grounding--correction)'s operator
+caveat for the trade-off that creates: trusting the existing record
+protects a real correction from being re-litigated, but it also means
+consolidation will never notice or repair a record that's already wrong.
+That's still on you, via `hupi-correct`.
+
 ## Provider abstraction
 
 A single config file lists provider profiles; the gateway and consolidation

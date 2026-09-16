@@ -323,6 +323,26 @@ wrong version and *why it was wrong* stay in the bundle rather than
 disappearing — which is itself useful signal for tuning the grounding check
 later.
 
+**Operator caveat: re-consolidating a day after correcting it.** A daily
+summary can be regenerated more than once — new episodes keep arriving
+through the day, and `hupi-consolidate` re-running for that date
+regenerates from *all* of that day's episodes and supersedes whatever
+draft was current (rather than leaving two rows both current for the same
+day). Because that regeneration prompt is told the existing draft is an
+"already-established record" and to trust it unless a raw episode
+explicitly overrides it, a **correct** correction survives being
+re-consolidated on top of. But the same trust means an already-**wrong**
+record does not self-heal: if a draft is corrupted (a bad correction, a
+grounding-check gap, or — as happened during development, before this
+established-record handling existed — a re-consolidation that misread its
+own earlier, correct answer as an unverified hallucination and quietly
+walked it back), every subsequent re-consolidation will carry that error
+forward as settled, not catch or fix it. `hupi-consolidate` is not a
+self-healing mechanism for its own past mistakes. If you notice a wrong
+fact, correct it with `hupi-correct` (`-dump-template` first, to see
+today's actual current content before you edit it) — don't assume the
+next scheduled consolidation run will notice and fix it on its own.
+
 Optionally, `status` can be used as a lightweight human-review hook:
 summaries are written as `"draft"`, and a periodic digest (weekly, say)
 surfaces newly generated daily/weekly summaries for a quick skim; accepting
