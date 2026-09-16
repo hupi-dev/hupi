@@ -24,6 +24,29 @@ const newChatButton = document.getElementById('newChat') as HTMLButtonElement;
 let currentAssistantContent: HTMLDivElement | null = null;
 let currentAssistantRaw = '';
 
+// Streaming deltas can arrive faster than every animation frame (bursts
+// after a network hiccup, or just a fast model) — re-parsing the whole
+// accumulated markdown and replacing innerHTML on every single delta was
+// doing that synchronous work far more often than the screen can even
+// show it. Coalesce to at most one render per frame: whichever delta
+// handler runs first in a frame schedules the render, later ones in the
+// same frame just update currentAssistantRaw and let the scheduled one
+// pick up the latest text.
+let renderScheduled = false;
+function scheduleRender(): void {
+  if (renderScheduled || !currentAssistantContent) {
+    return;
+  }
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    if (currentAssistantContent) {
+      currentAssistantContent.innerHTML = marked.parse(currentAssistantRaw) as string;
+      log.scrollTop = log.scrollHeight;
+    }
+  });
+}
+
 const ROLE_LABELS: Record<string, string> = { user: 'You', assistant: 'HUPI', error: 'Error' };
 
 /** Appends a message card (role label + content area) and returns the
@@ -79,16 +102,19 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
   switch (message.type) {
     case 'delta': {
       currentAssistantRaw += message.text;
-      if (currentAssistantContent) {
-        // marked.parse is synchronous for the default (non-async-extension)
-        // config used here — re-rendering the whole accumulated text on
-        // every delta is simple and plenty fast for chat-length responses.
-        currentAssistantContent.innerHTML = marked.parse(currentAssistantRaw) as string;
-        log.scrollTop = log.scrollHeight;
-      }
+      scheduleRender();
       break;
     }
     case 'done': {
+      // A render may still be scheduled for this frame with the final
+      // text already in currentAssistantRaw — let it run rather than
+      // clearing currentAssistantContent out from under it, then do one
+      // last synchronous render to guarantee the final text is shown
+      // even if no frame was pending.
+      if (currentAssistantContent) {
+        currentAssistantContent.innerHTML = marked.parse(currentAssistantRaw) as string;
+        log.scrollTop = log.scrollHeight;
+      }
       currentAssistantContent = null;
       currentAssistantRaw = '';
       break;
