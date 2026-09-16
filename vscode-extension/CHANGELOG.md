@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- 0.1.1's icon fix wasn't enough — the activity bar icon was still
+  rendering blank. Replaced the multi-shape SVG with a single unified
+  `<path>` and an explicit fill color instead of `currentColor`.
+
 ## 0.1.1
 
 - Fixed the activity bar icon rendering as a blank/invisible square — it
