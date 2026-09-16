@@ -3,6 +3,7 @@ package consolidation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -306,6 +307,217 @@ func TestCorrect_WritesAuditLogWithGivenActor(t *testing.T) {
 	}
 	if loggedActor != actor {
 		t.Errorf("actor = %q, want %q", loggedActor, actor)
+	}
+}
+
+// TestRunDaily_SupersedesExistingDraftOnReconsolidation is a regression
+// test for a real gap found via manual end-to-end testing: a second
+// RunDaily call for a day that already had a current draft used to insert
+// a second, completely unrelated summary row — not chained via
+// supersedes — leaving two rows simultaneously "current" for the same
+// day (see internal/store/retrieve.go's doc comment on what that means).
+// RunDaily now looks up the existing current draft via currentSummaryID
+// and supersedes it instead.
+func TestRunDaily_SupersedesExistingDraftOnReconsolidation(t *testing.T) {
+	groundingJSON := `{"grounded": [true]}`
+	firstJSON := `{
+		"summary": "First draft: only the morning conversation.",
+		"key_facts": [{"fact": "morning fact", "source_episode_ids": ["ep_recon_morning"]}],
+		"entities_touched": []
+	}`
+	runner1, db1 := testRunner(t, firstJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-run-daily-reconsolidate"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db1, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner1.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	date := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	seedEpisode := func(id, input, output string) {
+		t.Helper()
+		inputCT, _ := enc.Encrypt(input)
+		outputCT, _ := enc.Encrypt(output)
+		if err := dbscope.Run(ctx, db1, scope, scope, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `
+				insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+				values ($1, $2, 'interaction', $3, $4, 'sha256:test', 0.5, $5, $6)
+			`, id, date, inputCT, outputCT, scope.Kind, scope.Owner)
+			return err
+		}); err != nil {
+			t.Fatalf("seed episode %s: %v", id, err)
+		}
+	}
+	seedEpisode("ep_recon_morning", "morning question", "morning answer")
+
+	if err := runner1.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("first RunDaily: %v", err)
+	}
+
+	var firstID string
+	if err := dbscope.Run(ctx, db1, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select id from summaries where level = 'daily' and period = '2026-09-20' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&firstID)
+	}); err != nil {
+		t.Fatalf("load first draft id: %v", err)
+	}
+
+	// More of the day arrives, then consolidation re-runs — the realistic
+	// trigger for this bug, not just an operator blindly re-running it.
+	seedEpisode("ep_recon_afternoon", "afternoon question", "afternoon answer")
+
+	secondJSON := `{
+		"summary": "Regenerated draft: the full day, morning and afternoon.",
+		"key_facts": [],
+		"entities_touched": []
+	}`
+	runner2 := New(db1, runner1.keys, fakeConsolidationProvider{response: secondJSON}, fakeConsolidationProvider{response: groundingJSON}, fakeConsolidationProvider{response: secondJSON})
+	if err := runner2.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("second RunDaily: %v", err)
+	}
+
+	var count int
+	if err := dbscope.Run(ctx, db1, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries where level = 'daily' and period = '2026-09-20' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&count)
+	}); err != nil {
+		t.Fatalf("count daily summaries: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("got %d daily summaries after re-consolidation, want exactly 2 (first draft + the regenerated one)", count)
+	}
+
+	var secondSupersedes sql.NullString
+	if err := dbscope.Run(ctx, db1, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select supersedes from summaries
+			where level = 'daily' and period = '2026-09-20' and scope_kind = $1 and scope_owner = $2 and id != $3
+		`, scope.Kind, scope.Owner, firstID).Scan(&secondSupersedes)
+	}); err != nil {
+		t.Fatalf("load second draft's supersedes: %v", err)
+	}
+	if !secondSupersedes.Valid || secondSupersedes.String != firstID {
+		t.Errorf("second draft's supersedes = %v, want %q (the first draft) — a fork would leave this null", secondSupersedes, firstID)
+	}
+
+	current, err := runner1.currentSummaryID(ctx, db1, scope, "daily", "2026-09-20")
+	if err != nil {
+		t.Fatalf("currentSummaryID: %v", err)
+	}
+	if current == firstID {
+		t.Error("currentSummaryID still resolves to the superseded first draft")
+	}
+}
+
+// TestCorrect_ReplacesEntityAttributesWholesale is a regression test for a
+// real gap found by inspecting a live correction's effect on the touched
+// entity: upsertEntities always merged new attributes over existing ones,
+// so a correction that re-describes a fact under a different attribute
+// key than the original consolidation used (e.g. concurrency_limit vs.
+// concurrent_jobs_per_node) left the stale key sitting right next to the
+// corrected one, both visible to retrieval. A human correction is
+// expected to state an entity's full corrected set of touched attributes,
+// so Correct now replaces rather than merges.
+func TestCorrect_ReplacesEntityAttributesWholesale(t *testing.T) {
+	groundingJSON := `{"grounded": []}`
+	initialJSON := `{
+		"summary": "Initial daily summary.",
+		"key_facts": [],
+		"entities_touched": [{"id": "project:widget", "kind": "project", "name": "Widget", "attributes": {"concurrency_limit": "500", "language": "Go"}}]
+	}`
+	runner, db := testRunner(t, initialJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-correct-replace-attrs"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2026-09-20",
+		output: ConsolidationOutput{
+			Summary: "Initial daily summary.",
+			EntitiesTouched: []EntityUpdate{
+				{ID: "project:widget", Kind: "project", Name: "Widget", Attributes: map[string]string{"concurrency_limit": "500", "language": "Go"}},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed initial summary+entity: %v", err)
+	}
+
+	var originalID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select id from summaries where level = 'daily' and period = '2026-09-20' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&originalID)
+	}); err != nil {
+		t.Fatalf("load seeded summary id: %v", err)
+	}
+
+	correction := ConsolidationOutput{
+		Summary: "Corrected: concurrency raised.",
+		EntitiesTouched: []EntityUpdate{
+			// Deliberately a *different* key than the original
+			// (concurrent_jobs_per_node, not concurrency_limit) — the
+			// exact real-world scenario this test guards against — and
+			// deliberately omits "language" too: replace is a wholesale
+			// overwrite of a touched entity's attributes, so both the
+			// stale key and the untouched-but-not-restated one should be
+			// gone afterward, not merged forward.
+			{ID: "project:widget", Kind: "project", Name: "Widget", Attributes: map[string]string{"concurrent_jobs_per_node": "2000"}},
+		},
+	}
+	if err := runner.Correct(ctx, scope, originalID, correction, "raised the concurrency limit", "test-operator"); err != nil {
+		t.Fatalf("Correct: %v", err)
+	}
+
+	var attrsCT []byte
+	var keyVersion int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select attributes, key_version from entities where id = 'project:widget' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&attrsCT, &keyVersion)
+	}); err != nil {
+		t.Fatalf("load corrected entity: %v", err)
+	}
+	enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
+	if err != nil {
+		t.Fatalf("resolve key version: %v", err)
+	}
+	attrsJSON, err := enc.Decrypt(attrsCT)
+	if err != nil {
+		t.Fatalf("decrypt entity attributes: %v", err)
+	}
+	var attrs map[string]string
+	if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
+		t.Fatalf("parse entity attributes: %v", err)
+	}
+
+	if got, want := attrs["concurrent_jobs_per_node"], "2000"; got != want {
+		t.Errorf("concurrent_jobs_per_node = %q, want %q", got, want)
+	}
+	if v, exists := attrs["concurrency_limit"]; exists {
+		t.Errorf("concurrency_limit = %q still present after correction — replace should have dropped the stale key, not merged over it", v)
+	}
+	if v, exists := attrs["language"]; exists {
+		t.Errorf("language = %q survived — replace means wholesale overwrite of a touched entity's attributes, not a selective merge", v)
 	}
 }
 

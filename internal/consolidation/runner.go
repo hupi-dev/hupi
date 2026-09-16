@@ -58,9 +58,14 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 	period := date.Format("2006-01-02")
 
 	var sources []textSource
+	var existingCurrentID string
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		var err error
 		sources, err = r.loadDailyEpisodes(ctx, tx, scope, date)
+		if err != nil {
+			return err
+		}
+		existingCurrentID, err = r.currentSummaryID(ctx, tx, scope, "daily", period)
 		return err
 	})
 	if err != nil {
@@ -80,6 +85,24 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		sourceIDs[i] = s.id
 	}
 
+	// A second RunDaily call for a day that already has a current draft
+	// (a manual re-run, or a day that's still accumulating episodes when
+	// a scheduler fires more than once) regenerates from *all* of that
+	// day's episodes and supersedes the existing draft, rather than
+	// inserting an unrelated duplicate that leaves two rows both claiming
+	// to be "current" (see internal/store/retrieve.go's doc comment on
+	// what that means) — found by actually re-running consolidation
+	// against a day that had already been consolidated and watching
+	// retrieval surface both the old and new drafts side by side. This is
+	// a system-driven supersession, not a human correction — actor stays
+	// systemActor, and the reason says so explicitly, so it stays
+	// distinguishable from a real hupi-correct in the audit trail even
+	// though it's the same supersedes/correction_reason mechanism.
+	var correctionReason string
+	if existingCurrentID != "" {
+		correctionReason = "automatic re-consolidation, not a human correction: regenerated from the full day's episodes"
+	}
+
 	if err := r.storeSummary(ctx, storeSummaryInput{
 		scope:               scope,
 		level:               "daily",
@@ -87,6 +110,8 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		sourceEpisodeIDs:    sourceIDs,
 		output:              output,
 		groundingSourceText: joinSources(sources),
+		supersedes:          existingCurrentID,
+		correctionReason:    correctionReason,
 		actor:               systemActor,
 	}); err != nil {
 		return err
@@ -188,6 +213,7 @@ func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID
 		output:               output,
 		groundingSourceText:  groundingSourceText,
 		supersedes:           oldSummaryID,
+		replaceEntityAttrs:   true,
 		correctionReason:     reason,
 		actor:                actor,
 	})
@@ -385,11 +411,12 @@ func (r *Runner) scanEpisodeSources(ctx context.Context, rows *sql.Rows, scope i
 
 // summaryExists reports whether scope already has any summary (any
 // version, corrected or not) at level+period — RunRollup's idempotency
-// guard. Checking "any version" rather than just "no supersedes" is
-// deliberate: only Runner.Correct should ever produce a second version of
-// a period's summary, with an explicit supersedes link and reason: a bare
-// re-run creating an undifferentiated v2 would be indistinguishable from
-// a correction in the record without actually being one.
+// guard: a rollup's sources are other summaries, already-finalized by the
+// time it runs, so a second call for a period that already rolled up has
+// nothing new to fold in and should be a pure no-op, not even a
+// supersession. (RunDaily is different — see currentSummaryID — because a
+// day's episodes can keep arriving between runs, so re-running it *does*
+// have something new to fold in.)
 func (r *Runner) summaryExists(ctx context.Context, q dbscope.Querier, scope identity.Scope, level, period string) (bool, error) {
 	var exists bool
 	err := q.QueryRowContext(ctx, `
@@ -399,6 +426,31 @@ func (r *Runner) summaryExists(ctx context.Context, q dbscope.Querier, scope ide
 		)
 	`, level, period, scope.Kind, scope.Owner).Scan(&exists)
 	return exists, err
+}
+
+// currentSummaryID returns the id of the current version of scope's
+// level+period summary — "current" meaning no other row's supersedes
+// points at it (see internal/store/retrieve.go's doc comment on
+// vectorSearchSummaries for why that's the definition and not "this row's
+// own supersedes is null") — or "" if no summary exists yet for that
+// level+period. RunDaily uses this to chain a re-consolidation onto the
+// existing draft instead of leaving two rows both "current" for the same
+// day. created_at desc as the tiebreak is only relevant for scope+period
+// combinations that already had more than one simultaneously-"current"
+// row before this fix existed; a single well-formed chain never needs it.
+func (r *Runner) currentSummaryID(ctx context.Context, q dbscope.Querier, scope identity.Scope, level, period string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		select s.id from summaries s
+		where s.level = $1 and s.period = $2 and s.scope_kind = $3 and s.scope_owner = $4
+		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		order by s.created_at desc, s.id desc
+		limit 1
+	`, level, period, scope.Kind, scope.Owner).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }
 
 // loadSummaries feeds rollups (weekly from daily, monthly from weekly, ...)

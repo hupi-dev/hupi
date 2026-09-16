@@ -22,9 +22,10 @@ type storeSummaryInput struct {
 	sourceSummaryPeriods []string // weekly/monthly/yearly only
 	output               ConsolidationOutput
 	groundingSourceText  string
-	supersedes           string // set only by Runner.Correct — id of the prior version this corrects
-	correctionReason     string // required alongside supersedes, see MEMORY_FORMAT.md § Grounding & correction
+	supersedes           string // id of the prior version this replaces — set by Runner.Correct (a human correction) or by RunDaily re-consolidating an already-drafted day (a system regeneration); which one is recorded in correctionReason and in the audit_log actor, not by this field alone
+	correctionReason     string // required alongside supersedes for Runner.Correct (MEMORY_FORMAT.md § Grounding & correction); RunDaily sets a system-authored one so a re-consolidation stays distinguishable from a human correction in the record
 	actor                string // audit_log actor — systemActor for RunDaily/RunRollup, the operator's -actor for Correct
+	replaceEntityAttrs   bool   // true only for Runner.Correct — see upsertEntities' replace parameter doc comment for why a human correction replaces a touched entity's attributes wholesale instead of merging
 }
 
 // storeSummary runs the grounding check, then writes the summary and its
@@ -110,7 +111,7 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			}
 		}
 
-		if err := r.upsertEntities(ctx, tx, in.scope, in.output.EntitiesTouched); err != nil {
+		if err := r.upsertEntities(ctx, tx, in.scope, in.output.EntitiesTouched, in.replaceEntityAttrs); err != nil {
 			return fmt.Errorf("upsert entities for summary %s: %w", id, err)
 		}
 
@@ -183,7 +184,19 @@ func (r *Runner) nextSummaryID(ctx context.Context, q dbscope.Querier, scope ide
 // running concurrently against the same entity. Entities are looked up and
 // written within scope — the same "project:hupi" id can exist once per
 // scope since entities' primary key is (scope_kind, scope_owner, id).
-func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.Scope, updates []EntityUpdate) error {
+//
+// replace flips that to a wholesale overwrite of each touched entity's
+// attributes, used only by Runner.Correct: a correction's whole point is
+// to fix a wrong fact, and merge's "new keys win, old keys survive"
+// behavior means a correction that changes what an old run called
+// concurrency_limit but writes it back under a differently-named key like
+// concurrent_jobs_per_node leaves the stale key sitting right next to the
+// corrected one, both visible to retrieval — found by observing exactly
+// that after a real correction. A human correction is expected to state
+// the entity's full corrected set of touched attributes, not a partial
+// patch, so replacing is the semantically correct behavior specifically
+// for this caller.
+func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.Scope, updates []EntityUpdate, replace bool) error {
 	// Writes always go under the *current* version — resolved once here,
 	// not per entity, since it can't change mid-transaction. Reads of
 	// each entity's *existing* attributes below use that specific row's
@@ -209,9 +222,13 @@ func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.
 		).Scan(&existingCT, &existingVersion)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			// new entity — nothing to merge, e.Attributes as given
+			// new entity — nothing to merge or replace, e.Attributes as given
 		case err != nil:
 			return fmt.Errorf("load existing entity %s for merge: %w", e.ID, err)
+		case replace:
+			// `for update` above still ran, so this row stays locked
+			// against a concurrent writer until this transaction commits
+			// — merged is already e.Attributes, nothing else to do.
 		default:
 			existingEnc, keyErr := r.keys.GetVersion(ctx, scope, existingVersion)
 			if keyErr != nil {

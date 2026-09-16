@@ -287,9 +287,15 @@ prioritized the way they are — lives in
 this section doesn't overstate what exists:
 
 **Closed** (were gaps, now built): entity attributes merge rather than
-overwrite (`mergeAttributes`); corrections are a real, working path
-(`Runner.Correct`, `cmd/hupi-correct`) rather than schema-only; vector
-search covers both `summaries` and high-importance `episodes`
+overwrite for normal consolidation (`mergeAttributes`) — but a correction
+(`Runner.Correct`) replaces a touched entity's attributes wholesale
+instead of merging, since a stale attribute key a correction didn't
+happen to reuse would otherwise sit right next to the corrected one
+forever; corrections are a real, working path (`Runner.Correct`,
+`cmd/hupi-correct`) rather than schema-only, including re-running daily
+consolidation for an already-consolidated day, which now supersedes the
+existing draft instead of leaving two rows both "current" for the same
+day; vector search covers both `summaries` and high-importance `episodes`
 (`vectorSearchEpisodes`, fed by `embedHighImportanceEpisodes`).
 
 **Still open**:
