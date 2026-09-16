@@ -72,7 +72,31 @@ Deployed at [hupi.dev](https://hupi.dev) (Vercel project `hupi/site`,
 auto-deploys on every push to `main` via the GitHub integration — see the
 root-level `vercel.json` for why that's needed in this monorepo).
 
-`astro.config.mjs`'s `site` field (`https://example.com/REPLACE_ME`) should
-also be updated to the real production URL once known — it's only used for
-generating absolute URLs (e.g. in a future sitemap/RSS), and isn't required
-for the build to succeed.
+`astro.config.mjs`'s `site` field is `https://hupi.dev` — every absolute
+URL below is derived from it (via `Astro.site` in `Layout.astro`), so
+this is the one place a future domain change needs to happen.
+
+## SEO
+
+- **`site: 'https://hupi.dev'`** (`astro.config.mjs`) is the canonical
+  origin `@astrojs/sitemap` and `Layout.astro` build every absolute URL
+  from — sitemap entries, `<link rel="canonical">`, and Open
+  Graph/Twitter image URLs. Get this wrong (or leave it as a placeholder)
+  and you're telling search engines to trust the wrong URL, which is
+  worse than not telling them anything.
+- **`@astrojs/sitemap`** generates `sitemap-index.xml`/`sitemap-0.xml` at
+  build time — zero maintenance as pages are added later.
+- **`public/robots.txt`** allows everything and points at the sitemap.
+- **`public/og-image.png`** (1200×630, generated from
+  `scripts/og-image-source.svg` via `sharp` — regenerate with
+  `node -e "require('sharp')('scripts/og-image-source.svg').resize(1200,630).png().toFile('public/og-image.png')"`
+  after editing the source SVG) is what Slack/Discord/Twitter/etc. render
+  when this URL is shared, and matters for click-through from search
+  results that show a preview too.
+- **JSON-LD structured data** (`SoftwareApplication`, in `Layout.astro`)
+  gives search engines an unambiguous, machine-readable description of
+  what this is, separate from parsing prose.
+- Every page needs `<title>`/`<meta name="description">` — currently just
+  the one page, using `Layout.astro`'s defaults. If more pages are added,
+  pass `title`/`description` props per page rather than reusing the
+  landing page's.

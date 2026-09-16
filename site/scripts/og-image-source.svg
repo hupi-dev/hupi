@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="0%" r="75%">
+      <stop offset="0%" stop-color="#f0692a" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#f0692a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#05060a"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+
+  <g transform="translate(100,120)">
+    <rect width="88" height="88" rx="20" fill="#0b0e19" stroke="#232a3d" stroke-width="2"/>
+    <path d="M25 19v50M63 19v50M25 44h38" stroke="#ff8a4c" stroke-width="7.5" stroke-linecap="round"/>
+  </g>
+
+  <text x="100" y="290" font-family="Arial, Helvetica, sans-serif" font-size="88" font-weight="800" fill="#f5f6fa" letter-spacing="-2">HUPI</text>
+
+  <text x="100" y="360" font-family="Arial, Helvetica, sans-serif" font-size="38" font-weight="700" fill="#f5f6fa">
+    Long-term memory for your AI product,
+  </text>
+  <text x="100" y="410" font-family="Arial, Helvetica, sans-serif" font-size="38" font-weight="700" fill="#ff8a4c">
+    without the vendor lock-in.
+  </text>
+
+  <text x="100" y="470" font-family="Arial, Helvetica, sans-serif" font-size="24" fill="#8991a8">
+    Self-hosted · durable, fact-checked, auditable memory · any LLM vendor
+  </text>
+
+  <g transform="translate(100,520)" font-family="Arial, Helvetica, sans-serif" font-size="20" fill="#cbd0dd">
+    <circle cx="6" cy="-6" r="4" fill="#ff8a4c"/>
+    <text x="20">Open source</text>
+    <circle cx="180" cy="-6" r="4" fill="#ff8a4c"/>
+    <text x="194">Docker · Kubernetes · Helm</text>
+    <circle cx="520" cy="-6" r="4" fill="#ff8a4c"/>
+    <text x="534">Bring your own Postgres</text>
+  </g>
+</svg>

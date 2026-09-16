@@ -1,5 +1,6 @@
 ---
 import '../styles/global.css';
+import { GITHUB_URL } from '../lib/links.js';
 
 interface Props {
   title?: string;
@@ -8,8 +9,33 @@ interface Props {
 
 const {
   title = 'HUPI — durable, provider-independent memory for AI products',
-  description = 'HUPI is a self-hosted memory gateway that gives any OpenAI-API-compatible AI product durable, fact-checked, auditable long-term memory — without locking you into one LLM vendor.',
+  description = 'A self-hosted memory gateway giving any OpenAI-API-compatible AI product durable, fact-checked, auditable long-term memory — without LLM vendor lock-in.',
 } = Astro.props;
+
+// Astro.site comes from astro.config.mjs's `site` value — every URL below
+// is built from it rather than hardcoded, so this file stays correct if
+// this ever stops being a single-page site (canonical, per page, is the
+// most load-bearing one: without it, and with no other page linking back
+// to "the" URL for this content, duplicate-content signals from any
+// mirror/proxy/staging copy have nothing to defer to).
+const canonicalURL = new URL(Astro.url.pathname, Astro.site);
+const ogImageURL = new URL('/og-image.png', Astro.site);
+
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: 'HUPI',
+  url: Astro.site?.href,
+  description,
+  applicationCategory: 'DeveloperApplication',
+  operatingSystem: 'Linux, macOS, Windows — self-hosted via Docker, Kubernetes, or Helm',
+  offers: {
+    '@type': 'Offer',
+    price: '0',
+    priceCurrency: 'USD',
+  },
+  sameAs: [GITHUB_URL],
+};
 ---
 
 <!doctype html>
@@ -17,14 +43,29 @@ const {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#05060a" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="canonical" href={canonicalURL} />
     <title>{title}</title>
     <meta name="description" content={description} />
 
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonicalURL} />
+    <meta property="og:site_name" content="HUPI" />
+    <meta property="og:image" content={ogImageURL} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="HUPI — long-term memory for your AI product, without the vendor lock-in." />
+    <meta property="og:locale" content="en_US" />
+
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImageURL} />
+
+    <script type="application/ld+json" set:html={JSON.stringify(structuredData)} />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
