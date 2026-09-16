@@ -118,7 +118,7 @@ self. Keep that distinction in mind when deciding how much to lean on it.
      | Outcome | What happened |
      |---|---|
      | `skipped` | **Stage 1 pre-check** — a cheap local scan of the message for any signal at all (known entity names, decision/preference language, a question about something previously discussed) — found *nothing*. No vector search or entity lookup is even attempted; this is the cheap-and-common case for generic/impersonal requests (e.g. "what's 2+2", "write a regex for..."). |
-     | `partial` | Stage 1 found *some* signal, so **stage 2 actually runs** (vector search via `pgvector` + entity lookup) — but nothing returned clears the match threshold (exact entity-id hit, or vector similarity ≥ a configured cutoff, e.g. 0.75 cosine). Covers both "the corpus is empty/genuinely doesn't have this yet" (day-one case) and "we searched but only found weak, low-confidence matches." |
+     | `partial` | Stage 1 found *some* signal, so **stage 2 actually runs** (vector search via `pgvector` + entity lookup) — but nothing returned clears the match threshold (exact entity-id hit, or vector similarity ≥ a configured cutoff, e.g. 0.40 cosine — see `vectorSimilarityThreshold`, `internal/store/retrieve.go`, empirically tuned to `text-embedding-3-small`). Covers both "the corpus is empty/genuinely doesn't have this yet" (day-one case) and "we searched but only found weak, low-confidence matches." |
      | `full` | Stage 1 triggered stage 2, and at least one result cleared the threshold — an exact entity-key match (cheapest, most common) or a high-similarity vector hit. This is the content that actually gets assembled into the context block. |
 
      Only `skipped` means "we didn't look." Both `partial` and `full` mean

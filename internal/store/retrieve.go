@@ -22,7 +22,21 @@ const (
 	// ARCHITECTURE.md's precise definition of the gate outcomes. Cosine
 	// similarity, so a pgvector cosine *distance* of 1-threshold or less
 	// counts as a hit.
-	vectorSimilarityThreshold = 0.75
+	//
+	// 0.75 was the original design value but turned out to be miscalibrated
+	// for text-embedding-3-small in practice: a real end-to-end test (a
+	// correctly grounded, correctly worded daily summary — "favorite
+	// language is Rust... project called Meridian" — against the direct
+	// question "what language do I prefer and what's my project called")
+	// measured only 0.50 cosine similarity despite being an exact semantic
+	// match. A narrative summary paragraph and a direct question about its
+	// own content just don't embed as closely as 0.75 assumes, even with
+	// text-embedding-3-small doing its job correctly. 0.40 leaves headroom
+	// above that measured true-positive while still well above where
+	// genuinely unrelated content lands (typically <0.2) — re-measure if
+	// the embedding model changes, since this is empirically tuned to
+	// text-embedding-3-small, not a universal constant.
+	vectorSimilarityThreshold = 0.40
 	maxVectorResults          = 5
 	// contextCharBudget is a crude stand-in for a real token budget
 	// (ARCHITECTURE.md mentions ~20% of the model's context window) — a

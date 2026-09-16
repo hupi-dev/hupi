@@ -138,7 +138,7 @@ independent of each other:
 |---|---|
 | `skipped` | Stage 1 (`stage1EntityMatches` + `stage1KeywordSignal` — both pure string matching, zero network calls beyond the one entity-table query) found no signal at all. No vector search ever runs. |
 | `partial` | Stage 1 found signal, so stage 2 ran (entity fetch + pgvector search), but nothing cleared the threshold. |
-| `full` | Stage 2 ran and something cleared the threshold: an exact entity-id match (always counted as a strong hit), or a summary whose cosine similarity to the embedded query is ≥ `0.75` (`vectorSimilarityThreshold`, `internal/store/retrieve.go`). |
+| `full` | Stage 2 ran and something cleared the threshold: an exact entity-id match (always counted as a strong hit), or a summary whose cosine similarity to the embedded query is ≥ `0.40` (`vectorSimilarityThreshold`, `internal/store/retrieve.go` — empirically tuned to `text-embedding-3-small`, see that constant's own comment for the measured true-positive that drove the number). |
 
 Only `skipped` means "never looked" — `partial` and `full` both mean the
 search ran and differ only in whether it found anything trustworthy. That
