@@ -308,3 +308,69 @@ func TestCorrect_WritesAuditLogWithGivenActor(t *testing.T) {
 		t.Errorf("actor = %q, want %q", loggedActor, actor)
 	}
 }
+
+// TestCorrect_RejectsAlreadySupersededTarget is a regression test for a
+// real bug found via manual end-to-end testing: Correct never checked
+// whether -summary-id was still the current version before applying a
+// correction to it. Pointing a second, independent correction at an
+// already-superseded id silently forked history — two rows (the stale
+// target's existing corrector, and the new one) both ended up "current"
+// (see internal/store/retrieve.go's doc comment on what that means),
+// with no principled way for retrieval to pick between them. Correct must
+// refuse this rather than let it happen silently.
+func TestCorrect_RejectsAlreadySupersededTarget(t *testing.T) {
+	consolidationJSON := `{"summary": "unused", "key_facts": [], "entities_touched": []}`
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-correct-stale-target"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	v1CT, _ := enc.Encrypt("v1: the stale original")
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into summaries (id, period, level, summary, scope_kind, scope_owner)
+			values ('sum_test_stale_v1', '2026-09-07', 'daily', $1, $2, $3)
+		`, v1CT, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed v1: %v", err)
+	}
+
+	// First correction: v2 supersedes v1 — this one is legitimate and
+	// must succeed, establishing v2 as current.
+	v2 := ConsolidationOutput{Summary: "v2: the first correction"}
+	if err := runner.Correct(ctx, scope, "sum_test_stale_v1", v2, "first correction", "operator-a"); err != nil {
+		t.Fatalf("first Correct (v1 -> v2) should succeed: %v", err)
+	}
+
+	// Second correction targets v1 again — v1 is no longer current (v2
+	// superseded it), so this must be rejected, not silently accepted.
+	v3 := ConsolidationOutput{Summary: "v3: a second correction mistakenly targeting stale v1"}
+	err = runner.Correct(ctx, scope, "sum_test_stale_v1", v3, "second correction, wrong target", "operator-b")
+	if err == nil {
+		t.Fatal("Correct against an already-superseded id should have failed, got nil error")
+	}
+
+	var count int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries where period = '2026-09-07' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&count)
+	}); err != nil {
+		t.Fatalf("count summaries: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("got %d summaries for the period after the rejected correction, want exactly 2 (v1, v2) — a fork would show 3", count)
+	}
+}

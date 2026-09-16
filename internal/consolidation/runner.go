@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -120,14 +121,37 @@ func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID
 	}
 
 	var level, period, sourceEpisodeIDsLit, sourceSummaryPeriodsLit string
+	var supersededBy sql.NullString
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
+		if scanErr := tx.QueryRowContext(ctx, `
 			select level, period, source_episode_ids, source_summary_periods
 			from summaries where id = $1 and scope_kind = $2 and scope_owner = $3
-		`, oldSummaryID, scope.Kind, scope.Owner).Scan(&level, &period, &sourceEpisodeIDsLit, &sourceSummaryPeriodsLit)
+		`, oldSummaryID, scope.Kind, scope.Owner).Scan(&level, &period, &sourceEpisodeIDsLit, &sourceSummaryPeriodsLit); scanErr != nil {
+			return fmt.Errorf("load summary: %w", scanErr)
+		}
+		// A correction must always target the *current* version — see
+		// vectorSearchSummaries's doc comment in internal/store/retrieve.go
+		// for what "current" means. Without this check, correcting a
+		// summary ID that some other correction already superseded creates
+		// two divergent rows both claiming to be current (both have
+		// nothing superseding them), and retrieval has no principled way
+		// to pick between them. Found by deliberately reproducing it: an
+		// operator pointing -summary-id at an already-superseded id
+		// silently forked the history instead of erroring.
+		scanErr := tx.QueryRowContext(ctx, `
+			select id from summaries
+			where supersedes = $1 and scope_kind = $2 and scope_owner = $3
+		`, oldSummaryID, scope.Kind, scope.Owner).Scan(&supersededBy)
+		if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+			return fmt.Errorf("check for existing supersession: %w", scanErr)
+		}
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("consolidation: load summary %s to correct: %w", oldSummaryID, err)
+	}
+	if supersededBy.Valid {
+		return fmt.Errorf("consolidation: %s is already superseded by %s — correct that version instead", oldSummaryID, supersededBy.String)
 	}
 
 	sourceEpisodeIDs := pgfmt.ParseTextArray(sourceEpisodeIDsLit)
