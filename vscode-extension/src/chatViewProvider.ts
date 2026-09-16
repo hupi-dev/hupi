@@ -116,20 +116,90 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}';" />
   <style>
-    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; }
-    #log { flex: 1; overflow-y: auto; padding: 8px; }
-    .msg { margin-bottom: 12px; white-space: pre-wrap; word-break: break-word; }
-    .msg.user { color: var(--vscode-textLink-foreground); }
-    .msg.error { color: var(--vscode-errorForeground); }
-    .msg pre { background: var(--vscode-textCodeBlock-background); padding: 6px; overflow-x: auto; border-radius: 4px; }
-    #inputRow { display: flex; border-top: 1px solid var(--vscode-panel-border); padding: 6px; gap: 6px; }
-    #input { flex: 1; resize: none; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); font-family: inherit; padding: 4px; }
-    button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 4px 10px; cursor: pointer; }
-    button:hover { background: var(--vscode-button-hoverBackground); }
+    :root {
+      --hupi-border: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+      --hupi-card-bg: color-mix(in srgb, var(--vscode-editorWidget-background) 60%, var(--vscode-editor-background));
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size, 13px);
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      margin: 0; padding: 0;
+      display: flex; flex-direction: column; height: 100vh;
+    }
+    #header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--hupi-border);
+      flex-shrink: 0;
+    }
+    #header .title {
+      font-weight: 600; font-size: 11px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--vscode-descriptionForeground);
+    }
+    #newChat {
+      display: flex; align-items: center; gap: 5px;
+      background: transparent; color: var(--vscode-foreground);
+      border: 1px solid var(--hupi-border); border-radius: 4px;
+      padding: 3px 9px; font-size: 12px; cursor: pointer;
+    }
+    #newChat:hover { background: var(--vscode-toolbar-hoverBackground, var(--hupi-card-bg)); }
+    #log { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+    #empty {
+      color: var(--vscode-descriptionForeground); font-size: 12.5px;
+      line-height: 1.5; padding: 12px 2px;
+    }
+    .msg {
+      border: 1px solid var(--hupi-border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: var(--hupi-card-bg);
+      white-space: pre-wrap; word-break: break-word;
+      line-height: 1.45;
+    }
+    .msg .role {
+      display: block;
+      font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em;
+      text-transform: uppercase; margin-bottom: 4px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .msg.user { border-left: 2px solid var(--vscode-textLink-foreground); }
+    .msg.user .role { color: var(--vscode-textLink-foreground); }
+    .msg.assistant { border-left: 2px solid var(--vscode-charts-purple, var(--vscode-textLink-foreground)); }
+    .msg.error { border-left: 2px solid var(--vscode-errorForeground); color: var(--vscode-errorForeground); }
+    .msg.error .role { color: var(--vscode-errorForeground); }
+    .msg p { margin: 0 0 6px; }
+    .msg p:last-child { margin-bottom: 0; }
+    .msg pre { background: var(--vscode-textCodeBlock-background); padding: 8px; overflow-x: auto; border-radius: 4px; }
+    .msg code { font-family: var(--vscode-editor-font-family, monospace); }
+    #inputRow { display: flex; border-top: 1px solid var(--hupi-border); padding: 8px; gap: 6px; flex-shrink: 0; }
+    #input {
+      flex: 1; resize: none;
+      background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border); border-radius: 4px;
+      font-family: inherit; font-size: inherit; padding: 6px 8px;
+    }
+    #input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+    #send {
+      background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+      border: none; border-radius: 4px; padding: 0 14px; cursor: pointer; font-size: inherit;
+    }
+    #send:hover { background: var(--vscode-button-hoverBackground); }
   </style>
 </head>
 <body>
-  <div id="log"></div>
+  <div id="header">
+    <span class="title">HUPI</span>
+    <button id="newChat" title="Start a new conversation">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      New Chat
+    </button>
+  </div>
+  <div id="log">
+    <div id="empty">Ask about your code, or anything HUPI already remembers from past conversations.</div>
+  </div>
   <div id="inputRow">
     <textarea id="input" rows="2" placeholder="Ask HUPI... (Enter to send, Shift+Enter for newline)"></textarea>
     <button id="send">Send</button>
