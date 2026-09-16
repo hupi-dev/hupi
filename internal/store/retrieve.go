@@ -23,19 +23,40 @@ const (
 	// similarity, so a pgvector cosine *distance* of 1-threshold or less
 	// counts as a hit.
 	//
-	// 0.75 was the original design value but turned out to be miscalibrated
-	// for text-embedding-3-small in practice: a real end-to-end test (a
-	// correctly grounded, correctly worded daily summary — "favorite
-	// language is Rust... project called Meridian" — against the direct
-	// question "what language do I prefer and what's my project called")
-	// measured only 0.50 cosine similarity despite being an exact semantic
-	// match. A narrative summary paragraph and a direct question about its
-	// own content just don't embed as closely as 0.75 assumes, even with
-	// text-embedding-3-small doing its job correctly. 0.40 leaves headroom
-	// above that measured true-positive while still well above where
-	// genuinely unrelated content lands (typically <0.2) — re-measure if
-	// the embedding model changes, since this is empirically tuned to
-	// text-embedding-3-small, not a universal constant.
+	// 0.75 was the original design value but turned out to be
+	// miscalibrated for text-embedding-3-small: an initial single
+	// measurement (a correctly grounded summary against a direct question
+	// about its own content) came back only 0.50, despite being an exact
+	// semantic match, dropping this to 0.40. A later, broader measurement
+	// against a real (long, multi-fact) daily summary confirmed 0.40
+	// rather than just replacing one guess with another:
+	//
+	//   0.0716  true negative  — "what's the weather like today?"
+	//   0.1217  true negative  — "write me a haiku about the ocean"
+	//   0.1792  true positive  — "what language do I prefer?" (a real
+	//                            fact, but a single sentence buried in a
+	//                            long summary about something else)
+	//   0.1830  true negative  — "how do I set up a Kubernetes ingress?"
+	//   0.2866  near-miss      — "how does memory retrieval work?"
+	//   0.3023  true positive  — a dashboard fact, similarly buried
+	//   0.3288  near-miss      — generic Postgres tuning question
+	//   0.5226  true positive  — the summary's actual central topic, paraphrased
+	//   0.5729  true positive  — same, a different central fact
+	//   0.6301  true positive  — same, asked directly
+	//
+	// Sorted by similarity, true positives and true negatives *interleave*
+	// below ~0.33 — a real fact can score lower than a wholly unrelated
+	// question, because a long multi-topic summary embeds as an average
+	// of everything it mentions, and a single buried sentence barely
+	// moves that average. No threshold value fixes that; 0.40 is simply
+	// the only clean gap with zero false positives in this measurement
+	// (between the highest near-miss, 0.33, and the lowest strong true
+	// positive, 0.52) — going lower to catch the buried facts would also
+	// admit the near-misses sitting right next to them. The actual fix
+	// for a buried fact is giving it its own focused embedding instead of
+	// diluting it inside one long summary — see entityVectorSimilarityThreshold
+	// and schema/0012_entity_embeddings.sql, which exist for exactly this
+	// reason. Re-measure if the embedding model changes.
 	vectorSimilarityThreshold = 0.40
 	// entityVectorSimilarityThreshold is vectorSimilarityThreshold's
 	// counterpart for entities (schema/0012_entity_embeddings.sql) — kept
