@@ -43,11 +43,23 @@ const (
 	// entity text (a short "name (kind)\nkey: value" rendering, see
 	// entityEmbedText in internal/consolidation/store.go) has different
 	// embedding characteristics than a multi-sentence narrative summary,
-	// and 0.40 was calibrated specifically against summary prose —
-	// PLACEHOLDER pending the same kind of real end-to-end measurement
-	// that produced 0.40 (measure actual cosine similarity between a
-	// genuine paraphrase query and its matching entity's embedding, then
-	// set this just above that true positive) rather than assumed.
+	// and 0.40 was calibrated specifically against summary prose.
+	//
+	// Empirically measured against a real deployment's data
+	// (entity "preference:favorite-programming-language" = "Rust"):
+	//   "what programming language do I prefer?"      -> 0.6811 (true positive)
+	//   "what's my favorite programming language?"     -> 0.6666 (true positive)
+	//   "do I like Rust?" vs the same entity            -> 0.5343 (true positive,
+	//     the weakest one measured)
+	//   "do I like Rust?" vs entity "skill:rust"        -> 0.6240 (also a
+	//     legitimate match — a different, also-relevant entity)
+	//   "prefer"/"favorite" queries vs "skill:rust"     -> 0.41-0.44 (a related
+	//     but not-quite-right entity — correctly excluded)
+	//   "what's the weather today?" vs any of the above -> 0.07-0.10 (genuinely
+	//     unrelated, nowhere close)
+	// 0.50 sits in the gap between the weakest true positive (0.53) and the
+	// highest near-miss (0.44), with unrelated content an order of
+	// magnitude below both — re-measure if the embedding model changes.
 	entityVectorSimilarityThreshold = 0.50
 	maxVectorResults                = 5
 	// contextCharBudget is a crude stand-in for a real token budget
