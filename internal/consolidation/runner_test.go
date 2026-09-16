@@ -586,3 +586,104 @@ func TestCorrect_RejectsAlreadySupersededTarget(t *testing.T) {
 		t.Errorf("got %d summaries for the period after the rejected correction, want exactly 2 (v1, v2) — a fork would show 3", count)
 	}
 }
+
+// TestCurrentContent_DumpTemplateThenCorrectPreservesUntouchedAttributes
+// covers the actual workflow -dump-template exists for: since Correct
+// replaces a touched entity's attributes wholesale (see
+// TestCorrect_ReplacesEntityAttributesWholesale), hand-authoring
+// correction JSON from scratch means silently dropping every attribute
+// you don't think to restate. This confirms CurrentContent's dump
+// includes untouched attributes, and that editing just one field in the
+// dump and feeding it back through Correct leaves the rest intact.
+func TestCurrentContent_DumpTemplateThenCorrectPreservesUntouchedAttributes(t *testing.T) {
+	groundingJSON := `{"grounded": []}`
+	initialJSON := `{
+		"summary": "Original summary text.",
+		"key_facts": [],
+		"entities_touched": [{"id": "project:gizmo", "kind": "project", "name": "Gizmo", "attributes": {"a": "1", "b": "2"}}]
+	}`
+	runner, db := testRunner(t, initialJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dump-template"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2026-09-20",
+		output: ConsolidationOutput{
+			Summary: "Original summary text.",
+			EntitiesTouched: []EntityUpdate{
+				{ID: "project:gizmo", Kind: "project", Name: "Gizmo", Attributes: map[string]string{"a": "1", "b": "2"}},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed initial summary+entity: %v", err)
+	}
+
+	var originalID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select id from summaries where level = 'daily' and period = '2026-09-20' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&originalID)
+	}); err != nil {
+		t.Fatalf("load seeded summary id: %v", err)
+	}
+
+	dump, err := runner.CurrentContent(ctx, scope, originalID)
+	if err != nil {
+		t.Fatalf("CurrentContent: %v", err)
+	}
+	if dump.Summary != "Original summary text." {
+		t.Errorf("dumped summary = %q, want the original prose", dump.Summary)
+	}
+	if len(dump.EntitiesTouched) != 1 || dump.EntitiesTouched[0].Attributes["a"] != "1" || dump.EntitiesTouched[0].Attributes["b"] != "2" {
+		t.Fatalf("dumped entities = %+v, want project:gizmo with a=1, b=2", dump.EntitiesTouched)
+	}
+
+	// The only edit a human correcting this would actually make: change
+	// the one wrong field. "b" is carried forward untouched because the
+	// dump already had it, not because anyone had to remember to restate it.
+	dump.EntitiesTouched[0].Attributes["a"] = "99"
+	dump.Summary = "Corrected summary text."
+
+	if err := runner.Correct(ctx, scope, originalID, dump, "fixed field a using the dumped template", "test-operator"); err != nil {
+		t.Fatalf("Correct with edited dump: %v", err)
+	}
+
+	var attrsCT []byte
+	var keyVersion int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select attributes, key_version from entities where id = 'project:gizmo' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&attrsCT, &keyVersion)
+	}); err != nil {
+		t.Fatalf("load corrected entity: %v", err)
+	}
+	enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
+	if err != nil {
+		t.Fatalf("resolve key version: %v", err)
+	}
+	attrsJSON, err := enc.Decrypt(attrsCT)
+	if err != nil {
+		t.Fatalf("decrypt entity attributes: %v", err)
+	}
+	var attrs map[string]string
+	if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
+		t.Fatalf("parse entity attributes: %v", err)
+	}
+	if attrs["a"] != "99" {
+		t.Errorf("a = %q, want %q (the corrected value)", attrs["a"], "99")
+	}
+	if attrs["b"] != "2" {
+		t.Errorf("b = %q, want %q (untouched, preserved via the dumped template)", attrs["b"], "2")
+	}
+}

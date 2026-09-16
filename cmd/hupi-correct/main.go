@@ -15,6 +15,19 @@
 //	  "key_facts": [{"fact": "...", "source_episode_ids": ["..."]}],
 //	  "entities_touched": [{"id": "project:hupi", "kind": "project", "name": "HUPI", "attributes": {}}]
 //	}
+//
+// A correction replaces a touched entity's attributes wholesale rather
+// than merging them over the existing set (see
+// internal/consolidation/store.go's upsertEntities doc comment for why),
+// so writing correction.json from scratch means restating every
+// attribute the entity should still have, not just the one that changed
+// — easy to get wrong by hand. -dump-template writes a starting point
+// pre-filled with the summary's current content instead, so the only
+// edit needed is the one fact that actually changed:
+//
+//	hupi-correct -summary-id sum_2026-09-09_daily_v1 -dump-template correction.json
+//	# edit correction.json: change just the one line that's wrong
+//	hupi-correct -summary-id sum_2026-09-09_daily_v1 -reason "..." -content correction.json
 package main
 
 import (
@@ -38,14 +51,45 @@ func main() {
 
 func run() error {
 	summaryID := flag.String("summary-id", "", "id of the summary to correct, e.g. sum_user:default_2026-09-09_daily_v1")
-	reason := flag.String("reason", "", "why this correction is being made (required)")
+	reason := flag.String("reason", "", "why this correction is being made (required unless -dump-template)")
 	contentPath := flag.String("content", "", "path to a JSON file with the corrected content")
+	dumpTemplatePath := flag.String("dump-template", "", "instead of correcting, write the summary's current content (prose, key facts, touched entities' current attributes) to this path as a starting point to edit — see the package doc comment")
 	scopeKind := flag.String("scope-kind", identity.ScopeKindPrivate, "private | shared — must match the scope the summary was written in")
 	scopeOwner := flag.String("scope-owner", identity.DefaultUserID, "user id (private) or team id (shared)")
 	actor := flag.String("actor", defaultActor(), "who's making this correction — recorded on the audit log entry (docs/GAP_CLOSURE_PLAN.md §4.3); defaults to $USER")
 	flag.Parse()
 
-	if *summaryID == "" || *reason == "" || *contentPath == "" {
+	if *summaryID == "" {
+		return fmt.Errorf("usage: hupi-correct -summary-id <id> -reason <text> -content <file.json> [-scope-kind private|shared] [-scope-owner <id>]\n   or: hupi-correct -summary-id <id> -dump-template <file.json> [-scope-kind private|shared] [-scope-owner <id>]")
+	}
+
+	ctx := context.Background()
+	deps, err := bootstrap.Load(ctx)
+	if err != nil {
+		return err
+	}
+	defer deps.DB.Close()
+
+	runner := consolidation.New(deps.DB, deps.Keys, deps.Registry.Consolidation(), deps.Registry.Grounding(), deps.Registry.Embedding())
+	scope := identity.Scope{Kind: *scopeKind, Owner: *scopeOwner}
+
+	if *dumpTemplatePath != "" {
+		current, err := runner.CurrentContent(ctx, scope, *summaryID)
+		if err != nil {
+			return fmt.Errorf("load current content for %s: %w", *summaryID, err)
+		}
+		data, err := json.MarshalIndent(current, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode template: %w", err)
+		}
+		if err := os.WriteFile(*dumpTemplatePath, data, 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", *dumpTemplatePath, err)
+		}
+		fmt.Printf("wrote %s's current content to %s — edit the one thing that's wrong, leave the rest as-is, then apply with -content %s\n", *summaryID, *dumpTemplatePath, *dumpTemplatePath)
+		return nil
+	}
+
+	if *reason == "" || *contentPath == "" {
 		return fmt.Errorf("usage: hupi-correct -summary-id <id> -reason <text> -content <file.json> [-scope-kind private|shared] [-scope-owner <id>]")
 	}
 
@@ -58,15 +102,6 @@ func run() error {
 		return fmt.Errorf("parse %s: %w", *contentPath, err)
 	}
 
-	ctx := context.Background()
-	deps, err := bootstrap.Load(ctx)
-	if err != nil {
-		return err
-	}
-	defer deps.DB.Close()
-
-	runner := consolidation.New(deps.DB, deps.Keys, deps.Registry.Consolidation(), deps.Registry.Grounding(), deps.Registry.Embedding())
-	scope := identity.Scope{Kind: *scopeKind, Owner: *scopeOwner}
 	if err := runner.Correct(ctx, scope, *summaryID, output, *reason, *actor); err != nil {
 		return fmt.Errorf("correct %s: %w", *summaryID, err)
 	}

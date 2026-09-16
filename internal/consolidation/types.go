@@ -19,9 +19,15 @@ type KeyFactOutput struct {
 	SourceEpisodeIDs []string `json:"source_episode_ids"`
 }
 
-// EntityUpdate is one entity the consolidation LLM says this period
-// touched — merged into the existing entity's attributes, not replaced
-// wholesale (see upsertEntities / mergeAttributes).
+// EntityUpdate is one entity a consolidation run or correction says this
+// period touched. Normal consolidation (RunDaily/RunRollup) merges this
+// over the entity's existing attributes (see upsertEntities /
+// mergeAttributes); Runner.Correct instead replaces them wholesale — see
+// upsertEntities' doc comment for why those need to differ. Because of
+// that, a hand-authored correction should list every attribute the
+// entity should still have, not just the one that changed — Runner's
+// CurrentContent produces exactly that starting point (cmd/hupi-correct's
+// -dump-template).
 type EntityUpdate struct {
 	ID         string            `json:"id"`
 	Kind       string            `json:"kind"`

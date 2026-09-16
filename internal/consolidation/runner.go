@@ -219,6 +219,110 @@ func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID
 	})
 }
 
+// CurrentContent loads summaryID's current decrypted content — its prose,
+// key facts, and the current attributes of every entity it lists as
+// touched — shaped as a ConsolidationOutput ready to hand-edit and feed
+// back into Correct via cmd/hupi-correct's -content. This exists because
+// Correct replaces a touched entity's attributes wholesale rather than
+// merging (see upsertEntities' doc comment on why): a correction authored
+// from a blank slate silently drops every attribute the author didn't
+// think to restate, discovered by doing exactly that in manual testing.
+// Starting from this instead means editing only the one fact that
+// actually changed. Entities the summary lists in entities_touched that
+// have since been deleted are skipped, not an error — there's nothing
+// current left to dump for them.
+func (r *Runner) CurrentContent(ctx context.Context, scope identity.Scope, summaryID string) (ConsolidationOutput, error) {
+	var summaryCT []byte
+	var keyVersion int
+	var entityIDsLit string
+	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select summary, key_version, entities_touched from summaries
+			where id = $1 and scope_kind = $2 and scope_owner = $3
+		`, summaryID, scope.Kind, scope.Owner).Scan(&summaryCT, &keyVersion, &entityIDsLit)
+	})
+	if err != nil {
+		return ConsolidationOutput{}, fmt.Errorf("load summary %s: %w", summaryID, err)
+	}
+
+	enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
+	if err != nil {
+		return ConsolidationOutput{}, fmt.Errorf("resolve encryption key for summary %s: %w", summaryID, err)
+	}
+	summaryText, err := enc.Decrypt(summaryCT)
+	if err != nil {
+		return ConsolidationOutput{}, fmt.Errorf("decrypt summary %s: %w", summaryID, err)
+	}
+
+	var keyFacts []KeyFactOutput
+	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		rows, queryErr := tx.QueryContext(ctx, `
+			select fact, source_episode_ids from summary_key_facts where summary_id = $1
+		`, summaryID)
+		if queryErr != nil {
+			return queryErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var factCT []byte
+			var sourceIDsLit string
+			if scanErr := rows.Scan(&factCT, &sourceIDsLit); scanErr != nil {
+				return scanErr
+			}
+			factText, decErr := enc.Decrypt(factCT)
+			if decErr != nil {
+				return fmt.Errorf("decrypt key fact: %w", decErr)
+			}
+			keyFacts = append(keyFacts, KeyFactOutput{Fact: factText, SourceEpisodeIDs: pgfmt.ParseTextArray(sourceIDsLit)})
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return ConsolidationOutput{}, fmt.Errorf("load key facts for summary %s: %w", summaryID, err)
+	}
+
+	entityIDs := pgfmt.ParseTextArray(entityIDsLit)
+	entities := make([]EntityUpdate, 0, len(entityIDs))
+	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		for _, id := range entityIDs {
+			var kind, name string
+			var attrsCT []byte
+			var entKeyVersion int
+			scanErr := tx.QueryRowContext(ctx, `
+				select kind, name, attributes, key_version from entities
+				where id = $1 and scope_kind = $2 and scope_owner = $3
+			`, id, scope.Kind, scope.Owner).Scan(&kind, &name, &attrsCT, &entKeyVersion)
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				continue
+			}
+			if scanErr != nil {
+				return fmt.Errorf("load entity %s: %w", id, scanErr)
+			}
+			entEnc, keyErr := r.keys.GetVersion(ctx, scope, entKeyVersion)
+			if keyErr != nil {
+				return fmt.Errorf("resolve encryption key for entity %s: %w", id, keyErr)
+			}
+			attrsJSON, decErr := entEnc.Decrypt(attrsCT)
+			if decErr != nil {
+				return fmt.Errorf("decrypt attributes for entity %s: %w", id, decErr)
+			}
+			var attrs map[string]string
+			if attrsJSON != "" {
+				if jsonErr := json.Unmarshal([]byte(attrsJSON), &attrs); jsonErr != nil {
+					return fmt.Errorf("parse attributes for entity %s: %w", id, jsonErr)
+				}
+			}
+			entities = append(entities, EntityUpdate{ID: id, Kind: kind, Name: name, Attributes: attrs})
+		}
+		return nil
+	})
+	if err != nil {
+		return ConsolidationOutput{}, fmt.Errorf("load touched entities for summary %s: %w", summaryID, err)
+	}
+
+	return ConsolidationOutput{Summary: summaryText, KeyFacts: keyFacts, EntitiesTouched: entities}, nil
+}
+
 // sourceLevelBelow maps a rollup level to the level directly beneath it in
 // the daily->weekly->monthly->yearly hierarchy. A summary only records
 // which *periods* it was built from (source_summary_periods), not which

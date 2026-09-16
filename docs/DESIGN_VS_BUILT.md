@@ -24,6 +24,19 @@ the existing row `for update`, merges the incoming attribute map over it
 and writes the merged result. The description below is kept as a record of
 the original bug.
 
+**Later refinement**: this section's title is now only accurate for
+normal consolidation (`RunDaily`/`RunRollup`). `Runner.Correct` went back
+to replacing a touched entity's attributes wholesale — deliberately, not
+a regression — because merge let a correction that re-described a fact
+under a different attribute key than the original run used leave the
+stale key sitting right next to the corrected one. `cmd/hupi-correct
+-dump-template` exists specifically to make wholesale replacement safe to
+author by hand: it dumps the entity's current attributes as a starting
+point, so correcting one fact means editing one line, not reconstructing
+the whole set from memory. See `EntityUpdate`'s doc comment
+(`internal/consolidation/types.go`) and `upsertEntities`' for the full
+reasoning.
+
 **Design**: implicit in treating entities as a knowledge graph that
 accumulates facts about a person/project/preference over time.
 
