@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"hupi/internal/audit"
 	"hupi/internal/dbscope"
@@ -52,8 +53,25 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 		return fmt.Errorf("encrypt summary text: %w", err)
 	}
 
-	entityIDs := make([]string, 0, len(in.output.EntitiesTouched))
-	for _, e := range in.output.EntitiesTouched {
+	// Canonicalize each touched entity's id from kind+name rather than
+	// trusting whatever id string the caller (the consolidation LLM, or a
+	// hand-authored hupi-correct) happened to generate this time — see
+	// canonicalEntityID's doc comment for why: the same real-world entity
+	// otherwise fragments into multiple rows across separate runs. A
+	// fresh slice, not an in-place edit of in.output.EntitiesTouched:
+	// Correct's caller passed that ConsolidationOutput in and shouldn't
+	// see its own value silently mutated.
+	entities := make([]EntityUpdate, len(in.output.EntitiesTouched))
+	copy(entities, in.output.EntitiesTouched)
+	for i := range entities {
+		if entities[i].ID == "" {
+			continue
+		}
+		entities[i].ID = canonicalEntityID(entities[i].Kind, entities[i].Name, entities[i].ID)
+	}
+
+	entityIDs := make([]string, 0, len(entities))
+	for _, e := range entities {
 		if e.ID != "" {
 			entityIDs = append(entityIDs, e.ID)
 		}
@@ -111,7 +129,7 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			}
 		}
 
-		if err := r.upsertEntities(ctx, tx, in.scope, in.output.EntitiesTouched, in.replaceEntityAttrs); err != nil {
+		if err := r.upsertEntities(ctx, tx, in.scope, entities, in.replaceEntityAttrs); err != nil {
 			return fmt.Errorf("upsert entities for summary %s: %w", id, err)
 		}
 
@@ -174,6 +192,53 @@ func (r *Runner) nextSummaryID(ctx context.Context, q dbscope.Querier, scope ide
 		return "", fmt.Errorf("determine next summary version for %s %s: %w", level, period, err)
 	}
 	return fmt.Sprintf("sum_%s_%s_%s_v%d", scope.Owner, period, level, maxVersion+1), nil
+}
+
+// canonicalEntityID derives an entity's id from its kind and name instead
+// of trusting whatever id string a caller supplied — found necessary via
+// live testing: the same real-world entity ("Project Falcon") came back
+// as both "project:falcon" and "project:project-falcon" from two separate
+// consolidation runs, because the consolidation LLM (and, in principle, a
+// hand-authored hupi-correct) picks an id slug freely each time rather
+// than reusing a stable one. That fragmented one entity into two rows,
+// both of which surfaced in retrieval side by side. kind+name is far more
+// consistent across runs than a freely-chosen slug — an LLM restates a
+// real thing's actual name the same way much more reliably than it
+// reinvents a matching id — so it's what actually identifies "the same
+// entity" here, not whatever id string happened to get generated this
+// time.
+//
+// Trade-off, accepted deliberately: two genuinely distinct entities that
+// happen to share both kind and name (two different people named "Alex",
+// say) collapse into one row, with no disambiguation. That mirrors how
+// the rest of the entity model already treats id as sole identity — this
+// just computes that id from more stable inputs. Falls back to the
+// caller-supplied id unchanged if name doesn't slugify to anything (e.g.
+// empty, or all punctuation) rather than emit a bare "kind:" id.
+func canonicalEntityID(kind, name, fallback string) string {
+	slug := slugify(name)
+	if slug == "" {
+		return fallback
+	}
+	return kind + ":" + slug
+}
+
+// slugify lowercases s and collapses every run of characters outside
+// a-z0-9 into a single hyphen, trimming any leading/trailing hyphen.
+func slugify(s string) string {
+	var b strings.Builder
+	lastHyphen := true // suppresses a leading hyphen without a separate trim pass
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastHyphen = false
+		case !lastHyphen:
+			b.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	return strings.TrimSuffix(b.String(), "-")
 }
 
 // upsertEntities merges each entity's new attributes over its existing

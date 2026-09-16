@@ -37,6 +37,21 @@ the whole set from memory. See `EntityUpdate`'s doc comment
 (`internal/consolidation/types.go`) and `upsertEntities`' for the full
 reasoning.
 
+**Second later refinement**: merge/replace only fixed collisions between
+runs that agreed on an entity's `id`. Live testing found they don't
+reliably agree: the same real-world entity ("Project Falcon") came back
+as both `project:falcon` and `project:project-falcon` across two separate
+consolidation runs, fragmenting into two rows that both surfaced in
+retrieval side by side, since an LLM (or a hand-authored correction) picks
+an id slug freely each time rather than reusing a stable one.
+`storeSummary` (`internal/consolidation/store.go`) now overwrites every
+touched entity's id with `canonicalEntityID(kind, name, fallback)` before
+it ever reaches `upsertEntities` — derived from kind+name, not whatever
+string the caller supplied — since an LLM restates a real thing's actual
+name far more consistently than it reinvents a matching slug. Accepted
+trade-off: two genuinely distinct entities sharing both kind and name
+collapse into one row, with no disambiguation attempted.
+
 **Design**: implicit in treating entities as a knowledge graph that
 accumulates facts about a person/project/preference over time.
 

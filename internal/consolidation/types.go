@@ -29,6 +29,13 @@ type KeyFactOutput struct {
 // CurrentContent produces exactly that starting point (cmd/hupi-correct's
 // -dump-template).
 type EntityUpdate struct {
+	// ID is a hint, not the final identity: storeSummary overwrites it
+	// with canonicalEntityID(Kind, Name, ID) before ever touching the
+	// database, so the same real-world entity lands on the same row
+	// however its id string is spelled from one run to the next. Kept as
+	// an input field (rather than dropped) so a caller reading back
+	// CurrentContent's dump sees the id its correction needs to keep
+	// referring to.
 	ID         string            `json:"id"`
 	Kind       string            `json:"kind"`
 	Name       string            `json:"name"`

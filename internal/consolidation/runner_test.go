@@ -789,3 +789,89 @@ func TestCurrentContent_DumpTemplateThenCorrectPreservesUntouchedAttributes(t *t
 		t.Errorf("b = %q, want %q (untouched, preserved via the dumped template)", attrs["b"], "2")
 	}
 }
+
+// TestStoreSummary_CanonicalizesEntityIDByKindAndName is a regression test
+// for a real gap found via live end-to-end testing: two separate
+// consolidation runs generated two different id strings ("project:falcon"
+// and "project:project-falcon") for the same real-world entity, since the
+// consolidation LLM picks an id slug freely each time instead of reusing
+// a stable one. That fragmented one entity into two rows, both of which
+// surfaced in retrieval side by side. This seeds two summaries (as if
+// from two separate consolidation runs) whose EntitiesTouched name the
+// same kind+name but supply two different id strings, and confirms only
+// one entities row results — under the id storeSummary actually derives
+// from kind+name, not either of the two ids the caller supplied — with
+// both runs' attributes merged onto it.
+func TestStoreSummary_CanonicalizesEntityIDByKindAndName(t *testing.T) {
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, `{"summary": "unused", "key_facts": [], "entities_touched": []}`, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-entity-canonicalization"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	store := func(period, entityID string, attrs map[string]string) {
+		t.Helper()
+		if err := runner.storeSummary(ctx, storeSummaryInput{
+			scope:  scope,
+			level:  "daily",
+			period: period,
+			output: ConsolidationOutput{
+				Summary: "period " + period,
+				EntitiesTouched: []EntityUpdate{
+					{ID: entityID, Kind: "project", Name: "Project Falcon", Attributes: attrs},
+				},
+			},
+			actor: systemActor,
+		}); err != nil {
+			t.Fatalf("storeSummary for %s: %v", period, err)
+		}
+	}
+
+	store("2026-09-20", "project:falcon", map[string]string{"launch": "Q3"})
+	store("2026-09-21", "project:project-falcon", map[string]string{"launch": "Q2"})
+
+	var count int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from entities where kind = 'project' and name = 'Project Falcon' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&count)
+	}); err != nil {
+		t.Fatalf("count entities: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("got %d entities rows for kind=project name=%q, want exactly 1 — two different ids should have canonicalized to the same row", count, "Project Falcon")
+	}
+
+	const canonicalID = "project:project-falcon"
+	var attrsCT []byte
+	var keyVersion int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select attributes, key_version from entities where id = $1 and scope_kind = $2 and scope_owner = $3
+		`, canonicalID, scope.Kind, scope.Owner).Scan(&attrsCT, &keyVersion)
+	}); err != nil {
+		t.Fatalf("load entity at canonical id %s: %v", canonicalID, err)
+	}
+	enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
+	if err != nil {
+		t.Fatalf("resolve key version: %v", err)
+	}
+	attrsJSON, err := enc.Decrypt(attrsCT)
+	if err != nil {
+		t.Fatalf("decrypt attributes: %v", err)
+	}
+	var attrs map[string]string
+	if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
+		t.Fatalf("parse attributes: %v", err)
+	}
+	if attrs["launch"] != "Q2" {
+		t.Errorf("launch = %q, want %q (the second run's value, merged onto the same canonicalized row)", attrs["launch"], "Q2")
+	}
+}
