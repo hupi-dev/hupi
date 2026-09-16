@@ -43,6 +43,16 @@ autocomplete/Tab-style ghost text, and agentic multi-file edits.
      deployment and want requests routed through the team endpoint instead
      of your private one.
 
+### Using Remote-SSH / WSL / Dev Containers?
+
+This extension always runs on your **local** machine (`extensionKind:
+["ui"]`), even when VS Code is connected to a remote workspace — so
+`hupi.baseUrl` needs to be reachable from there, not from the remote
+host. See [docs/VSCODE_EXTENSION.md § Using VS Code's Remote-SSH / WSL /
+Dev Containers](../docs/VSCODE_EXTENSION.md#using-vs-codes-remote-ssh--wsl--dev-containers)
+for how to reach a gateway running on or behind a remote connection
+(short version: VS Code's own "Forward a Port" command).
+
 ## Running it locally (development)
 
 The Marketplace install above is all you need to just use the extension.

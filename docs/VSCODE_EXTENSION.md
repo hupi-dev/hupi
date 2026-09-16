@@ -77,6 +77,39 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
    profile name — blank uses HUPI's default chat provider) and
    `hupi.teamId` (only for a Tier 3 shared-team deployment).
 
+### Using VS Code's Remote-SSH / WSL / Dev Containers
+
+This extension declares `"extensionKind": ["ui"]` (`package.json`), so it
+always runs on your local machine, even when VS Code is connected to a
+remote workspace — this is deliberate, not a limitation. Custom activity
+bar icons and other UI contributions are a known weak point for
+extensions that run on the remote side instead, and this extension has
+no genuine need to run remotely anyway: it only makes outbound HTTP
+calls and reads the active editor via the standard `vscode` API, neither
+of which requires remote-host filesystem or process access.
+
+The one consequence: `hupi.baseUrl` must be reachable from wherever the
+extension actually runs — your **local** machine, not the remote host —
+even if the HUPI gateway itself lives on that remote host or somewhere
+else entirely. That's a networking question, independent of the
+extension, with the same answer as for any other local tool that needs
+to reach a service behind a remote connection:
+
+- **Gateway running on the same remote host you're connected to** — use
+  VS Code's built-in port forwarding: Command Palette → **"Forward a
+  Port"** → the gateway's port (e.g. `8787`). VS Code forwards that port
+  from the remote host to your local machine over the same SSH
+  connection, automatically — no separate tunnel to manage. Then set
+  `hupi.baseUrl` to `http://localhost:<forwarded-port>`.
+- **Gateway running somewhere else** (a separate VM, on-prem server,
+  etc.) — reach it the same way any local client would: a direct SSH
+  tunnel from your own machine (`ssh -L <port>:localhost:<port>
+  user@gateway-host`), a VPN, or a real routable address/DNS name for
+  the gateway. Running that tunnel *inside* a remote SSH session's
+  integrated terminal doesn't help — that terminal executes on the
+  remote host, not your local machine, so it can't make `localhost`
+  resolve correctly for a `ui`-kind extension running locally.
+
 ## Building it from source (for development, not needed to just use it)
 
 The Marketplace install above is all you need as a user. Build from source
