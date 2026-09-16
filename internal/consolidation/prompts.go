@@ -43,8 +43,29 @@ const teamSummarySystemPrompt = `You are HUPI's consolidation engine, writing a 
 
 Only include a key_fact if it is directly and specifically supported by the source texts you were given. Cite the exact source ids it came from. Do not include anything you are inferring, generalizing, or guessing beyond what the source text states. Never include any individual's personal preferences or private context here — only what's relevant to the team.`
 
-func buildSummaryPrompt(level, period string, sources []textSource) string {
+// buildSummaryPrompt assembles the consolidation LLM's user message.
+// establishedRecord, when non-empty, is the prose of the day's *current*
+// draft before this re-consolidation run — RunDaily passes this when a
+// day that already has a summary accumulates more episodes and gets
+// re-consolidated (internal/store/retrieve.go's supersede-not-fork fix).
+//
+// This exists because of a real failure mode found by testing that exact
+// path end to end: regenerating purely from raw episode transcripts with
+// no memory of what was already established meant a later re-run could
+// see the user's original raw statement (e.g. "500 concurrent jobs") and
+// the assistant's own later, correctly-corrected answer (e.g. "5,000",
+// grounded in a real hupi-correct) as two conflicting claims — with
+// nothing in the raw episodes revealing that the correction was
+// deliberate and authoritative, not a hallucination. The model reasonably
+// but wrongly treated its own past answer as the less trustworthy one and
+// walked the correction back. Telling it the established record already
+// reflects any corrections, and to only override it on explicit new
+// evidence in the sources, prevents that regression.
+func buildSummaryPrompt(level, period string, sources []textSource, establishedRecord string) string {
 	var sb strings.Builder
+	if establishedRecord != "" {
+		fmt.Fprintf(&sb, "ALREADY-ESTABLISHED RECORD for this %s — the current, reviewed summary before this re-consolidation, which may already incorporate one or more deliberate human corrections not visible anywhere in the raw source texts below. Treat every fact in it as settled and correct. Only change something from it if a source text below EXPLICITLY states a new fact that supersedes it (the user or a later message clearly states a value changed, a decision was reversed, etc). Do NOT contradict, doubt, or walk back anything here merely because a raw source phrases something differently, states an earlier value in passing, or because your own past response in a source text differs from it — this record already reflects the outcome of any corrections that were made, even when the raw sources don't show that correction happening.\n\n%s\n\n", level, establishedRecord)
+	}
 	fmt.Fprintf(&sb, "Level: %s\nPeriod: %s\n\nSource texts:\n", level, period)
 	for _, s := range sources {
 		fmt.Fprintf(&sb, "\n--- id: %s ---\n%s\n", s.id, s.text)

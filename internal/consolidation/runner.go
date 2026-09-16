@@ -75,7 +75,23 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		return nil
 	}
 
-	output, err := r.generateSummary(ctx, scope, "daily", period, sources)
+	// See buildSummaryPrompt's doc comment: without this, regenerating
+	// from raw episodes on a re-consolidation can see the user's original
+	// raw statement and a later, already-corrected answer as conflicting
+	// claims and walk the correction back, since nothing in the raw
+	// episodes reveals that the correction was deliberate.
+	var establishedRecord string
+	if existingCurrentID != "" {
+		if err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+			var err error
+			establishedRecord, err = r.loadSummaryText(ctx, tx, scope, existingCurrentID)
+			return err
+		}); err != nil {
+			return fmt.Errorf("consolidation: load established record %s for %s: %w", existingCurrentID, period, err)
+		}
+	}
+
+	output, err := r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
 	if err != nil {
 		return fmt.Errorf("consolidation: generate daily summary for %s: %w", period, err)
 	}
@@ -434,7 +450,10 @@ func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sou
 		return nil
 	}
 
-	output, err := r.generateSummary(ctx, scope, level, period, sources)
+	// No establishedRecord: RunRollup only ever generates when
+	// summaryExists says nothing exists yet for this level+period, so
+	// there's never a prior draft to preserve continuity with.
+	output, err := r.generateSummary(ctx, scope, level, period, sources, "")
 	if err != nil {
 		return fmt.Errorf("consolidation: generate %s summary for %s: %w", level, period, err)
 	}
@@ -557,6 +576,25 @@ func (r *Runner) currentSummaryID(ctx context.Context, q dbscope.Querier, scope 
 	return id, err
 }
 
+// loadSummaryText loads and decrypts a single summary's prose by id —
+// used by RunDaily to give generateSummary the day's established record
+// on a re-consolidation (see buildSummaryPrompt), and by CurrentContent
+// for cmd/hupi-correct's -dump-template.
+func (r *Runner) loadSummaryText(ctx context.Context, q dbscope.Querier, scope identity.Scope, id string) (string, error) {
+	var summaryCT []byte
+	var keyVersion int
+	if err := q.QueryRowContext(ctx, `
+		select summary, key_version from summaries where id = $1 and scope_kind = $2 and scope_owner = $3
+	`, id, scope.Kind, scope.Owner).Scan(&summaryCT, &keyVersion); err != nil {
+		return "", err
+	}
+	enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
+	if err != nil {
+		return "", fmt.Errorf("resolve encryption key: %w", err)
+	}
+	return enc.Decrypt(summaryCT)
+}
+
 // loadSummaries feeds rollups (weekly from daily, monthly from weekly, ...)
 // — it must load the *current* version of each source period, not
 // whichever version happens to have never been superseded by anything.
@@ -601,8 +639,10 @@ func (r *Runner) loadSummaries(ctx context.Context, q dbscope.Querier, scope ide
 
 // generateSummary picks a scope-appropriate system prompt (team-neutral
 // voice for shared scope, per docs/TIER3_PLAN.md §5) before calling the
-// consolidation LLM.
-func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, level, period string, sources []textSource) (ConsolidationOutput, error) {
+// consolidation LLM. establishedRecord is non-empty only when RunDaily is
+// re-consolidating a day that already has a current draft — see
+// buildSummaryPrompt's doc comment for why that needs special handling.
+func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, level, period string, sources []textSource, establishedRecord string) (ConsolidationOutput, error) {
 	systemPrompt := summarySystemPrompt
 	if scope.Kind == identity.ScopeKindShared {
 		systemPrompt = teamSummarySystemPrompt
@@ -611,7 +651,7 @@ func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, leve
 	resp, err := r.consolidation.ChatCompletion(ctx, provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: systemPrompt},
-			{Role: provider.RoleUser, Content: buildSummaryPrompt(level, period, sources)},
+			{Role: provider.RoleUser, Content: buildSummaryPrompt(level, period, sources, establishedRecord)},
 		},
 	})
 	if err != nil {

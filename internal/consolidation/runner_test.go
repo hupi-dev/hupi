@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,13 +26,23 @@ var errFakeNotImplemented = errors.New("fake provider: not implemented, not need
 // fakeConsolidationProvider returns a fixed, valid ConsolidationOutput
 // JSON payload — enough to exercise storeSummary's real transaction path
 // (the thing this file's test cares about) without a real LLM.
-type fakeConsolidationProvider struct{ response string }
+// capturedRequests, when non-nil, records every ChatRequest this provider
+// receives — used to assert on prompt *content* (e.g. that RunDaily
+// actually threaded the established-record text into the prompt) without
+// needing a real LLM to react to it correctly.
+type fakeConsolidationProvider struct {
+	response         string
+	capturedRequests *[]provider.ChatRequest
+}
 
 func (fakeConsolidationProvider) Name() string   { return "fake" }
 func (fakeConsolidationProvider) Vendor() string { return "fake" }
 func (fakeConsolidationProvider) Model() string  { return "fake-model" }
 
-func (f fakeConsolidationProvider) ChatCompletion(context.Context, provider.ChatRequest) (provider.ChatResponse, error) {
+func (f fakeConsolidationProvider) ChatCompletion(_ context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+	if f.capturedRequests != nil {
+		*f.capturedRequests = append(*f.capturedRequests, req)
+	}
 	return provider.ChatResponse{Message: provider.Message{Role: provider.RoleAssistant, Content: f.response}}, nil
 }
 
@@ -416,6 +427,97 @@ func TestRunDaily_SupersedesExistingDraftOnReconsolidation(t *testing.T) {
 	}
 	if current == firstID {
 		t.Error("currentSummaryID still resolves to the superseded first draft")
+	}
+}
+
+// TestRunDaily_PassesEstablishedRecordOnReconsolidation is a regression
+// test for a real failure mode found via live end-to-end testing, one
+// level deeper than the supersede-not-fork fix above: once RunDaily
+// started regenerating and superseding an existing draft, the regenerated
+// draft had no way to know a fact in it had already been corrected.
+// Regenerating purely from raw episode transcripts, the model saw the
+// user's original raw statement (e.g. "500 concurrent jobs") and a later,
+// already-corrected answer (e.g. "5,000", grounded in a real
+// hupi-correct) as two conflicting claims with no signal that the
+// correction was deliberate — and walked it back, treating its own
+// correctly-corrected past answer as the less trustworthy one. This
+// confirms RunDaily now threads the existing draft's text into the
+// consolidation prompt as an established record on a re-consolidation,
+// and omits it on a first run where there's nothing to establish yet.
+func TestRunDaily_PassesEstablishedRecordOnReconsolidation(t *testing.T) {
+	dsn := os.Getenv("HUPI_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("HUPI_TEST_DATABASE_URL not set; skipping integration test")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	keys := crypto.NewKeyStore(db, make([]byte, 32))
+
+	var captured []provider.ChatRequest
+	firstJSON := `{"summary": "First draft.", "key_facts": [], "entities_touched": []}`
+	groundingJSON := `{"grounded": []}`
+	consolidationProvider := fakeConsolidationProvider{response: firstJSON, capturedRequests: &captured}
+	groundingProvider := fakeConsolidationProvider{response: groundingJSON}
+	runner := New(db, keys, consolidationProvider, groundingProvider, consolidationProvider)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-established-record"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	date := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	seedEpisode := func(id, input, output string) {
+		t.Helper()
+		inputCT, _ := enc.Encrypt(input)
+		outputCT, _ := enc.Encrypt(output)
+		if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `
+				insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+				values ($1, $2, 'interaction', $3, $4, 'sha256:test', 0.5, $5, $6)
+			`, id, date, inputCT, outputCT, scope.Kind, scope.Owner)
+			return err
+		}); err != nil {
+			t.Fatalf("seed episode %s: %v", id, err)
+		}
+	}
+	seedEpisode("ep_established_1", "first question", "first answer")
+
+	if err := runner.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("first RunDaily: %v", err)
+	}
+	if len(captured) != 1 {
+		t.Fatalf("got %d consolidation LLM calls after first RunDaily, want 1", len(captured))
+	}
+	firstPrompt := captured[0].Messages[len(captured[0].Messages)-1].Content
+	if strings.Contains(firstPrompt, "ALREADY-ESTABLISHED RECORD") {
+		t.Error("first RunDaily call included an established-record block — there was nothing to establish yet")
+	}
+
+	seedEpisode("ep_established_2", "second question", "second answer")
+	if err := runner.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("second RunDaily: %v", err)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("got %d consolidation LLM calls after second RunDaily, want 2", len(captured))
+	}
+	secondPrompt := captured[1].Messages[len(captured[1].Messages)-1].Content
+	if !strings.Contains(secondPrompt, "ALREADY-ESTABLISHED RECORD") {
+		t.Error("second RunDaily call (a re-consolidation) did not include the established-record block")
+	}
+	if !strings.Contains(secondPrompt, "First draft.") {
+		t.Error("established-record block did not contain the prior draft's actual text")
 	}
 }
 
