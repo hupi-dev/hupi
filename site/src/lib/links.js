@@ -3,13 +3,18 @@
 
 export const GITHUB_URL = 'https://github.com/samuel-sujith/hupi';
 
-// TODO(replace-before-launch): point at a real docs site/route once one
-// exists. Deliberately not a same-origin "/docs" path — this site has no
-// such route, and a dead same-origin link 404s immediately with no way to
-// discover the mistake from the URL alone. Routing through GITHUB_URL
-// instead means the link is broken in exactly the same fixable way
-// GITHUB_URL itself already is: replace GITHUB_URL and this stays correct.
+// The site's own /docs page (src/pages/docs.astro) is the primary "Docs"
+// destination in nav/footer/hero now — this is only a deep link into the
+// docs/ directory listing on GitHub, used from within /docs, /faq, and
+// /compare for "the full reference" links.
 export const DOCS_URL = `${GITHUB_URL}/tree/main/docs`;
+
+// GitHub's file-view URL for one specific docs/*.md file — "tree" (used
+// by DOCS_URL) is for directory listings, "blob" is for an individual
+// file; using tree for a file works via GitHub's own redirect but isn't
+// the URL GitHub actually generates, so this builds the correct one
+// directly rather than relying on that redirect for permanent site copy.
+export const docFileURL = (name) => `${GITHUB_URL}/blob/main/docs/${name}`;
 
 export const CONTACT_EMAIL = 'work@hupi.dev';
 

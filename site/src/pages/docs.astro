@@ -1,0 +1,235 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import FinalCta from '../components/FinalCta.astro';
+import { GITHUB_URL, docFileURL, VSCODE_MARKETPLACE_URL } from '../lib/links.js';
+
+const tiers = [
+  {
+    name: 'Tier 1 — Personal',
+    who: 'One person, self-hosted',
+    body:
+      'The base install. No Authorization header required or checked — every request resolves to a single built-in identity. Point any OpenAI-compatible client at your gateway and it works immediately.',
+  },
+  {
+    name: 'Tier 2 — Professional (Single)',
+    who: 'One person, deployed by an organization',
+    body:
+      'Architecturally identical to Tier 1 — same binary, same install. The difference is operational: IT-managed rather than self-managed, secrets pulled from a real KMS instead of a local env var, an org retention policy enforced around the install rather than inside it.',
+  },
+  {
+    name: 'Tier 3 — Professional (Shared)',
+    who: 'A team, sharing some memory while keeping personal memory private',
+    body:
+      'Two additions on top of Tier 1: HUPI_REQUIRE_AUTH=true, and provisioning real users/teams via hupi-admin. Team conversations consolidate into shared, third-person team knowledge visible to every member — while each member’s own private history, and their personal self_model, stay theirs alone.',
+  },
+];
+
+const setupSteps = [
+  {
+    title: 'Postgres with pgvector',
+    body: 'Any Postgres works as long as the pgvector extension can be enabled on it — managed or self-hosted, nothing else about your setup is special-cased.',
+    code: `docker run -d --name hupi-pg \\
+  -e POSTGRES_PASSWORD=hupi \\
+  -e POSTGRES_DB=hupi \\
+  -p 5432:5432 \\
+  pgvector/pgvector:pg16`,
+  },
+  {
+    title: 'Apply the schema, in order',
+    body: 'The migrations in schema/ are numbered and must be applied in that order — later ones depend on tables and columns earlier ones create.',
+    code: `export HUPI_ADMIN_DATABASE_URL='postgres://postgres:hupi@localhost:5432/hupi?sslmode=disable'
+
+for f in schema/0*.sql; do
+  psql "$HUPI_ADMIN_DATABASE_URL" -f "$f"
+done`,
+  },
+  {
+    title: 'Write providers.yaml',
+    body: 'Name which AI vendor(s) to use for live chat, for consolidation, for the independent grounding check, and for embeddings — these can all be different vendors, or the same one. See providers.yaml.example.',
+    code: null,
+  },
+  {
+    title: 'Set the required environment variables',
+    body: 'HUPI_APP_DATABASE_URL should point at the restricted hupi_app role (not the admin role), not the superuser you used to apply migrations.',
+    code: `export HUPI_APP_DATABASE_URL='postgres://hupi_app:pick-a-real-secret@localhost:5432/hupi?sslmode=disable'
+export HUPI_KEK=$(head -c32 /dev/urandom | base64)
+export HUPI_PROVIDERS_CONFIG=./providers.yaml`,
+  },
+  {
+    title: 'Start the gateway',
+    body: 'Listens on 127.0.0.1:8787 by default and speaks the standard OpenAI-compatible chat completions API — point any existing client at it.',
+    code: `./bin/hupi`,
+  },
+  {
+    title: 'Schedule consolidation',
+    body: 'Run hupi-consolidate once daily (cron) so conversations get distilled into searchable, fact-checked summaries overnight. Optionally hupi-selfcheck weekly once you have a few probe questions.',
+    code: null,
+  },
+];
+---
+
+<Layout
+  title="Docs — Install, setup & tiers | HUPI"
+  description="How to install HUPI, set up Postgres with pgvector, write a providers.yaml, and choose between Tier 1 (personal), Tier 2 (professional single), and Tier 3 (professional shared, team) deployments."
+>
+  <Nav />
+  <main>
+    <section class="relative overflow-hidden border-b border-white/5">
+      <div
+        class="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"
+      >
+      </div>
+      <div class="relative mx-auto max-w-4xl px-6 pb-16 pt-20 text-center sm:pt-28">
+        <p
+          class="font-mono-tight mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-navy-800/60 px-4 py-1.5 text-xs uppercase tracking-widest text-fog-300"
+        >
+          Documentation
+        </p>
+        <h1 class="text-balance text-4xl font-extrabold tracking-tight text-fog-100 sm:text-5xl">
+          Install HUPI, set it up, and pick a tier.
+        </h1>
+        <p class="text-balance mx-auto mt-6 max-w-2xl text-lg text-fog-300">
+          Everything below is the condensed version, verified against the actual code. The full
+          reference — every flag, every migration, troubleshooting — lives in
+          <a href={GITHUB_URL} class="text-ember-500 underline decoration-dotted hover:text-ember-400"
+            >the repo</a
+          >.
+        </p>
+      </div>
+    </section>
+
+    <section id="quick-install" class="border-b border-white/5 bg-navy-950/40">
+      <div class="mx-auto max-w-4xl px-6 py-20 sm:py-28">
+        <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">Quick install</h2>
+        <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+          The fast path: <code class="font-mono-tight text-ember-400">install.sh</code>
+        </p>
+        <p class="mt-4 leading-relaxed text-fog-300">
+          All three tiers run from the same install — Tiers 1 and 2 are architecturally
+          identical, and Tier 3 is the same install plus two extra steps at the end. There's no
+          separate build or package per tier.
+        </p>
+        <pre
+          class="font-mono-tight mt-6 overflow-x-auto rounded-lg border border-white/10 bg-ink p-4 text-sm text-fog-300"
+        ><code>./install.sh                     # fully interactive — asks as it goes
+./install.sh --tier=3 --yes      # non-interactive; fails loudly instead of
+                                  # guessing when something has no safe default
+./install.sh --help              # every flag, including pointing it at
+                                  # Postgres/providers you already run</code></pre>
+        <p class="mt-4 text-sm leading-relaxed text-fog-500">
+          Safe to re-run — schema migrations, <code class="font-mono-tight">hupi.env</code>, the
+          encryption key, and the app role's password are all re-detected and reused rather than
+          reapplied or rotated.
+        </p>
+        <p class="mt-6 text-sm text-fog-300">
+          Prerequisites: PostgreSQL 16+ with <code class="font-mono-tight">pgvector</code>, Go
+          1.25+ to build the binaries, and at least one LLM provider API key.
+        </p>
+      </div>
+    </section>
+
+    <section id="manual-setup" class="border-b border-white/5">
+      <div class="mx-auto max-w-4xl px-6 py-20 sm:py-28">
+        <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">Manual setup</h2>
+        <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+          What <code class="font-mono-tight text-ember-400">install.sh</code> automates, step by step
+        </p>
+        <div class="mt-10 space-y-8">
+          {
+            setupSteps.map((step, i) => (
+              <div class="border-l-2 border-white/10 pl-6">
+                <div class="flex items-baseline gap-3">
+                  <span class="font-mono-tight text-xs text-ember-500">0{i + 1}</span>
+                  <h3 class="text-lg font-semibold text-fog-100">{step.title}</h3>
+                </div>
+                <p class="mt-2 text-sm leading-relaxed text-fog-300">{step.body}</p>
+                {step.code && (
+                  <pre class="font-mono-tight mt-3 overflow-x-auto rounded-lg border border-white/10 bg-ink p-4 text-sm text-fog-300">
+                    <code>{step.code}</code>
+                  </pre>
+                )}
+              </div>
+            ))
+          }
+        </div>
+      </div>
+    </section>
+
+    <section id="tiers" class="border-b border-white/5 bg-navy-950/40">
+      <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
+        <div class="max-w-2xl">
+          <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">Deployment tiers</h2>
+          <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+            One install, three ways to run it.
+          </p>
+          <p class="mt-4 leading-relaxed text-fog-300">
+            All three tiers run the exact same software. Which one you're using is a function of
+            whether you've configured authentication and created any teams — not a different
+            product or a different build.
+          </p>
+        </div>
+
+        <div class="mt-12 grid gap-px overflow-hidden rounded-xl border border-white/10 bg-white/5 sm:grid-cols-3">
+          {
+            tiers.map((tier) => (
+              <div class="bg-navy-950 p-6 sm:p-8">
+                <h3 class="text-lg font-semibold text-fog-100">{tier.name}</h3>
+                <p class="mt-1 text-xs uppercase tracking-wide text-ember-500">{tier.who}</p>
+                <p class="mt-3 text-sm leading-relaxed text-fog-300">{tier.body}</p>
+              </div>
+            ))
+          }
+        </div>
+
+        <p class="mt-8 text-sm text-fog-500">
+          Tier 3's data isolation — per-team encryption keys, row-level security, audit logging —
+          is covered in detail on the <a href="/faq" class="text-ember-500 underline decoration-dotted hover:text-ember-400">FAQ page</a>.
+        </p>
+      </div>
+    </section>
+
+    <section id="full-reference" class="border-b border-white/5">
+      <div class="mx-auto max-w-4xl px-6 py-20 sm:py-28">
+        <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">Full reference</h2>
+        <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+          Every doc, on GitHub.
+        </p>
+        <ul class="mt-8 grid gap-3 sm:grid-cols-2">
+          {
+            [
+              // ARCHITECTURE.md lives at the repo root, not under docs/ —
+              // everything else here does, hence the one explicit href
+              // instead of docFileURL for that entry only.
+              ['INSTALL.md', 'All three tiers, every flag, troubleshooting', docFileURL('INSTALL.md')],
+              ['BUSINESS_PROCESS.md', 'What HUPI is and how it’s actually used, scenario by scenario', docFileURL('BUSINESS_PROCESS.md')],
+              ['ARCHITECTURE.md', 'The retrieval gate, consolidation engine, provider abstraction', `${GITHUB_URL}/blob/main/ARCHITECTURE.md`],
+              ['MEMORY_FORMAT.md', 'Episodes, summaries, entities, grounding & correction', docFileURL('MEMORY_FORMAT.md')],
+              ['TIER3_PLAN.md', 'Team identity, workspaces, and isolation in depth', docFileURL('TIER3_PLAN.md')],
+              ['ADMIN_UI.md', 'Managing users, teams, and keys without the CLI', docFileURL('ADMIN_UI.md')],
+              ['VSCODE_EXTENSION.md', 'The VS Code chat sidebar and inline-edit extension', docFileURL('VSCODE_EXTENSION.md')],
+              ['API_REFERENCE.md', 'The full HTTP API surface', docFileURL('API_REFERENCE.md')],
+            ].map(([file, desc, href]) => (
+              <li class="rounded-lg border border-white/10 bg-navy-900/60 p-4">
+                <a
+                  href={href}
+                  class="font-mono-tight text-sm font-semibold text-ember-500 hover:text-ember-400"
+                >
+                  {file}
+                </a>
+                <p class="mt-1 text-sm text-fog-300">{desc}</p>
+              </li>
+            ))
+          }
+        </ul>
+        <p class="mt-8 text-sm text-fog-500">
+          Using the VS Code extension instead of the raw API? It's on the{' '}
+          <a href={VSCODE_MARKETPLACE_URL} class="text-ember-500 underline decoration-dotted hover:text-ember-400">
+            Marketplace
+          </a>.
+        </p>
+      </div>
+    </section>
+  </main>
+  <FinalCta />
+</Layout>

@@ -1,5 +1,5 @@
 ---
-import { GITHUB_URL, DOCS_URL } from '../lib/links.js';
+import { GITHUB_URL } from '../lib/links.js';
 ---
 
 <header class="sticky top-0 z-50 border-b border-white/5 bg-ink/80 backdrop-blur">
@@ -7,7 +7,7 @@ import { GITHUB_URL, DOCS_URL } from '../lib/links.js';
     class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4"
     aria-label="Primary"
   >
-    <a href="#top" class="flex items-center gap-2 text-lg font-bold tracking-tight text-fog-100">
+    <a href="/#top" class="flex items-center gap-2 text-lg font-bold tracking-tight text-fog-100">
       <span class="flex h-7 w-7 items-center justify-center rounded-md bg-navy-700 text-ember-500">
         <svg viewBox="0 0 32 32" class="h-4 w-4" aria-hidden="true">
           <path
@@ -22,12 +22,18 @@ import { GITHUB_URL, DOCS_URL } from '../lib/links.js';
       HUPI
     </a>
 
-    <div class="hidden items-center gap-8 text-sm text-fog-300 md:flex">
-      <a href="#how-it-works" class="transition-colors hover:text-fog-100">How it works</a>
-      <a href="#editor" class="transition-colors hover:text-fog-100">Editor</a>
-      <a href="#security" class="transition-colors hover:text-fog-100">Security</a>
-      <a href="#deploy" class="transition-colors hover:text-fog-100">Deploy</a>
-      <a href={DOCS_URL} class="transition-colors hover:text-fog-100">Docs</a>
+    <!-- Homepage-section anchors use a leading "/" so they resolve
+         correctly from /docs and /faq too, not just from "/" itself —
+         same-document scroll when already on "/", full navigation
+         followed by a scroll otherwise. -->
+    <div class="hidden items-center gap-6 text-sm text-fog-300 lg:flex">
+      <a href="/#how-it-works" class="transition-colors hover:text-fog-100">How it works</a>
+      <a href="/#editor" class="transition-colors hover:text-fog-100">Editor</a>
+      <a href="/#security" class="transition-colors hover:text-fog-100">Security</a>
+      <a href="/#deploy" class="transition-colors hover:text-fog-100">Deploy</a>
+      <a href="/docs" class="transition-colors hover:text-fog-100">Docs</a>
+      <a href="/faq" class="transition-colors hover:text-fog-100">FAQ</a>
+      <a href="/compare" class="transition-colors hover:text-fog-100">Compare</a>
     </div>
 
     <a

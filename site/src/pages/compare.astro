@@ -1,0 +1,202 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import FinalCta from '../components/FinalCta.astro';
+import { GITHUB_URL } from '../lib/links.js';
+
+const rows = [
+  {
+    label: 'How you use it',
+    hupi: 'Drop-in HTTP gateway — point your existing OpenAI-compatible client at it, zero code changes',
+    vendor: 'Built into one vendor’s own chat app/API',
+    mem0: 'SDK you call from your own app code (add/search calls)',
+    zep: 'SDK/API against a hosted context-graph service',
+    letta: 'Full agent runtime — your agents live and execute inside it',
+  },
+  {
+    label: 'Self-hosted',
+    hupi: 'Yes — the whole thing, on your own Postgres',
+    vendor: 'No',
+    mem0: 'Yes — open-source package or self-hosted server',
+    zep: 'Core Graphiti engine only; the full Zep product is cloud-hosted only',
+    letta: 'Yes — server process backed by your own Postgres',
+  },
+  {
+    label: 'Works across LLM vendors',
+    hupi: 'Yes — any OpenAI-API-compatible provider, plus Anthropic’s native API',
+    vendor: 'No — locked to that vendor’s own models and apps',
+    mem0: 'Yes — provider-agnostic by design',
+    zep: 'Yes — provider-agnostic',
+    letta: 'Yes — model-agnostic agent runtime',
+  },
+  {
+    label: 'Independent fact-check before trusting a memory',
+    hupi: 'Yes — a separate AI call verifies every claimed fact against the source conversation before it’s trusted',
+    vendor: 'Not disclosed',
+    mem0: 'Not a built-in step',
+    zep: 'Entity/fact extraction, not an independent verification pass',
+    letta: 'Not a built-in step',
+  },
+  {
+    label: 'Retrieval audit trail',
+    hupi: 'Yes — every turn logs exactly what was retrieved and why (hupi-trace, hupi-audit)',
+    vendor: 'No',
+    mem0: 'Request/audit logs on the self-hosted server',
+    zep: 'Platform-level logging (cloud product)',
+    letta: 'Agent-level state, not a dedicated retrieval audit log',
+  },
+  {
+    label: 'Team workspaces with real isolation',
+    hupi: 'Yes — per-team encryption keys + Postgres row-level security, independent of app code',
+    vendor: 'No — single-user by design',
+    mem0: 'Multi-user scoping in the API; isolation model is what you build around it',
+    zep: 'Depends on plan/deployment',
+    letta: 'Multi-agent, not a team-workspace/tenancy model',
+  },
+  {
+    label: 'License',
+    hupi: 'MIT, open source',
+    vendor: 'Proprietary',
+    mem0: 'Apache-2.0, open source',
+    zep: 'Graphiti engine: Apache-2.0. Full product: proprietary, cloud-only',
+    letta: 'Apache-2.0, open source',
+  },
+];
+
+const columns = [
+  { key: 'hupi', name: 'HUPI', highlight: true },
+  { key: 'vendor', name: 'Vendor-native memory', highlight: false, sub: '(ChatGPT, Claude, Gemini)' },
+  { key: 'mem0', name: 'Mem0', highlight: false },
+  { key: 'zep', name: 'Zep / Graphiti', highlight: false },
+  { key: 'letta', name: 'Letta (MemGPT)', highlight: false },
+];
+---
+
+<Layout
+  title="HUPI vs Mem0, Zep, Letta & vendor memory | Comparison"
+  description="How HUPI's self-hosted, provider-independent memory gateway compares to ChatGPT/Claude memory, Mem0, Zep (Graphiti), and Letta (MemGPT) — architecture, self-hosting, isolation, and audit trails."
+>
+  <Nav />
+  <main>
+    <section class="relative overflow-hidden border-b border-white/5">
+      <div
+        class="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"
+      >
+      </div>
+      <div class="relative mx-auto max-w-4xl px-6 pb-16 pt-20 text-center sm:pt-28">
+        <p
+          class="font-mono-tight mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-navy-800/60 px-4 py-1.5 text-xs uppercase tracking-widest text-fog-300"
+        >
+          Comparison
+        </p>
+        <h1 class="text-balance text-4xl font-extrabold tracking-tight text-fog-100 sm:text-5xl">
+          How HUPI compares to other AI memory approaches.
+        </h1>
+        <p class="text-balance mx-auto mt-6 max-w-2xl text-lg text-fog-300">
+          An honest comparison, not a strawman — each of these is a real, useful tool for
+          different jobs. Here's specifically where HUPI's architecture differs.
+        </p>
+      </div>
+    </section>
+
+    <section class="border-b border-white/5 bg-navy-950/40">
+      <div class="mx-auto max-w-6xl px-6 py-16 sm:py-20">
+        <div class="overflow-x-auto rounded-xl border border-white/10">
+          <table class="w-full min-w-[900px] border-collapse text-left text-sm">
+            <thead>
+              <tr class="bg-navy-900">
+                <th class="p-4 font-semibold text-fog-500"></th>
+                {
+                  columns.map((col) => (
+                    <th
+                      class={`p-4 font-semibold ${col.highlight ? 'bg-ember-500/10 text-ember-400' : 'text-fog-100'}`}
+                    >
+                      {col.name}
+                      {col.sub && <div class="mt-0.5 text-xs font-normal text-fog-500">{col.sub}</div>}
+                    </th>
+                  ))
+                }
+              </tr>
+            </thead>
+            <tbody>
+              {
+                rows.map((row) => (
+                  <tr class="odd:bg-white/[0.02]">
+                    <th scope="row" class="border-t border-white/5 p-4 align-top font-semibold text-fog-100">
+                      {row.label}
+                    </th>
+                    {columns.map((col) => (
+                      <td
+                        class={`border-t border-white/5 p-4 align-top leading-relaxed text-fog-300 ${col.highlight ? 'bg-ember-500/5' : ''}`}
+                      >
+                        {row[col.key]}
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              }
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-4 text-xs text-fog-700">
+          Based on public documentation as of this writing — this space moves fast, so verify
+          current details against each project's own site before deciding. Corrections welcome:
+          open an issue on <a href={GITHUB_URL} class="underline decoration-dotted hover:text-fog-500">GitHub</a>.
+        </p>
+      </div>
+    </section>
+
+    <section class="border-b border-white/5">
+      <div class="mx-auto max-w-4xl px-6 py-16 sm:py-20">
+        <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">In their own lane</h2>
+        <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+          When one of these is actually the better fit.
+        </p>
+        <div class="mt-10 space-y-8">
+          <div class="border-l-2 border-white/10 pl-6">
+            <h3 class="text-lg font-semibold text-fog-100">Vendor-native memory (ChatGPT, Claude, Gemini)</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">
+              Zero setup, and it's already there if you only ever use one vendor's chat app. The
+              trade-off is exactly that: it doesn't follow you to a different model, isn't
+              self-hosted, and gives you no way to audit what it retrieved for a given answer or
+              why. Reach for HUPI when you're building a product on top of an API rather than
+              using a vendor's own chat app, or when you need memory that survives a future
+              vendor switch.
+            </p>
+          </div>
+          <div class="border-l-2 border-white/10 pl-6">
+            <h3 class="text-lg font-semibold text-fog-100">Mem0</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">
+              A genuinely broad, actively developed open-source memory library with support for
+              far more vector-store backends than HUPI targets. It's a library you call from your
+              own application code, though — you're building the retrieval-injection loop
+              yourself. HUPI instead sits transparently in front of your existing
+              OpenAI-compatible client, so nothing in your application code changes at all.
+            </p>
+          </div>
+          <div class="border-l-2 border-white/10 pl-6">
+            <h3 class="text-lg font-semibold text-fog-100">Zep / Graphiti</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">
+              Graphiti's temporal knowledge graph is more sophisticated than HUPI's entity model
+              for tracking how relationships between facts change over time. The full Zep
+              product, though, is a cloud service — if self-hosting end to end matters to you,
+              you'd be assembling Graphiti yourself on your own graph database rather than running
+              a finished product.
+            </p>
+          </div>
+          <div class="border-l-2 border-white/10 pl-6">
+            <h3 class="text-lg font-semibold text-fog-100">Letta (MemGPT)</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">
+              A genuinely different category — a full, open-source agent runtime with memory
+              management as one part of a larger OS-like platform for agents that act
+              autonomously. If you want to build agents that live inside a persistent runtime,
+              Letta is built for exactly that. HUPI is narrower and more composable on purpose: a
+              memory layer for whatever client you already have, not a runtime you build inside.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <FinalCta />
+</Layout>

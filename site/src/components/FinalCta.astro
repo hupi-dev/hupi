@@ -1,5 +1,5 @@
 ---
-import { GITHUB_URL, DOCS_URL, CONTACT_EMAIL, LICENSE_LABEL, LICENSE_URL } from '../lib/links.js';
+import { GITHUB_URL, CONTACT_EMAIL, LICENSE_LABEL, LICENSE_URL } from '../lib/links.js';
 const year = new Date().getFullYear();
 ---
 
@@ -25,7 +25,7 @@ const year = new Date().getFullYear();
         View on GitHub
       </a>
       <a
-        href={DOCS_URL}
+        href="/docs"
         class="w-full rounded-lg border border-white/15 px-6 py-3 text-center text-base font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5 sm:w-auto"
       >
         Read the docs
@@ -39,7 +39,9 @@ const year = new Date().getFullYear();
     <p>&copy; {year} HUPI. Open source under the MIT License.</p>
     <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
       <a href={GITHUB_URL} class="transition-colors hover:text-fog-300">GitHub</a>
-      <a href={DOCS_URL} class="transition-colors hover:text-fog-300">Docs</a>
+      <a href="/docs" class="transition-colors hover:text-fog-300">Docs</a>
+      <a href="/faq" class="transition-colors hover:text-fog-300">FAQ</a>
+      <a href="/compare" class="transition-colors hover:text-fog-300">Compare</a>
       <a href={`mailto:${CONTACT_EMAIL}`} class="transition-colors hover:text-fog-300">
         {CONTACT_EMAIL}
       </a>

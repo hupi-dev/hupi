@@ -1,0 +1,190 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import FinalCta from '../components/FinalCta.astro';
+import { GITHUB_URL, docFileURL } from '../lib/links.js';
+
+const groups = [
+  {
+    name: 'General',
+    items: [
+      {
+        q: 'What is HUPI?',
+        a: 'A memory layer that sits between you and any AI language model. Normally an AI’s memory resets the moment your conversation ends. HUPI durably records every conversation, distills it into searchable, fact-checked summaries overnight, and automatically re-injects relevant facts into future conversations — with any AI vendor, not just one.',
+      },
+      {
+        q: 'Is HUPI open source?',
+        a: `Yes, MIT licensed. The full source, including the schema migrations and every doc referenced on this page, is on <a href="${GITHUB_URL}" class="text-ember-500 underline decoration-dotted hover:text-ember-400">GitHub</a>.`,
+      },
+      {
+        q: 'What LLM providers does it support?',
+        a: 'Any OpenAI-API-compatible provider (OpenAI, Azure OpenAI, Groq, OpenRouter, local Ollama/vLLM) through one adapter, plus a dedicated adapter for Anthropic’s native API. Memory is stored as plain decrypted text and metadata, not tied to any one vendor’s format — switching providers is a config change, not a re-index.',
+      },
+      {
+        q: 'How is this different from a vendor’s built-in memory feature?',
+        a: 'It runs on your own infrastructure and your own Postgres, works with any vendor rather than locking you into one, fact-checks every memory against its source before trusting it (see "What is grounding?" below), and gives you an actual audit trail — for any past response, you can ask exactly what was remembered and from where, and get a real answer instead of a guess.',
+      },
+    ],
+  },
+  {
+    name: 'Tiers & isolation',
+    items: [
+      {
+        q: 'What are Tier 1, 2, and 3?',
+        a: 'All three run the exact same software. Tier 1 (Personal) is one person, self-hosted, no auth required. Tier 2 (Professional Single) is architecturally identical to Tier 1 — the difference is purely operational (IT-managed rather than self-managed). Tier 3 (Professional Shared) adds real multi-user identity: teams, per-team shared workspaces, and authentication — while keeping every member’s personal memory private. See the <a href="/docs#tiers" class="text-ember-500 underline decoration-dotted hover:text-ember-400">docs page</a> for setup.',
+      },
+      {
+        q: 'How does team-based isolation actually work — is it just application code trusting itself?',
+        a: 'No — it’s enforced twice, independently. Scope filtering is built into every query the application makes, so even a leaked API key only lets an attacker act as the user it belongs to. Separately, Postgres row-level security enforces the same boundary at the database layer: even if a future application bug forgot to filter a query correctly, the database itself refuses to return rows outside the requesting session’s declared scope. This has been verified with tests that deliberately try to break it — including a raw query that explicitly asks for one team’s data while the database session is scoped to a different team, which correctly returns zero rows.',
+      },
+      {
+        q: 'Can one team see another team’s data?',
+        a: 'No. Every team’s data is additionally encrypted with its own separate key — someone with raw access to the encrypted database contents can’t read any team’s data without that specific team’s key, so a compromised key exposes only that one team, not the whole deployment.',
+      },
+      {
+        q: 'Does my personal communication style follow me into a team workspace?',
+        a: 'Yes, deliberately. Your self_model (communication style and standing preferences) always anchors to you personally and gets applied in every conversation, including team ones — the AI doesn’t suddenly talk like a committee just because the facts it’s drawing on are shared. Everything else — the actual facts being searched — is scoped to whichever workspace the conversation is happening in, and a private fact you’ve shared elsewhere never leaks into a team’s shared memory.',
+      },
+      {
+        q: 'What happens if an API key leaks, or someone gets direct database access?',
+        a: 'Scope filtering limits a leaked key to that one user’s private memory and whatever teams they belong to — nothing else. Row-level security is a second, independent backstop at the database layer. Per-team encryption keys mean raw database access alone isn’t enough to read anything. And an insert-only audit log records every write, retrieval, and admin action, attributed to a named operator rather than a shared credential — so even a compromised application credential can’t erase its own trail.',
+      },
+    ],
+  },
+  {
+    name: 'How HUPI works',
+    items: [
+      {
+        q: 'What is consolidation?',
+        a: 'A scheduled overnight job (not part of the live chat path) that reads a day’s conversations, asks an AI to distill them into a handful of concrete, cited facts, and updates the standing knowledge-graph entities those facts touch. Consolidation is what actually gets searched later — individual raw conversation turns are a fallback, not the primary retrieval path.',
+      },
+      {
+        q: 'What is grounding, and why does it matter?',
+        a: 'An automatic, independent fact-check consolidation runs on every summary before trusting it: a second AI call verifies each claimed fact actually appears in the source conversation, separate from whichever call generated the summary in the first place. Anything it can’t verify is flagged and excluded from future recall rather than silently accepted — the system is built to be honest about what it doesn’t know rather than confidently making things up about your own history.',
+      },
+      {
+        q: 'What is the retrieval gate (skipped / partial / full)?',
+        a: 'A record of how confidently memory was pulled into a given turn, logged on every single conversation. <code class="font-mono-tight">skipped</code> means a cheap local pre-check found no signal worth searching for at all — no vector search or entity lookup even ran (e.g. "what’s 2+2?"). <code class="font-mono-tight">partial</code> means a search did run but nothing cleared the confidence threshold. <code class="font-mono-tight">full</code> means at least one match — an exact entity match or a high-similarity vector hit — cleared it, and that’s the content actually handed to the model.',
+      },
+      {
+        q: 'Does every message trigger a full memory search?',
+        a: 'No — that’s the point of the retrieval gate’s first stage. A cheap, local, no-LLM-call check decides whether a message looks worth searching for at all (a known entity name, decision/preference language, a question referencing something earlier). Generic or impersonal requests skip retrieval entirely rather than paying for a search that was never going to find anything relevant.',
+      },
+      {
+        q: 'How do corrections work — can a wrong memory actually be fixed?',
+        a: 'Yes. Nothing is ever silently edited in place — a correction writes a brand-new version of the summary that supersedes the old one, with the reason for the change recorded, and re-runs the same independent grounding check against it before accepting it. From that point on, retrieval only ever surfaces the corrected version, but the wrong one — and why it was wrong — stays in the historical record rather than disappearing, which is itself useful signal for improving the fact-check over time.',
+      },
+    ],
+  },
+  {
+    name: 'Setup & operations',
+    items: [
+      {
+        q: 'How do I install it?',
+        a: `<code class="font-mono-tight">./install.sh</code> handles Postgres, schema migrations, and provider config for you — see the <a href="/docs" class="text-ember-500 underline decoration-dotted hover:text-ember-400">docs page</a> for the full quick-install and manual setup steps.`,
+      },
+      {
+        q: 'Can I switch which AI vendor I use later?',
+        a: 'Yes — memory is stored as plain decrypted text and metadata, not tied to any one vendor’s response format. Switching is a config change to providers.yaml, plus a one-time re-embed if you also change embedding models (existing vector search results would otherwise be comparing embeddings from two different models).',
+      },
+      {
+        q: 'Is my data encrypted?',
+        a: 'Yes, at rest — every episode and summary is stored encrypted by default. In Tier 3, each team additionally gets its own separate encryption key, so a compromised key only exposes that one team’s data.',
+      },
+      {
+        q: 'What does it cost to run, beyond LLM API usage?',
+        a: 'Just your own Postgres (with pgvector) and wherever you run the gateway binary — there’s no HUPI-side hosting fee since it’s self-hosted and open source. The main recurring LLM cost beyond normal chat usage is the nightly consolidation pass and its independent grounding check, which roughly doubles the number of consolidation calls — accepted deliberately, since the alternative is a memory system that can drift from the truth with no way to detect it.',
+      },
+    ],
+  },
+];
+
+const faqStructuredData = {
+  '@context': 'https://schema.org',
+  '@type': 'FAQPage',
+  mainEntity: groups.flatMap((g) =>
+    g.items.map((item) => ({
+      '@type': 'Question',
+      name: item.q,
+      acceptedAnswer: {
+        '@type': 'Answer',
+        text: item.a.replace(/<[^>]+>/g, ''),
+      },
+    })),
+  ),
+};
+---
+
+<Layout
+  title="FAQ — Tiers, isolation & how HUPI works | HUPI"
+  description="How HUPI's tier-based team isolation actually works (row-level security, per-team encryption), plus consolidation, grounding, the retrieval gate, and corrections explained."
+>
+  <Nav />
+  <main>
+    <section class="relative overflow-hidden border-b border-white/5">
+      <div
+        class="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"
+      >
+      </div>
+      <div class="relative mx-auto max-w-4xl px-6 pb-16 pt-20 text-center sm:pt-28">
+        <p
+          class="font-mono-tight mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-navy-800/60 px-4 py-1.5 text-xs uppercase tracking-widest text-fog-300"
+        >
+          Frequently asked questions
+        </p>
+        <h1 class="text-balance text-4xl font-extrabold tracking-tight text-fog-100 sm:text-5xl">
+          Tier isolation and how HUPI actually works.
+        </h1>
+        <p class="text-balance mx-auto mt-6 max-w-2xl text-lg text-fog-300">
+          Straight answers, verified against the code — not the original aspirational design.
+        </p>
+      </div>
+    </section>
+
+    {
+      groups.map((group, gi) => (
+        <section class={`border-b border-white/5 ${gi % 2 === 1 ? 'bg-navy-950/40' : ''}`}>
+          <div class="mx-auto max-w-3xl px-6 py-16 sm:py-20">
+            <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">{group.name}</h2>
+            <div class="mt-6 divide-y divide-white/10 rounded-xl border border-white/10 bg-navy-900/40">
+              {group.items.map((item) => (
+                <details class="group px-6 py-5">
+                  <summary class="flex cursor-pointer list-none items-center justify-between gap-4 text-base font-semibold text-fog-100 marker:content-none">
+                    {item.q}
+                    <span
+                      aria-hidden="true"
+                      class="shrink-0 text-xl leading-none text-ember-500 transition-transform group-open:rotate-45"
+                    >
+                      +
+                    </span>
+                  </summary>
+                  <p
+                    class="mt-3 text-sm leading-relaxed text-fog-300"
+                    set:html={item.a}
+                  />
+                </details>
+              ))}
+            </div>
+          </div>
+        </section>
+      ))
+    }
+
+    <section class="border-b border-white/5">
+      <div class="mx-auto max-w-3xl px-6 py-16 text-center sm:py-20">
+        <p class="text-fog-300">
+          Didn't find your question? The full scenario-by-scenario walkthrough is in{' '}
+          <a
+            href={docFileURL('BUSINESS_PROCESS.md')}
+            class="text-ember-500 underline decoration-dotted hover:text-ember-400"
+          >
+            BUSINESS_PROCESS.md
+          </a>.
+        </p>
+      </div>
+    </section>
+  </main>
+  <FinalCta />
+
+  <script type="application/ld+json" set:html={JSON.stringify(faqStructuredData)} />
+</Layout>
