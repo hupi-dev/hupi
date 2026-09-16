@@ -140,7 +140,47 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 	if err := r.embedHighImportanceEpisodes(ctx, scope, date); err != nil {
 		return fmt.Errorf("consolidation: embed high-importance episodes for %s: %w", period, err)
 	}
+
+	// One-time backfill target for entities that existed before
+	// schema/0012_entity_embeddings.sql added the column, plus a safety
+	// net for any entity a prior storeSummary's embedEntities call failed
+	// to embed. Piggybacks on "this scope had activity today" the same
+	// way embedHighImportanceEpisodes does, rather than needing its own
+	// schedule — an entity that's genuinely never touched again stays
+	// substring-matchable only, which is the same as today, not a
+	// regression.
+	missingIDs, err := r.entitiesMissingEmbeddings(ctx, scope)
+	if err != nil {
+		return fmt.Errorf("consolidation: find entities missing embeddings for %s: %w", period, err)
+	}
+	if err := r.embedEntities(ctx, scope, missingIDs); err != nil {
+		return fmt.Errorf("consolidation: backfill entity embeddings for %s: %w", period, err)
+	}
 	return nil
+}
+
+// entitiesMissingEmbeddings returns every entity in scope that doesn't
+// have an embedding yet — see RunDaily's backfill call above.
+func (r *Runner) entitiesMissingEmbeddings(ctx context.Context, scope identity.Scope) ([]string, error) {
+	var ids []string
+	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select id from entities where embedding is null and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return rows.Err()
+	})
+	return ids, err
 }
 
 // Correct writes a new version of an existing summary that supersedes it —

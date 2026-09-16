@@ -37,7 +37,19 @@ const (
 	// the embedding model changes, since this is empirically tuned to
 	// text-embedding-3-small, not a universal constant.
 	vectorSimilarityThreshold = 0.40
-	maxVectorResults          = 5
+	// entityVectorSimilarityThreshold is vectorSimilarityThreshold's
+	// counterpart for entities (schema/0012_entity_embeddings.sql) — kept
+	// separate rather than reusing vectorSimilarityThreshold because
+	// entity text (a short "name (kind)\nkey: value" rendering, see
+	// entityEmbedText in internal/consolidation/store.go) has different
+	// embedding characteristics than a multi-sentence narrative summary,
+	// and 0.40 was calibrated specifically against summary prose —
+	// PLACEHOLDER pending the same kind of real end-to-end measurement
+	// that produced 0.40 (measure actual cosine similarity between a
+	// genuine paraphrase query and its matching entity's embedding, then
+	// set this just above that true positive) rather than assumed.
+	entityVectorSimilarityThreshold = 0.50
+	maxVectorResults                = 5
 	// contextCharBudget is a crude stand-in for a real token budget
 	// (ARCHITECTURE.md mentions ~20% of the model's context window) — a
 	// production build should count tokens against the target model's
@@ -190,6 +202,12 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 			return fmt.Errorf("vector search episodes: %w", err)
 		}
 		refs = append(refs, episodeRefs...)
+
+		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit)
+		if err != nil {
+			return fmt.Errorf("vector search entities: %w", err)
+		}
+		refs = append(refs, entityRefs...)
 		return nil
 	})
 	if err != nil {
@@ -398,6 +416,65 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 		}
 		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s): %s", id, text))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: id})
+		*strongHit = true
+	}
+	return refs, rows.Err()
+}
+
+// vectorSearchEntities is vectorSearchSummaries' sibling over `entities`
+// (schema/0012_entity_embeddings.sql) — a second chance for a query that
+// doesn't literally contain a known entity's name/slug (stage1EntityMatches'
+// substring check, the only other way an entity ever gets found) to still
+// surface an entity that's semantically the answer. Found necessary via
+// live testing: "what programming language do I prefer?" matched no
+// entity by substring and no summary above vectorSimilarityThreshold,
+// producing an honest "I don't know" for a fact that was genuinely on
+// record as an entity the whole time.
+//
+// excludeIDs is stage 1's own matchedEntityIDs — already rendered into
+// the context and already counted as a strong hit, so this only ever adds
+// entities stage 1 didn't already find, never a duplicate. self_model is
+// excluded the same way stage1EntityMatches excludes it: it's handled
+// unconditionally by buildAnchor regardless of query content, not
+// something that should ever compete for a vector-search slot.
+func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+	rows, err := q.QueryContext(ctx, `
+		select id, name, attributes, key_version, (embedding <=> $1::vector) as distance
+		from entities
+		where embedding is not null and kind != 'self_model'
+		  and not (id = any($2::text[]))
+		  and scope_kind = $3 and scope_owner = $4
+		order by embedding <=> $1::vector
+		limit $5
+	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxVectorResults)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []identity.Ref
+	for rows.Next() {
+		var id, name string
+		var attrsCT []byte
+		var keyVersion int
+		var distance float64
+		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion, &distance); err != nil {
+			return nil, err
+		}
+		similarity := 1 - distance
+		if similarity < entityVectorSimilarityThreshold {
+			continue
+		}
+		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			return nil, fmt.Errorf("resolve encryption key for entity %s: %w", id, err)
+		}
+		attrs, err := enc.Decrypt(attrsCT)
+		if err != nil {
+			return nil, err
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s, %s): %s", id, name, attrs))
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
 		*strongHit = true
 	}
 	return refs, rows.Err()

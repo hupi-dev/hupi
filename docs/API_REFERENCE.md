@@ -111,8 +111,9 @@ OpenAI-shaped `data: {...}` chunks, terminated by `data: [DONE]`.
    2. Unless `X-Hupi-Memory: off`: `h.Retriever.Retrieve(ctx, actingUser, workspace, messages)` — the concrete implementation is `store.Store.Retrieve` (`internal/store/retrieve.go:59`):
       - `dbscope.Run(ctx, s.db, actingUser, workspace, fn)` (`internal/dbscope/dbscope.go`) — opens a transaction, sets 4 RLS session variables.
       - `buildAnchor(ctx, tx, actingUser, workspace)` — `SELECT` the `self_model` entity scoped to `actingUser` (decrypted via `s.keys.GetOrCreate(ctx, actingUser)` -> `crypto.KeyStore.GetOrCreate`, `internal/crypto/keystore.go`), and the latest `daily` summary's period scoped to `workspace`.
-      - If the message is non-empty: `stage1EntityMatches` (`retrieve.go:222`) — a `SELECT` over `entities` scoped to `workspace`, matched by substring against the message text.
-      - For each match: `formatEntity` (`retrieve.go:269`) — point `SELECT` + decrypt.
+      - If the message is non-empty: `stage1EntityMatches` (`retrieve.go:293`) — a `SELECT` over `entities` scoped to `workspace`, matched by substring against the message text.
+      - For each match: `formatEntity` (`retrieve.go:340`) — point `SELECT` + decrypt.
+      - Stage 2 also runs `vectorSearchEntities` (`retrieve.go:440`) against the same embedded query used for summaries/episodes below — a second chance for an entity whose name/slug isn't a literal substring of the message (`schema/0012_entity_embeddings.sql`), excluding whatever `stage1EntityMatches` already found so nothing is rendered twice.
       - *(transaction commits here)*
       - If stage 1 found nothing at all: return `Gate: skipped`.
       - Else: `s.embedder.Embed(ctx, ...)` — **external network call** to `active_embedding_provider`, via whichever adapter (`provider.OpenAICompat.Embed` or `provider.Anthropic.Embed` — the latter always errors, Anthropic has no embeddings endpoint) the registry resolves.
@@ -157,7 +158,7 @@ there is no way to prove team membership, so this route always returns
    - `teamID := r.PathValue("team_id")` — Go 1.22+ `ServeMux` path wildcard.
    - `id.HasTeam(teamID)` (`internal/identity/identity.go:21`) — a plain membership check over `Identity.TeamIDs` (populated by `auth.Store.Resolve`'s `team_members` query). If false: 403.
    - Returns `actingUser = id.PrivateScope()`, `workspace = {Kind: "shared", Owner: teamID}`.
-2. `handleChatCompletionsScoped(w, r, actingUser, workspace)` — from here on, byte-for-byte the same code path as the private route, except `actingUser != workspace`: `buildAnchor` still resolves `self_model` from `actingUser` (personal voice, unchanged), while `stage1EntityMatches`, `vectorSearchSummaries`, `vectorSearchEpisodes`, and `Capture` all operate on the team's `workspace` scope.
+2. `handleChatCompletionsScoped(w, r, actingUser, workspace)` — from here on, byte-for-byte the same code path as the private route, except `actingUser != workspace`: `buildAnchor` still resolves `self_model` from `actingUser` (personal voice, unchanged), while `stage1EntityMatches`, `vectorSearchSummaries`, `vectorSearchEpisodes`, `vectorSearchEntities`, and `Capture` all operate on the team's `workspace` scope.
 
 ---
 

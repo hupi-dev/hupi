@@ -137,8 +137,8 @@ independent of each other:
 | Outcome | What happened |
 |---|---|
 | `skipped` | Stage 1 (`stage1EntityMatches` + `stage1KeywordSignal` — both pure string matching, zero network calls beyond the one entity-table query) found no signal at all. No vector search ever runs. |
-| `partial` | Stage 1 found signal, so stage 2 ran (entity fetch + pgvector search), but nothing cleared the threshold. |
-| `full` | Stage 2 ran and something cleared the threshold: an exact entity-id match (always counted as a strong hit), or a summary whose cosine similarity to the embedded query is ≥ `0.40` (`vectorSimilarityThreshold`, `internal/store/retrieve.go` — empirically tuned to `text-embedding-3-small`, see that constant's own comment for the measured true-positive that drove the number). |
+| `partial` | Stage 1 found signal, so stage 2 ran (`pgvector` search over summaries, high-importance episodes, *and* entities, plus the stage-1 entity-name/slug lookup), but nothing cleared the threshold. |
+| `full` | Stage 2 ran and something cleared the threshold: an exact entity-id match (always counted as a strong hit), a summary/episode whose cosine similarity to the embedded query is ≥ `0.40` (`vectorSimilarityThreshold`), or an entity whose own embedding clears its separately-calibrated cutoff (`entityVectorSimilarityThreshold` — entities embed short structured text, not narrative prose, so they don't share the summary threshold; both constants are in `internal/store/retrieve.go`, empirically tuned to `text-embedding-3-small`, see each one's own comment). The entity-embedding path (`schema/0012_entity_embeddings.sql`) exists specifically for a query that's a genuine paraphrase of a known entity rather than a literal restatement of its name — previously that case missed entirely, since entities were reachable only by the stage-1 substring check. |
 
 Only `skipped` means "never looked" — `partial` and `full` both mean the
 search ran and differ only in whether it found anything trustworthy. That

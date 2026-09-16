@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"hupi/internal/audit"
@@ -163,6 +164,9 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 	// durably stored.
 	if err := r.embedSummary(ctx, in.scope, id, in.output.Summary); err != nil {
 		return fmt.Errorf("embed summary %s (row committed, embedding not): %w", id, err)
+	}
+	if err := r.embedEntities(ctx, in.scope, entityIDs); err != nil {
+		return fmt.Errorf("embed entities touched by summary %s (rows committed, embeddings not): %w", id, err)
 	}
 	return nil
 }
@@ -370,4 +374,107 @@ func (r *Runner) embedSummary(ctx context.Context, scope identity.Scope, id, tex
 		_, err := tx.ExecContext(ctx, `update summaries set embedding = $1::vector where id = $2`, vectorLiteral, id)
 		return err
 	})
+}
+
+// embedEntities embeds each id's *current* name+attributes and stores the
+// result, so entities become reachable by internal/store's
+// vectorSearchEntities in addition to stage1EntityMatches' substring
+// check — see schema/0012_entity_embeddings.sql for why: a paraphrase
+// that doesn't literally contain an entity's name currently misses it
+// outright, even when it's exactly the answer.
+//
+// Reads each entity's attributes back from the database rather than
+// trusting the EntityUpdate the caller just wrote, deliberately: under
+// merge mode (normal consolidation) the caller's own update is often a
+// partial patch, and the stored row reflects the full merged result,
+// which is what should actually be embedded.
+//
+// Best-effort per entity — one embedding call and write failing doesn't
+// stop the rest, same posture as embedSummary and
+// embedHighImportanceEpisodes: an entity whose embedding fails is still
+// fully usable via the existing substring-match path, just not yet
+// reachable by similarity. Failures are still collected and returned
+// (not silently swallowed), matching embedSummary's own "row committed,
+// embedding not" error wrapping at the call site — worth surfacing to
+// whoever's watching cron output, not worth failing the whole
+// consolidation run over a supplementary index.
+func (r *Runner) embedEntities(ctx context.Context, scope identity.Scope, ids []string) error {
+	var errs []error
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		var kind, name string
+		var attrsCT []byte
+		var keyVersion int
+		err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx, `
+				select kind, name, attributes, key_version from entities
+				where id = $1 and scope_kind = $2 and scope_owner = $3
+			`, id, scope.Kind, scope.Owner).Scan(&kind, &name, &attrsCT, &keyVersion)
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("entity %s: load current attributes: %w", id, err))
+			continue
+		}
+
+		enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("entity %s: resolve encryption key: %w", id, err))
+			continue
+		}
+		attrsJSON, err := enc.Decrypt(attrsCT)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("entity %s: decrypt attributes: %w", id, err))
+			continue
+		}
+		var attrs map[string]string
+		if attrsJSON != "" {
+			if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
+				errs = append(errs, fmt.Errorf("entity %s: parse attributes: %w", id, err))
+				continue
+			}
+		}
+
+		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{entityEmbedText(kind, name, attrs)}})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("entity %s: embed call: %w", id, err))
+			continue
+		}
+		if len(resp.Vectors) == 0 {
+			errs = append(errs, fmt.Errorf("entity %s: embedder returned no vectors", id))
+			continue
+		}
+		vectorLiteral := pgfmt.VectorLiteral(resp.Vectors[0])
+		err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `
+				update entities set embedding = $1::vector
+				where id = $2 and scope_kind = $3 and scope_owner = $4
+			`, vectorLiteral, id, scope.Kind, scope.Owner)
+			return err
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("entity %s: write embedding: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// entityEmbedText renders an entity as text worth embedding — name and
+// kind up front since those carry the most semantic weight for a query
+// like "what's my X", followed by attributes in a stable (sorted) key
+// order so the same entity content always embeds to the same text
+// regardless of Go's randomized map iteration order.
+func entityEmbedText(kind, name string, attrs map[string]string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s (%s)", name, kind)
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&sb, "\n%s: %s", k, attrs[k])
+	}
+	return sb.String()
 }

@@ -875,3 +875,122 @@ func TestStoreSummary_CanonicalizesEntityIDByKindAndName(t *testing.T) {
 		t.Errorf("launch = %q, want %q (the second run's value, merged onto the same canonicalized row)", attrs["launch"], "Q2")
 	}
 }
+
+// TestStoreSummary_EmbedsTouchedEntities confirms storeSummary actually
+// calls embedEntities and it writes a real embedding — the DB-level
+// wiring internal/store's TestRetrieve_FindsEntityByVectorSearchWhenSubstringMatchMisses
+// doesn't cover, since that test seeds an entity directly and never goes
+// through storeSummary/embedEntities at all. See
+// schema/0012_entity_embeddings.sql for why entities need embeddings in
+// the first place.
+func TestStoreSummary_EmbedsTouchedEntities(t *testing.T) {
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, `{"summary": "unused", "key_facts": [], "entities_touched": []}`, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-embed-entities"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2026-09-20",
+		output: ConsolidationOutput{
+			Summary: "Daily summary mentioning the entity.",
+			EntitiesTouched: []EntityUpdate{
+				{ID: "project:orbit", Kind: "project", Name: "Orbit", Attributes: map[string]string{"status": "active"}},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("storeSummary: %v", err)
+	}
+
+	var hasEmbedding bool
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select embedding is not null from entities where id = 'project:orbit' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&hasEmbedding)
+	}); err != nil {
+		t.Fatalf("check entity embedding: %v", err)
+	}
+	if !hasEmbedding {
+		t.Error("entity project:orbit has no embedding after storeSummary — embedEntities should have written one")
+	}
+}
+
+// TestRunDaily_BackfillsMissingEntityEmbeddings confirms entitiesMissingEmbeddings
+// + embedEntities actually catch up entities that predate
+// schema/0012_entity_embeddings.sql (or whose embedding failed to write
+// previously) — seeds an entity directly with no embedding, then checks
+// a RunDaily call for the same scope backfills it even though that
+// entity isn't among the day's own EntitiesTouched.
+func TestRunDaily_BackfillsMissingEntityEmbeddings(t *testing.T) {
+	groundingJSON := `{"grounded": []}`
+	consolidationJSON := `{"summary": "Unrelated daily content.", "key_facts": [], "entities_touched": []}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-backfill-embeddings"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, keyVersion, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	attrsCT, err := enc.Encrypt(`{"pre_existing":"true"}`)
+	if err != nil {
+		t.Fatalf("encrypt pre-existing entity attrs: %v", err)
+	}
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into entities (id, kind, name, attributes, scope_kind, scope_owner, key_version)
+			values ('project:legacy', 'project', 'Legacy Project', $1, $2, $3, $4)
+		`, attrsCT, scope.Kind, scope.Owner, keyVersion)
+		return err
+	}); err != nil {
+		t.Fatalf("seed pre-existing entity with no embedding: %v", err)
+	}
+
+	date := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	inputCT, _ := enc.Encrypt("unrelated question")
+	outputCT, _ := enc.Encrypt("unrelated answer")
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+			values ('ep_test_backfill', $1, 'interaction', $2, $3, 'sha256:test', 0.5, $4, $5)
+		`, date, inputCT, outputCT, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
+
+	if err := runner.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("RunDaily: %v", err)
+	}
+
+	var hasEmbedding bool
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select embedding is not null from entities where id = 'project:legacy' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&hasEmbedding)
+	}); err != nil {
+		t.Fatalf("check backfilled entity embedding: %v", err)
+	}
+	if !hasEmbedding {
+		t.Error("pre-existing entity project:legacy still has no embedding after RunDaily — the backfill should have caught it")
+	}
+}
