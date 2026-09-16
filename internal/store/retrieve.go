@@ -82,7 +82,46 @@ const (
 	// highest near-miss (0.44), with unrelated content an order of
 	// magnitude below both — re-measure if the embedding model changes.
 	entityVectorSimilarityThreshold = 0.50
-	maxVectorResults                = 5
+	// episodeVectorSimilarityThreshold is vectorSimilarityThreshold's
+	// counterpart for individual episodes (vectorSearchEpisodes) — used
+	// to reuse vectorSimilarityThreshold outright, which real measurement
+	// showed was a genuine miscalibration, not just an unverified
+	// assumption like the entity case started as.
+	//
+	// Measured against a real single-exchange episode (the user
+	// explaining Meridian's architecture — job scheduler, Rust/tokio,
+	// Postgres over Redis, 500 concurrent jobs/node):
+	//   "what's the weather like today?"                    -> 0.0397 (TN)
+	//   "write me a haiku about the ocean"                  -> 0.0985 (TN)
+	//   "how do I set up a Kubernetes ingress controller?"  -> 0.1325 (TN)
+	//   "what's a reasonable concurrency limit for a task
+	//     queue?" (generic, not about this episode)          -> 0.3911 (near-miss)
+	//   "tell me about my job scheduler's core architecture" -> 0.4477 (true positive,
+	//     a broad paraphrase)
+	//   "should I use Postgres or Redis for a job queue in
+	//     general?" (generic, not about this episode)        -> 0.5110 (near-miss)
+	//   "what database does Meridian use instead of Redis,
+	//     and why?"                                          -> 0.6478 (true positive)
+	//   "what async runtime does Meridian's scheduler use?"  -> 0.6544 (true positive)
+	//   "how many concurrent jobs can Meridian handle per
+	//     worker node?"                                      -> 0.6851 (true positive)
+	//
+	// At vectorSimilarityThreshold (0.40), the 0.5110 near-miss — a
+	// generic Postgres-vs-Redis question with no connection to this
+	// user's own data — would have been treated as a match. The clean
+	// gap here sits between 0.51 (highest near-miss) and 0.65 (lowest of
+	// the three direct-restatement true positives), at the cost of the
+	// one broader/vaguer paraphrase (0.4477) no longer clearing it. That
+	// trade is deliberate: episodes are a supplementary path for content
+	// not yet folded into a summary (see this function's own doc
+	// comment), not the primary retrieval surface the way summaries are,
+	// and unlike a summary or entity, raw episode text has never been
+	// through grounding — a false positive here means handing the model
+	// unverified, possibly-hallucinated content and calling it "your own
+	// memory," which is worse than an occasional missed broad paraphrase.
+	// Re-measure if the embedding model changes.
+	episodeVectorSimilarityThreshold = 0.55
+	maxVectorResults                 = 5
 	// contextCharBudget is a crude stand-in for a real token budget
 	// (ARCHITECTURE.md mentions ~20% of the model's context window) — a
 	// production build should count tokens against the target model's
@@ -520,7 +559,10 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 // Runner.embedHighImportanceEpisodes) — most single exchanges are only
 // ever reachable via the daily summary that later folds them in; this
 // exists for the case where something important hasn't been consolidated
-// into a summary yet (or ever, if consolidation is behind or fails).
+// into a summary yet (or ever, if consolidation is behind or fails). Uses
+// episodeVectorSimilarityThreshold, not vectorSimilarityThreshold — see
+// that constant's own doc comment for the real measurement showing they
+// need to differ.
 func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, input_text, output_text, key_version, (embedding <=> $1::vector) as distance
@@ -545,7 +587,7 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 			return nil, err
 		}
 		similarity := 1 - distance
-		if similarity < vectorSimilarityThreshold {
+		if similarity < episodeVectorSimilarityThreshold {
 			continue
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
