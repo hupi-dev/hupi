@@ -36,6 +36,7 @@ cmd/                  Go binaries — the gateway, cron jobs, and CLIs
   hupi-export/           CLI: write a portable, encrypted memory snapshot
   hupi-import/           CLI: load a snapshot back in
   hupi-rotate-key/       CLI: online, resumable per-scope key rotation
+  hupi-reembed/          CLI: online, resumable per-scope re-embedding after an embedding model change
   hupi-trace/            CLI: inspect one episode's retrieval trace
   hupi-correct/          CLI: write a corrected, superseding summary
 internal/             Go packages implementing the gateway, storage, crypto, etc.
