@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import Nav from '../components/Nav.astro';
 import FinalCta from '../components/FinalCta.astro';
-import { GITHUB_URL, docFileURL, TIER3_REPO_URL } from '../lib/links.js';
+import { GITHUB_URL, docFileURL } from '../lib/links.js';
 
 const groups = [
   {
@@ -35,7 +35,7 @@ const groups = [
       },
       {
         q: 'Is Tier 3 free too?',
-        a: `No. Tiers 1 and 2 (this whole repo) are MIT-licensed and free forever. Tier 3 — real end-user/team authentication and the shared-workspace routes — is developed in a separate repo, <a href="${TIER3_REPO_URL}" class="text-ember-500 underline decoration-dotted hover:text-ember-400">hupi-t3</a>, under a commercial license. It's a real, if small, technical split, not just a paywalled config flag: build the public repo alone and Tier 3's code isn't even compiled in — <code class="font-mono-tight">HUPI_REQUIRE_AUTH=true</code> without a Tier 3 license fails immediately at startup with a clear error rather than silently doing nothing. Contact us for commercial licensing.`,
+        a: `No. Tiers 1 and 2 (this whole repo) are MIT-licensed and free forever. Tier 3 — real end-user/team authentication and the shared-workspace routes — is developed in a separate, privately-held repo (<code class="font-mono-tight">hupi-t3</code>) under a commercial license. It's a real, if small, technical split, not just a paywalled config flag: build the public repo alone and Tier 3's code isn't even compiled in — <code class="font-mono-tight">HUPI_REQUIRE_AUTH=true</code> without a Tier 3 license fails immediately at startup with a clear error rather than silently doing nothing. Contact us for commercial licensing.`,
       },
       {
         q: 'How does team-based isolation actually work — is it just application code trusting itself?',

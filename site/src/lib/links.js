@@ -4,9 +4,10 @@
 export const GITHUB_URL = 'https://github.com/samuel-sujith/hupi';
 
 // Tier 3 (team/shared-workspace support) lives in a separate,
-// commercially-licensed repo, not this one — see ARCHITECTURE.md §
+// commercially-licensed, *private* repo (hupi-t3) — see ARCHITECTURE.md §
 // "Licensing and the open-core split" for why and how the two connect.
-export const TIER3_REPO_URL = 'https://github.com/samuel-sujith/hupi-t3';
+// Deliberately no exported URL constant for it: it's private, so a public
+// link would just 404 for every visitor — mention it by name only.
 
 // The site's own /docs page (src/pages/docs.astro) is the primary "Docs"
 // destination in nav/footer/hero now — this is only a deep link into the

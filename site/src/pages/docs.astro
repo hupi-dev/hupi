@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import Nav from '../components/Nav.astro';
 import FinalCta from '../components/FinalCta.astro';
-import { GITHUB_URL, docFileURL, VSCODE_MARKETPLACE_URL, TIER3_REPO_URL, CONTACT_EMAIL } from '../lib/links.js';
+import { GITHUB_URL, docFileURL, VSCODE_MARKETPLACE_URL, CONTACT_EMAIL } from '../lib/links.js';
 
 const tiers = [
   {
@@ -108,8 +108,7 @@ export HUPI_PROVIDERS_CONFIG=./providers.yaml`,
         <p class="mt-4 leading-relaxed text-fog-300">
           Tiers 1 and 2 run from the same install and the same free, MIT-licensed build — there's
           no separate build or package between them. Tier 3 needs one additional thing this
-          installer alone doesn't provide: the commercially-licensed
-          <a href={TIER3_REPO_URL} class="text-ember-500 underline decoration-dotted hover:text-ember-400">hupi-t3</a>
+          installer alone doesn't provide: the commercially-licensed <code class="font-mono-tight text-ember-400">hupi-t3</code>
           extension, built in on top — see "Tier 3 licensing" below.
         </p>
         <pre
@@ -200,12 +199,12 @@ export HUPI_PROVIDERS_CONFIG=./providers.yaml`,
         </p>
         <p class="mt-4 leading-relaxed text-fog-300">
           This repo — Tiers 1 and 2, everything most people run — is MIT-licensed and free
-          forever. Team/shared-workspace support (Tier 3) is developed in a separate repo,
-          <a href={TIER3_REPO_URL} class="text-ember-500 underline decoration-dotted hover:text-ember-400">hupi-t3</a>,
+          forever. Team/shared-workspace support (Tier 3) is developed in a separate,
+          privately-held repo (<code class="font-mono-tight text-ember-400">hupi-t3</code>)
           under a commercial license — not free, not open source, no trial tier. It has to be
           built in on top of this repo (its own <code class="font-mono-tight text-ember-400">build.sh</code>
-          documents exactly how); without it, this repo alone runs Tier 1/2 completely, with zero
-          dependency on the extension at all — <code class="font-mono-tight text-ember-400">HUPI_REQUIRE_AUTH=true</code>
+          documents exactly how, once you have a license); without it, this repo alone runs Tier 1/2
+          completely, with zero dependency on the extension at all — <code class="font-mono-tight text-ember-400">HUPI_REQUIRE_AUTH=true</code>
           with no license in place fails loudly at startup rather than silently doing nothing.
         </p>
         <p class="mt-4 leading-relaxed text-fog-300">
