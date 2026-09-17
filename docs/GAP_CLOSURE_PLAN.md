@@ -413,6 +413,15 @@ phase reuses — not by §12's original list order.
    push themselves once reviewed. Docs updated: `INSTALL.md`,
    `CODE_GUIDE.md`, this file.
 
+   **Update**: `sujithsamuel/hupi:latest` is now actually pushed and
+   public (`linux/amd64` only for now — a multi-arch `linux/arm64` build
+   was attempted first but was slow enough under QEMU emulation to not
+   be worth the wait; amd64-only shipped instead, arm64 remains
+   available on request). Verified with a real `docker rmi` +
+   fresh-`docker pull` + `docker run` round trip, not just a successful
+   push. `docker-compose.yml` now defaults to `image:
+   sujithsamuel/hupi:latest` rather than `build: .`.
+
 Each phase ships with its own real-Postgres integration tests
 (`HUPI_TEST_DATABASE_URL`, `-count=1`) before moving to the next, matching
 this project's existing testing discipline — see §7.

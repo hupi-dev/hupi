@@ -381,13 +381,15 @@ you have an existing `hupi.dek.wrapped` file and a single-scope database
 
 ## Containerized deployment
 
-One image (build it yourself with `docker build -t your-repo/hupi .` —
-no pre-built image is published yet) contains every HUPI binary — the
-gateway is its default `ENTRYPOINT`; everything else
+One image (`sujithsamuel/hupi:latest` on Docker Hub, or build your own
+with `docker build -t your-repo/hupi .`) contains every HUPI binary —
+the gateway is its default `ENTRYPOINT`; everything else
 (`hupi-consolidate`, `hupi-selfcheck`, `hupi-export`, `hupi-rotate-key`,
-etc.) runs from the same image via a `command:` override, so there's one
-thing to build, version, and scan, not eleven. See the
-[Dockerfile](../Dockerfile)'s own comments for the build.
+etc.) runs from the same image via a `command:`/`--entrypoint` override,
+so there's one thing to build, version, and scan, not eleven. See the
+[Dockerfile](../Dockerfile)'s own comments for the build. Currently
+published for `linux/amd64` only — happy to add `linux/arm64` on
+request, it's just a slower cross-compiled build to produce.
 
 For Kubernetes and Helm specifically, Postgres is bring-your-own —
 nothing there bundles a database. TLS is also bring-your-own for those

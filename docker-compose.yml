@@ -14,10 +14,11 @@
 # the full walkthrough, including how to run hupi-consolidate on a
 # schedule and what each env var means.
 #
-# No pre-built image is published yet — `build: .` builds from the
-# Dockerfile in this repo. If/when a published image exists, swap
-# `build: .` for `image: <repo>/hupi:<tag>` on the migrate/gateway
-# services below.
+# Pulls the published image (sujithsamuel/hupi:latest, linux/amd64 only
+# for now) by default — nothing to build, no Go/Node toolchain needed
+# locally. If you're modifying HUPI itself and want your own changes
+# reflected, swap `image: sujithsamuel/hupi:latest` for `build: .` on
+# the migrate/gateway services below instead.
 
 services:
   postgres:
@@ -40,7 +41,7 @@ services:
   # sets hupi_app's password, then exits — `gateway` waits for this to
   # finish successfully before starting. Not a long-running service.
   migrate:
-    build: .
+    image: sujithsamuel/hupi:latest
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,7 +53,7 @@ services:
       - ./deploy/compose/migrate-entrypoint.sh:/app/migrate-entrypoint.sh:ro
 
   gateway:
-    build: .
+    image: sujithsamuel/hupi:latest
     restart: unless-stopped
     depends_on:
       migrate:
