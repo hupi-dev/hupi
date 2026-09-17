@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +39,11 @@ func testServer(t *testing.T) (*server, *sql.DB) {
 	}
 	t.Cleanup(func() { db.Close() })
 	keys := crypto.NewKeyStore(db, make([]byte, 32)) // all-zero test KEK, never used for real data
-	return &server{store: auth.New(db, keys), teamStore: auth.NewTeamStore(db), db: db}, db
+	var teamStore auth.TeamAuthenticator
+	if auth.NewTeamAuthenticator != nil {
+		teamStore = auth.NewTeamAuthenticator(db)
+	}
+	return &server{store: auth.New(db, keys), teamStore: teamStore, db: db}, db
 }
 
 func cleanupIDs(t *testing.T, db *sql.DB, userID, teamID string) {
@@ -92,19 +95,14 @@ func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	}
 }
 
-var rawKeyPattern = regexp.MustCompile(`hupi_sk_[a-f0-9]+`)
-
-func TestListUsersAndTeams(t *testing.T) {
+func TestListUsers(t *testing.T) {
 	srv, db := testServer(t)
 	ctx := context.Background()
-	userID, teamID := "user:test-adminui-dash", "team:test-adminui-dash"
-	t.Cleanup(func() { cleanupIDs(t, db, userID, teamID) })
+	userID := "user:test-adminui-dash"
+	t.Cleanup(func() { cleanupIDs(t, db, userID, "") })
 
 	if err := srv.store.CreateUser(ctx, userID, "dash@example.com"); err != nil {
 		t.Fatalf("create user: %v", err)
-	}
-	if err := srv.store.CreateTeam(ctx, teamID, "Dash Team"); err != nil {
-		t.Fatalf("create team: %v", err)
 	}
 
 	rec := doJSON(t, srv, http.MethodGet, "/api/users", nil)
@@ -122,159 +120,6 @@ func TestListUsersAndTeams(t *testing.T) {
 	if !found {
 		t.Errorf("GET /api/users missing user %q, got %+v", userID, users)
 	}
-
-	rec = doJSON(t, srv, http.MethodGet, "/api/teams", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/teams status = %d, body:\n%s", rec.Code, rec.Body.String())
-	}
-	var teams []auth.Team
-	decodeBody(t, rec, &teams)
-	found = false
-	for _, tm := range teams {
-		if tm.ID == teamID {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("GET /api/teams missing team %q, got %+v", teamID, teams)
-	}
-}
-
-func TestUserLifecycle_CreateIssueKeyRevoke(t *testing.T) {
-	srv, db := testServer(t)
-	userID := "user:test-adminui-lifecycle"
-	t.Cleanup(func() { cleanupIDs(t, db, userID, "") })
-
-	// Create via the HTTP API, not srv.store directly — this is the path
-	// a client actually takes.
-	rec := doJSON(t, srv, http.MethodPost, "/api/users", map[string]string{
-		"id": userID, "email": "life@example.com",
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create user status = %d, body:\n%s", rec.Code, rec.Body.String())
-	}
-	var created auth.User
-	decodeBody(t, rec, &created)
-	if created.ID != userID || created.Email != "life@example.com" {
-		t.Errorf("created user = %+v, want id=%q email=%q", created, userID, "life@example.com")
-	}
-
-	rec = doJSON(t, srv, http.MethodGet, "/api/users/"+userID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("user detail status = %d, body:\n%s", rec.Code, rec.Body.String())
-	}
-	var detail struct {
-		User  auth.User     `json:"user"`
-		Teams []auth.Team   `json:"teams"`
-		Keys  []auth.APIKey `json:"keys"`
-	}
-	decodeBody(t, rec, &detail)
-	if detail.User.Email != "life@example.com" {
-		t.Errorf("user detail email = %q, want %q", detail.User.Email, "life@example.com")
-	}
-	if len(detail.Keys) != 0 {
-		t.Errorf("expected no API keys before any are issued, got %+v", detail.Keys)
-	}
-
-	rec = doJSON(t, srv, http.MethodPost, "/api/users/"+userID+"/keys", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("create key status = %d, body:\n%s", rec.Code, rec.Body.String())
-	}
-	var keyResp struct {
-		RawKey string `json:"raw_key"`
-	}
-	decodeBody(t, rec, &keyResp)
-	if !rawKeyPattern.MatchString(keyResp.RawKey) {
-		t.Fatalf("raw_key %q doesn't look like an API key", keyResp.RawKey)
-	}
-	if id, err := srv.teamStore.Resolve(context.Background(), keyResp.RawKey); err != nil {
-		t.Errorf("issued key does not resolve: %v", err)
-	} else if id.UserID != userID {
-		t.Errorf("issued key resolved to %q, want %q", id.UserID, userID)
-	}
-
-	rec = doJSON(t, srv, http.MethodGet, "/api/users/"+userID, nil)
-	decodeBody(t, rec, &detail)
-	if len(detail.Keys) != 1 {
-		t.Fatalf("got %d keys, want 1", len(detail.Keys))
-	}
-	if detail.Keys[0].RevokedAt != nil {
-		t.Errorf("expected the new key to be active, got revoked_at = %v", detail.Keys[0].RevokedAt)
-	}
-	keyHash := detail.Keys[0].KeyHash
-
-	rec = doJSON(t, srv, http.MethodPost, "/api/keys/revoke", map[string]string{
-		"key_hash": keyHash, "user_id": userID,
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("revoke status = %d, body:\n%s", rec.Code, rec.Body.String())
-	}
-
-	rec = doJSON(t, srv, http.MethodGet, "/api/users/"+userID, nil)
-	decodeBody(t, rec, &detail)
-	if len(detail.Keys) != 1 || detail.Keys[0].RevokedAt == nil {
-		t.Errorf("expected key shown as revoked, got %+v", detail.Keys)
-	}
-
-	// The revoked key must no longer authenticate — this is really a
-	// regression test on internal/auth.TeamStore.RevokeAPIKey, exercised
-	// end to end through the API's revoke route.
-	if _, err := srv.teamStore.Resolve(context.Background(), keyResp.RawKey); err == nil {
-		t.Error("revoked key still resolves successfully")
-	}
-}
-
-func TestTeamLifecycle_CreateAddMember(t *testing.T) {
-	srv, db := testServer(t)
-	ctx := context.Background()
-	userID, teamID := "user:test-adminui-member", "team:test-adminui-team"
-	t.Cleanup(func() { cleanupIDs(t, db, userID, teamID) })
-
-	if err := srv.store.CreateUser(ctx, userID, ""); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-
-	rec := doJSON(t, srv, http.MethodPost, "/api/teams", map[string]string{
-		"id": teamID, "name": "Test Team",
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create team status = %d, body:\n%s", rec.Code, rec.Body.String())
-	}
-
-	rec = doJSON(t, srv, http.MethodPost, "/api/teams/"+teamID+"/members", map[string]string{
-		"user_id": userID, "role": "admin",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("add member status = %d, body:\n%s", rec.Code, rec.Body.String())
-	}
-
-	rec = doJSON(t, srv, http.MethodGet, "/api/teams/"+teamID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("team detail status = %d, body:\n%s", rec.Code, rec.Body.String())
-	}
-	var teamDetail struct {
-		Team    auth.Team         `json:"team"`
-		Members []auth.Membership `json:"members"`
-	}
-	decodeBody(t, rec, &teamDetail)
-	if len(teamDetail.Members) != 1 || teamDetail.Members[0].UserID != userID || teamDetail.Members[0].Role != "admin" {
-		t.Errorf("team detail members = %+v, want one member %q with role admin", teamDetail.Members, userID)
-	}
-
-	rec = doJSON(t, srv, http.MethodGet, "/api/users/"+userID, nil)
-	var userDetail struct {
-		Teams []auth.Team `json:"teams"`
-	}
-	decodeBody(t, rec, &userDetail)
-	found := false
-	for _, tm := range userDetail.Teams {
-		if tm.ID == teamID {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("user detail missing team membership %q, got %+v", teamID, userDetail.Teams)
-	}
 }
 
 func TestUserDetail_UnknownUserReturns404(t *testing.T) {
@@ -290,14 +135,6 @@ func TestUserDetail_UnknownUserReturns404(t *testing.T) {
 	}
 }
 
-func TestTeamDetail_UnknownTeamReturns404(t *testing.T) {
-	srv, _ := testServer(t)
-	rec := doJSON(t, srv, http.MethodGet, "/api/teams/team:does-not-exist-adminui", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", rec.Code)
-	}
-}
-
 func TestCreateUser_MissingID(t *testing.T) {
 	srv, _ := testServer(t)
 	rec := doJSON(t, srv, http.MethodPost, "/api/users", map[string]string{"email": "x@example.com"})
@@ -308,38 +145,6 @@ func TestCreateUser_MissingID(t *testing.T) {
 	decodeBody(t, rec, &body)
 	if body["error"] == "" {
 		t.Errorf("expected a JSON error body, got %+v", body)
-	}
-}
-
-func TestCreateTeam_MissingFields(t *testing.T) {
-	srv, _ := testServer(t)
-	rec := doJSON(t, srv, http.MethodPost, "/api/teams", map[string]string{"id": "team:incomplete"})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("missing name: status = %d, want 400", rec.Code)
-	}
-	rec = doJSON(t, srv, http.MethodPost, "/api/teams", map[string]string{"name": "Incomplete"})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("missing id: status = %d, want 400", rec.Code)
-	}
-}
-
-func TestAddMember_MissingUserID(t *testing.T) {
-	srv, _ := testServer(t)
-	rec := doJSON(t, srv, http.MethodPost, "/api/teams/team:whatever/members", map[string]string{"role": "member"})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestRevokeKey_MissingFields(t *testing.T) {
-	srv, _ := testServer(t)
-	rec := doJSON(t, srv, http.MethodPost, "/api/keys/revoke", map[string]string{"user_id": "user:whatever"})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("missing key_hash: status = %d, want 400", rec.Code)
-	}
-	rec = doJSON(t, srv, http.MethodPost, "/api/keys/revoke", map[string]string{"key_hash": "deadbeef"})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("missing user_id: status = %d, want 400", rec.Code)
 	}
 }
 

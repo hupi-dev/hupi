@@ -43,7 +43,10 @@ func run() error {
 	defer deps.DB.Close()
 
 	authStore := auth.New(deps.DB, deps.Keys)
-	teamStore := auth.NewTeamStore(deps.DB)
+	var teamStore auth.TeamAuthenticator
+	if auth.NewTeamAuthenticator != nil {
+		teamStore = auth.NewTeamAuthenticator(deps.DB)
+	}
 	srv := &server{store: authStore, teamStore: teamStore, db: deps.DB}
 
 	// /api/* is the JSON API (handlers.go), behind both the CSRF mitigation

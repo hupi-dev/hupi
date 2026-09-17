@@ -125,6 +125,12 @@ type Authenticator interface {
 	Resolve(ctx context.Context, apiKey string) (identity.Identity, error)
 }
 
+// MountTeamRoutes is nil in the OSS build — set by team.go's init() when
+// the Tier-3 extension is present. cmd/hupi calls this unconditionally
+// after mounting the private routes; nil means "no team routes to
+// mount," the correct Tier 1/2 state, not an error.
+var MountTeamRoutes func(mux *http.ServeMux, h *Handler)
+
 // Handler serves /v1/chat/completions. Mount it with, e.g.:
 //
 //	mux.HandleFunc("/v1/chat/completions", handler.HandleChatCompletions)

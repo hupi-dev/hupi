@@ -44,11 +44,15 @@ func run() error {
 	}
 
 	st := store.New(deps.DB, deps.Keys, deps.Registry.Embedding())
+	teamAuth, err := resolveAuth(deps)
+	if err != nil {
+		return err
+	}
 	handler := &gateway.Handler{
 		Registry:  deps.Registry,
 		Retriever: st,
 		Capturer:  st,
-		Auth:      resolveAuth(deps),
+		Auth:      teamAuth,
 	}
 
 	mux := http.NewServeMux()
@@ -56,11 +60,12 @@ func run() error {
 	mux.HandleFunc("POST /v1/feedback", handler.HandleFeedback)
 	// Workspace routing (docs/TIER3_PLAN.md D4): a request to these routes
 	// is scoped to the given team, authorized against the caller's own
-	// membership — see gateway.Handler.resolveTeamScope. Reachable in
-	// Tier 1/2 mode too, but always 403s there, since with no auth
-	// configured there's no way to prove membership in anything.
-	mux.HandleFunc("POST /v1/team/{team_id}/chat/completions", handler.HandleTeamChatCompletions)
-	mux.HandleFunc("POST /v1/team/{team_id}/feedback", handler.HandleTeamFeedback)
+	// membership. Only mounted when the Tier-3 extension is present (see
+	// gateway.MountTeamRoutes) — this plain OSS build has no team routes
+	// at all, not routes that always 403.
+	if gateway.MountTeamRoutes != nil {
+		gateway.MountTeamRoutes(mux, handler)
+	}
 	// docs/GAP_CLOSURE_PLAN.md §5: Kubernetes liveness/readiness probes,
 	// not part of the OpenAI-compatible surface above — deliberately kept
 	// out of internal/gateway, which owns that API, not deployment
@@ -128,9 +133,18 @@ func handleReadiness(db *sql.DB) http.HandlerFunc {
 // presence of users/api_keys rows, so an existing Tier 1/2 deployment that
 // happens to have provisioned a user for testing doesn't suddenly start
 // requiring auth on its next restart.
-func resolveAuth(deps *bootstrap.Deps) gateway.Authenticator {
+//
+// Real auth requires the Tier-3 extension (auth.NewTeamAuthenticator) —
+// erroring out here rather than silently returning nil is deliberate: an
+// operator who explicitly asked for HUPI_REQUIRE_AUTH=true should see a
+// clear "you need the Enterprise build" message, not have their request
+// quietly ignored and Tier 1/2's no-auth behavior kick in instead.
+func resolveAuth(deps *bootstrap.Deps) (gateway.Authenticator, error) {
 	if os.Getenv("HUPI_REQUIRE_AUTH") != "true" {
-		return nil
+		return nil, nil
 	}
-	return auth.NewTeamStore(deps.DB)
+	if auth.NewTeamAuthenticator == nil {
+		return nil, fmt.Errorf("HUPI_REQUIRE_AUTH=true requires the HUPI Enterprise build (Tier 3) — see docs/INSTALL.md")
+	}
+	return auth.NewTeamAuthenticator(deps.DB), nil
 }

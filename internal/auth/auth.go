@@ -139,6 +139,59 @@ type Team struct {
 	CreatedAt time.Time
 }
 
+// Membership and APIKey are plain data — kept here rather than in
+// team.go so cmd/hupi-admin-ui's shared userDetail route (which reads
+// them regardless of whether the Tier-3 extension is present) has
+// something to reference. TeamAuthenticator below is where the actual
+// behavior producing them lives.
+
+type Membership struct {
+	UserID string
+	Role   string
+}
+
+type APIKey struct {
+	// KeyHash identifies the row for revocation purposes. It is a sha256
+	// hash, never the raw key — the raw key was never persisted anywhere
+	// (see GenerateKey/CreateAPIKey) and can't be recovered from this.
+	KeyHash   string
+	CreatedAt time.Time
+	RevokedAt *time.Time // nil if still active
+}
+
+// ErrInvalidKey is returned by TeamAuthenticator.Resolve for a key that
+// doesn't hash to any non-revoked row — deliberately the same error for
+// "key never existed" and "key was revoked," so a caller can't
+// distinguish the two and use that to probe for valid-but-revoked keys.
+var ErrInvalidKey = errors.New("auth: invalid or revoked API key")
+
+// TeamAuthenticator is real end-user/team authentication — API keys,
+// resolving them to an Identity, and team membership. Every method here
+// only ever matters once HUPI_REQUIRE_AUTH is turned on
+// (cmd/hupi/main.go's resolveAuth), which is itself a Tier-3-only
+// concept per docs/INSTALL.md's own tier definitions.
+//
+// This is an interface, not the concrete *TeamStore type, specifically
+// so cmd/hupi-admin-ui's server (and anything else that needs to hold
+// one regardless of whether the Tier-3 extension is present) can keep a
+// nil-able field of this type without importing team.go's implementation
+// — see NewTeamAuthenticator.
+type TeamAuthenticator interface {
+	Resolve(ctx context.Context, apiKey string) (identity.Identity, error)
+	CreateAPIKey(ctx context.Context, userID string) (string, error)
+	ListAPIKeys(ctx context.Context, userID string) ([]APIKey, error)
+	RevokeAPIKey(ctx context.Context, keyHash string) error
+	AddTeamMember(ctx context.Context, teamID, userID, role string) error
+	ListTeamMembers(ctx context.Context, teamID string) ([]Membership, error)
+	ListTeamsForUser(ctx context.Context, userID string) ([]Team, error)
+}
+
+// NewTeamAuthenticator is nil in the OSS build — set by team.go's init()
+// when the Tier-3 extension is present. Every caller that needs a
+// TeamAuthenticator checks this for nil first: nil means "no team auth
+// available," the correct and normal Tier 1/2 state, not an error.
+var NewTeamAuthenticator func(db *sql.DB) TeamAuthenticator
+
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `select id, coalesce(email, ''), created_at from users order by created_at`)
 	if err != nil {

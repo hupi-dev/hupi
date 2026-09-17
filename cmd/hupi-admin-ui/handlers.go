@@ -20,9 +20,14 @@ import (
 // package main, so there's no reason to export it.
 type server struct {
 	store     *auth.Store
-	teamStore *auth.TeamStore // real end-user/team auth — see team_handlers.go
-	db        *sql.DB         // for audit.LogStandalone/audit.Query — everything else goes through store
+	teamStore auth.TeamAuthenticator // real end-user/team auth, nil if the Tier-3 extension isn't present — see team_handlers.go
+	db        *sql.DB                // for audit.LogStandalone/audit.Query — everything else goes through store
 }
+
+// mountTeamRoutes is nil in the OSS build — set by team_handlers.go's
+// init() when the Tier-3 extension is present. Same package (both files
+// are `package main`), so init() can assign this directly.
+var mountTeamRoutes func(mux *http.ServeMux, s *server)
 
 // routes wires up the JSON API. Every route here lives under /api/ and is
 // wrapped by main.go's requireCSRFSafe(requireOperatorAuth(...)) — see
@@ -34,13 +39,12 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/users", s.listUsers)
 	mux.HandleFunc("POST /api/users", s.createUser)
 	mux.HandleFunc("GET /api/users/{id}", s.userDetail)
-	mux.HandleFunc("POST /api/users/{id}/keys", s.createKey)
-	mux.HandleFunc("POST /api/keys/revoke", s.revokeKey)
 
-	mux.HandleFunc("GET /api/teams", s.listTeams)
-	mux.HandleFunc("POST /api/teams", s.createTeam)
-	mux.HandleFunc("GET /api/teams/{id}", s.teamDetail)
-	mux.HandleFunc("POST /api/teams/{id}/members", s.addMember)
+	// /api/users/{id}/keys, /api/keys/revoke, and every /api/teams... route
+	// only exist when the Tier-3 extension is present — team_handlers.go.
+	if mountTeamRoutes != nil {
+		mountTeamRoutes(mux, s)
+	}
 
 	mux.HandleFunc("GET /api/operators", s.listOperators)
 	mux.HandleFunc("POST /api/operators", s.createOperator)
@@ -121,15 +125,22 @@ func (s *server) userDetail(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "user not found")
 		return
 	}
-	teams, err := s.teamStore.ListTeamsForUser(r.Context(), id)
-	if err != nil {
-		internalError(w, err)
-		return
-	}
-	keys, err := s.teamStore.ListAPIKeys(r.Context(), id)
-	if err != nil {
-		internalError(w, err)
-		return
+	// Empty, not an error, when the Tier-3 extension isn't present — Tier
+	// 1/2 genuinely never has team memberships or API keys, so this is the
+	// correct answer, not a degraded one.
+	var teams []auth.Team
+	var keys []auth.APIKey
+	if s.teamStore != nil {
+		teams, err = s.teamStore.ListTeamsForUser(r.Context(), id)
+		if err != nil {
+			internalError(w, err)
+			return
+		}
+		keys, err = s.teamStore.ListAPIKeys(r.Context(), id)
+		if err != nil {
+			internalError(w, err)
+			return
+		}
 	}
 	s.audit(r, audit.EventAdminUIView, identity.Scope{Kind: identity.ScopeKindPrivate, Owner: id},
 		map[string]any{"page": "user_detail", "user_id": id})

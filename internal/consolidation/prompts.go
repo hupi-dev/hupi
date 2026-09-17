@@ -24,32 +24,6 @@ const summarySystemPrompt = `You are HUPI's consolidation engine (see MEMORY_FOR
 
 Only include a key_fact if it is directly and specifically supported by the source texts you were given. Cite the exact source ids it came from. Do not include anything you are inferring, generalizing, or guessing beyond what the source text states.`
 
-// teamSummarySystemPrompt is summarySystemPrompt's counterpart for
-// scope_kind='shared' consolidation runs (docs/TIER3_PLAN.md §5): written
-// in a neutral team voice rather than any one member's, since a shared
-// summary will be read by everyone on the team, not the one person who
-// happened to have the conversation.
-//
-// Not referenced directly by generateSummary — wire it in via
-// Runner.TeamPromptOverride instead. Kept here, currently unused by the
-// default OSS wiring, as the one piece of team-voice content still
-// living in this package pending an open-core split (see the Tier 3
-// licensing plan); nothing about a private-scope-only deployment reads
-// this constant.
-const teamSummarySystemPrompt = `You are HUPI's consolidation engine, writing a SHARED team summary (see MEMORY_FORMAT.md § Grounding & correction). Multiple team members' conversations may be in the source texts below. Write in a neutral, third-person team-knowledge voice — "the team decided X", not "I decided X" or addressing any one member directly. You must respond with exactly one JSON object, nothing else, no markdown fences, of this shape:
-
-{
-  "summary": "one paragraph of prose, for human skimming only, not treated as fact",
-  "key_facts": [
-    {"fact": "a single concrete, checkable fact", "source_episode_ids": ["<id>", ...]}
-  ],
-  "entities_touched": [
-    {"id": "kind:slug", "kind": "person|project|preference|skill|place|organization", "name": "...", "attributes": {"key": "value"}}
-  ]
-}
-
-Only include a key_fact if it is directly and specifically supported by the source texts you were given. Cite the exact source ids it came from. Do not include anything you are inferring, generalizing, or guessing beyond what the source text states. Never include any individual's personal preferences or private context here — only what's relevant to the team.`
-
 // buildSummaryPrompt assembles the consolidation LLM's user message.
 // establishedRecord, when non-empty, is the prose of the day's *current*
 // draft before this re-consolidation run — RunDaily passes this when a

@@ -32,6 +32,14 @@ import (
 	"hupi/internal/identity"
 )
 
+// runAddMember and runCreateKey are nil in the OSS build — set by
+// team.go's init() when the Tier-3 extension is present. Same package
+// (both files are `package main`), so init() can assign these directly.
+var (
+	runAddMember func(ctx context.Context, deps *bootstrap.Deps, teamStore auth.TeamAuthenticator, args []string) error
+	runCreateKey func(ctx context.Context, deps *bootstrap.Deps, teamStore auth.TeamAuthenticator, args []string) error
+)
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "hupi-admin:", err)
@@ -53,7 +61,10 @@ func run() error {
 	defer deps.DB.Close()
 
 	store := auth.New(deps.DB, deps.Keys)
-	teamStore := auth.NewTeamStore(deps.DB)
+	var teamStore auth.TeamAuthenticator
+	if auth.NewTeamAuthenticator != nil {
+		teamStore = auth.NewTeamAuthenticator(deps.DB)
+	}
 
 	switch subcommand {
 	case "create-user":
@@ -93,9 +104,15 @@ func run() error {
 		fmt.Printf("created team %s (%s)\n", *id, *name)
 
 	case "add-member":
+		if runAddMember == nil {
+			return fmt.Errorf("add-member requires the HUPI Enterprise build (Tier 3)")
+		}
 		return runAddMember(ctx, deps, teamStore, args)
 
 	case "create-key":
+		if runCreateKey == nil {
+			return fmt.Errorf("create-key requires the HUPI Enterprise build (Tier 3)")
+		}
 		return runCreateKey(ctx, deps, teamStore, args)
 
 	case "create-operator":

@@ -50,8 +50,17 @@ type Runner struct {
 	TeamPromptOverride func(scope identity.Scope) (prompt string, ok bool)
 }
 
+// teamPromptProvider is nil in the OSS build — set by team.go's init()
+// when the Tier-3 extension is present. New wires whatever this
+// currently is into every Runner it constructs, so callers never need
+// their own nil-check or wiring.
+var teamPromptProvider func(scope identity.Scope) (prompt string, ok bool)
+
 func New(db *sql.DB, keys *crypto.KeyStore, consolidation, grounding, embedder provider.Provider) *Runner {
-	return &Runner{db: db, keys: keys, consolidation: consolidation, grounding: grounding, embedder: embedder}
+	return &Runner{
+		db: db, keys: keys, consolidation: consolidation, grounding: grounding, embedder: embedder,
+		TeamPromptOverride: teamPromptProvider,
+	}
 }
 
 // systemActor is the audit_log actor for anything this package writes on
