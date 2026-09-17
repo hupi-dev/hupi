@@ -80,7 +80,8 @@ for f in schema/0001_init.sql \
          schema/0009_export_import_audit_events.sql \
          schema/0010_key_rotation.sql \
          schema/0011_key_rotation_audit_event.sql \
-         schema/0012_entity_embeddings.sql; do
+         schema/0012_entity_embeddings.sql \
+         schema/0013_embedding_model_tracking.sql; do
   psql "$HUPI_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
 done
 ```

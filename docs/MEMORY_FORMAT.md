@@ -437,15 +437,18 @@ snapshot outside the database.
    (dedup by hash/id/period — see `internal/hpmf`'s doc comments for the
    exact rule); without it, the target scope must be empty.
 3. Point HUPI at *any* OpenAI-compatible endpoint (see
-   [ARCHITECTURE.md](../ARCHITECTURE.md)). **Known gap**: nothing
-   automatically re-embeds imported historical data — `hupi-consolidate`
-   only ever embeds a summary the moment it's freshly written, or an
-   episode captured on the specific day it processes, neither of which
-   applies to rows that just arrived via `hupi-import`. Retrieval still
-   works immediately for anything the two-stage gate matches by keyword/
-   entity-name (ARCHITECTURE.md § Retrieval Engine), but imported content
-   won't surface via vector search until a bulk re-embed tool exists — not
-   yet built.
+   [ARCHITECTURE.md](../ARCHITECTURE.md)). `hupi-consolidate` only ever
+   embeds a summary the moment it's freshly written, or an episode
+   captured on the specific day it processes, neither of which applies to
+   rows that just arrived via `hupi-import` — they land with `embedding`
+   still null. Retrieval still works immediately for anything the
+   two-stage gate matches by keyword/entity-name (ARCHITECTURE.md §
+   Retrieval Engine), but imported content won't surface via vector
+   search until it's been embedded: run `hupi-reembed -scope-kind
+   <kind> -scope-owner <id>` after an import to backfill it (see
+   `internal/reembed`'s doc comment) — the same tool that handles a
+   changed `active_embedding_provider` also covers a never-embedded row,
+   since both cases are "this row's embedding isn't current."
 
 Treat both the `age` identity for exports and the live store's field
 encryption KEK (see ARCHITECTURE.md) like a password manager vault: either

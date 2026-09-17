@@ -160,13 +160,22 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 }
 
 // entitiesMissingEmbeddings returns every entity in scope that doesn't
-// have an embedding yet — see RunDaily's backfill call above.
+// have a *current* embedding — never embedded at all, or embedded under
+// a different model than the one configured right now (see RunDaily's
+// backfill call above, and schema/0013_embedding_model_tracking.sql for
+// why a stale-model embedding needs the same treatment as a missing one:
+// comparing vectors from two different models is meaningless, and this
+// query is what lets an entity touched by today's consolidation recover
+// from a provider switch without waiting for a full hupi-reembed run).
 func (r *Runner) entitiesMissingEmbeddings(ctx context.Context, scope identity.Scope) ([]string, error) {
+	currentModel := EmbedderIdentity(r.embedder)
 	var ids []string
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-			select id from entities where embedding is null and scope_kind = $1 and scope_owner = $2
-		`, scope.Kind, scope.Owner)
+			select id from entities
+			where (embedding is null or embedding_model is distinct from $1)
+			  and scope_kind = $2 and scope_owner = $3
+		`, currentModel, scope.Kind, scope.Owner)
 		if err != nil {
 			return err
 		}
@@ -397,20 +406,23 @@ func sourceLevelBelow(level string) string {
 	}
 }
 
-// episodeEmbedImportanceThreshold gates which episodes are worth embedding
+// EpisodeEmbedImportanceThreshold gates which episodes are worth embedding
 // individually — most content is only ever meant to be reachable via the
 // daily summary that folds it in; this is a supplementary path for
 // anything importance-scored high enough to be worth finding directly
 // (docs/DESIGN_VS_BUILT.md #3).
-const episodeEmbedImportanceThreshold = 0.6
+const EpisodeEmbedImportanceThreshold = 0.6
 
 // embedHighImportanceEpisodes is the write side of ARCHITECTURE.md's
 // "vector search over summaries + high-importance episodes": embeds any of
-// the day's episodes (within scope) clearing episodeEmbedImportanceThreshold
-// that don't have an embedding yet, so internal/store.Retrieve's
-// vectorSearchEpisodes has something to find. Embedding never happens
-// inside Capture itself — that would reintroduce a network call into the
-// capture hot path, exactly what Capture was redesigned to avoid.
+// the day's episodes (within scope) clearing EpisodeEmbedImportanceThreshold
+// that don't have a *current* embedding — never embedded, or embedded under
+// a since-changed provider (see entitiesMissingEmbeddings and
+// schema/0013_embedding_model_tracking.sql for why that's treated the same
+// as missing) — so internal/store.Retrieve's vectorSearchEpisodes has
+// something to find. Embedding never happens inside Capture itself — that
+// would reintroduce a network call into the capture hot path, exactly what
+// Capture was redesigned to avoid.
 //
 // The candidate read and each write are separate short transactions
 // (docs/HARDENING_PLAN.md D3): the embed call between them is a network
@@ -420,15 +432,17 @@ const episodeEmbedImportanceThreshold = 0.6
 func (r *Runner) embedHighImportanceEpisodes(ctx context.Context, scope identity.Scope, date time.Time) error {
 	start := date.Truncate(24 * time.Hour)
 	end := start.Add(24 * time.Hour)
+	currentModel := EmbedderIdentity(r.embedder)
 
 	var sources []textSource
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			select id, input_text, output_text, key_version from episodes
 			where type = 'interaction' and ts >= $1 and ts < $2
-			  and importance >= $3 and embedding is null
-			  and scope_kind = $4 and scope_owner = $5
-		`, start, end, episodeEmbedImportanceThreshold, scope.Kind, scope.Owner)
+			  and importance >= $3
+			  and (embedding is null or embedding_model is distinct from $4)
+			  and scope_kind = $5 and scope_owner = $6
+		`, start, end, EpisodeEmbedImportanceThreshold, currentModel, scope.Kind, scope.Owner)
 		if err != nil {
 			return err
 		}
@@ -450,7 +464,7 @@ func (r *Runner) embedHighImportanceEpisodes(ctx context.Context, scope identity
 		}
 		vectorLiteral := pgfmt.VectorLiteral(resp.Vectors[0])
 		err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, `update episodes set embedding = $1::vector where id = $2`, vectorLiteral, s.id)
+			_, err := tx.ExecContext(ctx, `update episodes set embedding = $1::vector, embedding_model = $2 where id = $3`, vectorLiteral, currentModel, s.id)
 			return err
 		})
 		if err != nil {
@@ -567,9 +581,19 @@ func (r *Runner) scanEpisodeSources(ctx context.Context, rows *sql.Rows, scope i
 		if err != nil {
 			return nil, fmt.Errorf("decrypt episode %s output_text: %w", id, err)
 		}
-		out = append(out, textSource{id: id, text: fmt.Sprintf("USER: %s\nASSISTANT: %s", input, output)})
+		out = append(out, textSource{id: id, text: EpisodeEmbedText(input, output)})
 	}
 	return out, rows.Err()
+}
+
+// EpisodeEmbedText renders one episode's turn as the single canonical
+// string both a normal consolidation run embeds (embedHighImportanceEpisodes,
+// via scanEpisodeSources above) and feeds to the consolidation LLM as one
+// of a day's sources — exported so internal/reembed embeds exactly the
+// same text a fresh consolidation run would have, rather than a
+// second, driftable copy of this format string.
+func EpisodeEmbedText(input, output string) string {
+	return fmt.Sprintf("USER: %s\nASSISTANT: %s", input, output)
 }
 
 // summaryExists reports whether scope already has any summary (any

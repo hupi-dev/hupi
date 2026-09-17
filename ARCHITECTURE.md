@@ -221,8 +221,14 @@ Runs independently of any live chat (nightly cron is enough):
 3. **Weekly/monthly/yearly rollup**: summarize the *summaries* one level
    down, not the raw episodes — keeps this step O(number of summaries),
    not O(years of raw logs) — then grounding-check those too.
-4. **Index rebuild**: re-embed anything new (or everything, if the embedding
-   model changed) and upsert into the `pgvector` embedding column/table.
+4. **Index rebuild**: re-embed anything new and upsert into the `pgvector`
+   embedding column/table. If `active_embedding_provider` changes, run
+   `hupi-reembed` for each affected scope — every summary/episode/entity
+   whose `embedding_model` no longer matches the configured provider (or
+   that was never embedded at all) gets picked up and re-embedded; see
+   `internal/reembed`'s doc comment for why comparing vectors across
+   models isn't safe and how this stays resumable without a persisted
+   cursor.
 
 Raw episodes are **not** pruned by this pipeline. Storage is cheap relative
 to the value of being able to trace a summary claim back to what was

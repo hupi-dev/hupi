@@ -2,9 +2,9 @@
 # Kubernetes Deployment runs the gateway (the default CMD); CronJobs and
 # one-off Jobs run everything else (hupi-consolidate, hupi-selfcheck,
 # hupi-admin, hupi-trace, hupi-correct, hupi-audit, hupi-export,
-# hupi-import, hupi-rotate-key) from the exact same image via `command:`
-# overrides — one build, one thing to version and scan for
-# vulnerabilities, not eleven.
+# hupi-import, hupi-rotate-key, hupi-reembed) from the exact same image
+# via `command:` overrides — one build, one thing to version and scan for
+# vulnerabilities, not twelve.
 
 # ---- web stage ----
 # Builds cmd/hupi-admin-ui's React frontend (cmd/hupi-admin-ui/web) into
@@ -42,7 +42,7 @@ COPY --from=web /src/cmd/hupi-admin-ui/web/dist /src/cmd/hupi-admin-ui/web/dist
 # nothing here).
 RUN mkdir -p /out && \
     for cmd in hupi hupi-consolidate hupi-selfcheck hupi-trace hupi-correct \
-               hupi-admin hupi-admin-ui hupi-audit hupi-export hupi-import hupi-rotate-key; do \
+               hupi-admin hupi-admin-ui hupi-audit hupi-export hupi-import hupi-rotate-key hupi-reembed; do \
       CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "/out/$cmd" "./cmd/$cmd"; \
     done
 

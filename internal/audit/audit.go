@@ -29,6 +29,8 @@ const (
 	EventImport = "import"
 	// EventKeyRotation was added in schema/0011 — see internal/rotate.
 	EventKeyRotation = "key_rotation"
+	// EventReembed was added in schema/0013 — see internal/reembed.
+	EventReembed = "reembed"
 )
 
 // Entry is one audit_log row. ActingScope/WorkspaceScope follow the same

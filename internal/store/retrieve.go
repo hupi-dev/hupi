@@ -62,7 +62,7 @@ const (
 	// counterpart for entities (schema/0012_entity_embeddings.sql) — kept
 	// separate rather than reusing vectorSimilarityThreshold because
 	// entity text (a short "name (kind)\nkey: value" rendering, see
-	// entityEmbedText in internal/consolidation/store.go) has different
+	// EntityEmbedText in internal/consolidation/store.go) has different
 	// embedding characteristics than a multi-sentence narrative summary,
 	// and 0.40 was calibrated specifically against summary prose.
 	//

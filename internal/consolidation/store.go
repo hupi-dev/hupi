@@ -361,6 +361,17 @@ func mergeAttributes(existing, incoming map[string]string) map[string]string {
 	return merged
 }
 
+// EmbedderIdentity is what gets recorded in embedding_model whenever
+// something is embedded — see schema/0013_embedding_model_tracking.sql
+// for why: a vector from one embedding model isn't comparable to a
+// vector from a different one (cosine similarity between them is closer
+// to noise than a real signal), so every embed needs to record which
+// model produced it, or a later provider switch has no way to tell old,
+// now-incomparable vectors apart from current ones.
+func EmbedderIdentity(p provider.Provider) string {
+	return p.Vendor() + ":" + p.Model()
+}
+
 func (r *Runner) embedSummary(ctx context.Context, scope identity.Scope, id, text string) error {
 	resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{text}})
 	if err != nil {
@@ -370,8 +381,9 @@ func (r *Runner) embedSummary(ctx context.Context, scope identity.Scope, id, tex
 		return errors.New("embedder returned no vectors")
 	}
 	vectorLiteral := pgfmt.VectorLiteral(resp.Vectors[0])
+	model := EmbedderIdentity(r.embedder)
 	return dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `update summaries set embedding = $1::vector where id = $2`, vectorLiteral, id)
+		_, err := tx.ExecContext(ctx, `update summaries set embedding = $1::vector, embedding_model = $2 where id = $3`, vectorLiteral, model, id)
 		return err
 	})
 }
@@ -436,7 +448,7 @@ func (r *Runner) embedEntities(ctx context.Context, scope identity.Scope, ids []
 			}
 		}
 
-		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{entityEmbedText(kind, name, attrs)}})
+		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{EntityEmbedText(kind, name, attrs)}})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("entity %s: embed call: %w", id, err))
 			continue
@@ -446,11 +458,12 @@ func (r *Runner) embedEntities(ctx context.Context, scope identity.Scope, ids []
 			continue
 		}
 		vectorLiteral := pgfmt.VectorLiteral(resp.Vectors[0])
+		model := EmbedderIdentity(r.embedder)
 		err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `
-				update entities set embedding = $1::vector
-				where id = $2 and scope_kind = $3 and scope_owner = $4
-			`, vectorLiteral, id, scope.Kind, scope.Owner)
+				update entities set embedding = $1::vector, embedding_model = $2
+				where id = $3 and scope_kind = $4 and scope_owner = $5
+			`, vectorLiteral, model, id, scope.Kind, scope.Owner)
 			return err
 		})
 		if err != nil {
@@ -460,12 +473,12 @@ func (r *Runner) embedEntities(ctx context.Context, scope identity.Scope, ids []
 	return errors.Join(errs...)
 }
 
-// entityEmbedText renders an entity as text worth embedding — name and
+// EntityEmbedText renders an entity as text worth embedding — name and
 // kind up front since those carry the most semantic weight for a query
 // like "what's my X", followed by attributes in a stable (sorted) key
 // order so the same entity content always embeds to the same text
 // regardless of Go's randomized map iteration order.
-func entityEmbedText(kind, name string, attrs map[string]string) string {
+func EntityEmbedText(kind, name string, attrs map[string]string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s (%s)", name, kind)
 	keys := make([]string, 0, len(attrs))
