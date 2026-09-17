@@ -88,6 +88,10 @@ const groups = [
         a: 'Yes — memory is stored as plain decrypted text and metadata, not tied to any one vendor’s response format. Switching is a config change to providers.yaml, plus a one-time re-embed if you also change embedding models (existing vector search results would otherwise be comparing embeddings from two different models).',
       },
       {
+        q: 'Can I use any embedding model?',
+        a: 'Not quite any one — every embedding is stored in a fixed-width column, and the database rejects anything of a different length outright. HUPI checks this the moment it starts up: a model whose native output is already the right size (OpenAI’s older ada-002, for example) works as-is; a model that supports being asked to shrink its output to that size (OpenAI’s newer text-embedding-3-small/-large) gets asked to automatically. A model that’s neither — commonly true of local/offline embedding models, which usually have no such option — is rejected at startup with a clear error, rather than silently corrupting search results later. After switching to a model that does pass, run the bundled re-embed tool once per scope to bring existing memories onto the new model.',
+      },
+      {
         q: 'Is my data encrypted?',
         a: 'Yes, at rest — every episode and summary is stored encrypted by default. In Tier 3, each team additionally gets its own separate encryption key, so a compromised key only exposes that one team’s data.',
       },

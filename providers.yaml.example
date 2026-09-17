@@ -6,7 +6,8 @@
 active_chat_provider: work-openai               # what you talk to day to day
 active_consolidation_provider: personal-claude  # what writes your memory — change rarely, on purpose
 active_grounding_provider: groq-fast            # optional — omit this line to reuse the consolidation profile
-active_embedding_provider: local-ollama
+active_embedding_provider: local-ollama         # NOTE: nomic-embed-text below is illustrative, not
+                                                 # a working default — see its own comment
 
 providers:
   work-openai:
@@ -36,4 +37,12 @@ providers:
     vendor: ollama
     api_base: http://localhost:11434/v1
     api_key_env: ""             # unauthenticated local endpoint
-    model: nomic-embed-text
+    model: nomic-embed-text     # WARNING: outputs 768 dimensions, not the 1536 every
+                                 # embedding column requires, and has no truncation
+                                 # option — HUPI will refuse to start with this as
+                                 # active_embedding_provider (see docs/INSTALL.md's
+                                 # Troubleshooting section). Kept here as a realistic
+                                 # example of a local/offline model, not a working
+                                 # embedding config — swap in a 1536-native model, or
+                                 # one that supports requesting 1536 explicitly
+                                 # (OpenAI's text-embedding-3-small/-large do).
