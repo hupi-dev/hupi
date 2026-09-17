@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import Nav from '../components/Nav.astro';
 import FinalCta from '../components/FinalCta.astro';
-import { GITHUB_URL, docFileURL, VSCODE_MARKETPLACE_URL } from '../lib/links.js';
+import { GITHUB_URL, docFileURL, VSCODE_MARKETPLACE_URL, TIER3_REPO_URL, CONTACT_EMAIL } from '../lib/links.js';
 
 const tiers = [
   {
@@ -21,7 +21,7 @@ const tiers = [
     name: 'Tier 3 — Professional (Shared)',
     who: 'A team, sharing some memory while keeping personal memory private',
     body:
-      'Two additions on top of Tier 1: HUPI_REQUIRE_AUTH=true, and provisioning real users/teams via hupi-admin. Team conversations consolidate into shared, third-person team knowledge visible to every member — while each member’s own private history, and their personal self_model, stay theirs alone.',
+      'Real users/teams, HUPI_REQUIRE_AUTH=true, and the /v1/team/... routes. Team conversations consolidate into shared, third-person team knowledge visible to every member — while each member’s own private history, and their personal self_model, stay theirs alone. Unlike Tiers 1/2, this isn’t part of the free build: it’s a separate, commercially-licensed extension — see "Tier 3 licensing" below.',
   },
 ];
 
@@ -106,14 +106,16 @@ export HUPI_PROVIDERS_CONFIG=./providers.yaml`,
           The fast path: <code class="font-mono-tight text-ember-400">install.sh</code>
         </p>
         <p class="mt-4 leading-relaxed text-fog-300">
-          All three tiers run from the same install — Tiers 1 and 2 are architecturally
-          identical, and Tier 3 is the same install plus two extra steps at the end. There's no
-          separate build or package per tier.
+          Tiers 1 and 2 run from the same install and the same free, MIT-licensed build — there's
+          no separate build or package between them. Tier 3 needs one additional thing this
+          installer alone doesn't provide: the commercially-licensed
+          <a href={TIER3_REPO_URL} class="text-ember-500 underline decoration-dotted hover:text-ember-400">hupi-t3</a>
+          extension, built in on top — see "Tier 3 licensing" below.
         </p>
         <pre
           class="font-mono-tight mt-6 overflow-x-auto rounded-lg border border-white/10 bg-ink p-4 text-sm text-fog-300"
         ><code>./install.sh                     # fully interactive — asks as it goes
-./install.sh --tier=3 --yes      # non-interactive; fails loudly instead of
+./install.sh --tier=1 --yes      # non-interactive; fails loudly instead of
                                   # guessing when something has no safe default
 ./install.sh --help              # every flag, including pointing it at
                                   # Postgres/providers you already run</code></pre>
@@ -164,9 +166,10 @@ export HUPI_PROVIDERS_CONFIG=./providers.yaml`,
             One install, three ways to run it.
           </p>
           <p class="mt-4 leading-relaxed text-fog-300">
-            All three tiers run the exact same software. Which one you're using is a function of
-            whether you've configured authentication and created any teams — not a different
-            product or a different build.
+            Tiers 1 and 2 run the exact same free software — which one you're using is purely
+            operational (self-managed vs. IT-managed), not a different build. Tier 3 is a real
+            architectural addition: real users/teams, authentication, and workspace routing —
+            shipped as a separate, commercially-licensed extension rather than a config flag.
           </p>
         </div>
 
@@ -185,6 +188,29 @@ export HUPI_PROVIDERS_CONFIG=./providers.yaml`,
         <p class="mt-8 text-sm text-fog-500">
           Tier 3's data isolation — per-team encryption keys, row-level security, audit logging —
           is covered in detail on the <a href="/faq" class="text-ember-500 underline decoration-dotted hover:text-ember-400">FAQ page</a>.
+        </p>
+      </div>
+    </section>
+
+    <section id="tier3-licensing" class="border-b border-white/5">
+      <div class="mx-auto max-w-4xl px-6 py-20 sm:py-28">
+        <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">Tier 3 licensing</h2>
+        <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+          Free core, licensed team layer.
+        </p>
+        <p class="mt-4 leading-relaxed text-fog-300">
+          This repo — Tiers 1 and 2, everything most people run — is MIT-licensed and free
+          forever. Team/shared-workspace support (Tier 3) is developed in a separate repo,
+          <a href={TIER3_REPO_URL} class="text-ember-500 underline decoration-dotted hover:text-ember-400">hupi-t3</a>,
+          under a commercial license — not free, not open source, no trial tier. It has to be
+          built in on top of this repo (its own <code class="font-mono-tight text-ember-400">build.sh</code>
+          documents exactly how); without it, this repo alone runs Tier 1/2 completely, with zero
+          dependency on the extension at all — <code class="font-mono-tight text-ember-400">HUPI_REQUIRE_AUTH=true</code>
+          with no license in place fails loudly at startup rather than silently doing nothing.
+        </p>
+        <p class="mt-4 leading-relaxed text-fog-300">
+          Contact <a href={`mailto:${CONTACT_EMAIL}`} class="text-ember-500 underline decoration-dotted hover:text-ember-400">{CONTACT_EMAIL}</a>
+          for a Tier 3 commercial license.
         </p>
       </div>
     </section>

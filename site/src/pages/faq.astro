@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import Nav from '../components/Nav.astro';
 import FinalCta from '../components/FinalCta.astro';
-import { GITHUB_URL, docFileURL } from '../lib/links.js';
+import { GITHUB_URL, docFileURL, TIER3_REPO_URL } from '../lib/links.js';
 
 const groups = [
   {
@@ -14,7 +14,7 @@ const groups = [
       },
       {
         q: 'Is HUPI open source?',
-        a: `Yes, MIT licensed. The full source, including the schema migrations and every doc referenced on this page, is on <a href="${GITHUB_URL}" class="text-ember-500 underline decoration-dotted hover:text-ember-400">GitHub</a>.`,
+        a: `Tiers 1 and 2 — the gateway, retrieval, consolidation, encryption, admin tooling, everything most people run — yes, MIT licensed, free forever. The full source, including the schema migrations and every doc referenced on this page, is on <a href="${GITHUB_URL}" class="text-ember-500 underline decoration-dotted hover:text-ember-400">GitHub</a>. Tier 3 (team/shared-workspace support) is a separate, commercially-licensed extension — see "Is Tier 3 free too?" below.`,
       },
       {
         q: 'What LLM providers does it support?',
@@ -31,7 +31,11 @@ const groups = [
     items: [
       {
         q: 'What are Tier 1, 2, and 3?',
-        a: 'All three run the exact same software. Tier 1 (Personal) is one person, self-hosted, no auth required. Tier 2 (Professional Single) is architecturally identical to Tier 1 — the difference is purely operational (IT-managed rather than self-managed). Tier 3 (Professional Shared) adds real multi-user identity: teams, per-team shared workspaces, and authentication — while keeping every member’s personal memory private. See the <a href="/docs#tiers" class="text-ember-500 underline decoration-dotted hover:text-ember-400">docs page</a> for setup.',
+        a: 'Tier 1 (Personal) is one person, self-hosted, no auth required. Tier 2 (Professional Single) is architecturally identical to Tier 1, running the exact same free software — the difference is purely operational (IT-managed rather than self-managed). Tier 3 (Professional Shared) adds real multi-user identity: teams, per-team shared workspaces, and authentication — while keeping every member’s personal memory private. Unlike Tiers 1/2, Tier 3 is a separate, commercially-licensed extension, not part of the free build — see "Is Tier 3 free too?" below. See the <a href="/docs#tiers" class="text-ember-500 underline decoration-dotted hover:text-ember-400">docs page</a> for setup.',
+      },
+      {
+        q: 'Is Tier 3 free too?',
+        a: `No. Tiers 1 and 2 (this whole repo) are MIT-licensed and free forever. Tier 3 — real end-user/team authentication and the shared-workspace routes — is developed in a separate repo, <a href="${TIER3_REPO_URL}" class="text-ember-500 underline decoration-dotted hover:text-ember-400">hupi-t3</a>, under a commercial license. It's a real, if small, technical split, not just a paywalled config flag: build the public repo alone and Tier 3's code isn't even compiled in — <code class="font-mono-tight">HUPI_REQUIRE_AUTH=true</code> without a Tier 3 license fails immediately at startup with a clear error rather than silently doing nothing. Contact us for commercial licensing.`,
       },
       {
         q: 'How does team-based isolation actually work — is it just application code trusting itself?',
@@ -97,7 +101,7 @@ const groups = [
       },
       {
         q: 'What does it cost to run, beyond LLM API usage?',
-        a: 'Just your own Postgres (with pgvector) and wherever you run the gateway binary — there’s no HUPI-side hosting fee since it’s self-hosted and open source. The main recurring LLM cost beyond normal chat usage is the nightly consolidation pass and its independent grounding check, which roughly doubles the number of consolidation calls — accepted deliberately, since the alternative is a memory system that can drift from the truth with no way to detect it.',
+        a: 'Just your own Postgres (with pgvector) and wherever you run the gateway binary — there’s no HUPI-side hosting fee since it’s self-hosted, and Tiers 1/2 are free and open source. (Tier 3 has a separate commercial license fee — see "Is Tier 3 free too?" above.) The main recurring LLM cost beyond normal chat usage is the nightly consolidation pass and its independent grounding check, which roughly doubles the number of consolidation calls — accepted deliberately, since the alternative is a memory system that can drift from the truth with no way to detect it.',
       },
     ],
   },
