@@ -39,7 +39,7 @@ internal/
   dbscope/                RLS-aware scoped transaction helper (Querier, Run, SetSession)
   audit/                  single audit_log writer (Write, LogStandalone) used by store/consolidation/CLI tools
   provider/               LLM vendor abstraction: Provider interface, OpenAICompat, Anthropic, Registry
-  auth/                   identity resolution (API key -> Identity) + provisioning + operator credentials
+  auth/                   scope provisioning + operator credentials (this repo); real API-key resolution is the Tier 3 extension — see §6
   gateway/                HTTP surface: Handler, request/response types, Retriever/Capturer/Authenticator interfaces
   store/                  Postgres+pgvector implementation of Capturer/Retriever/Trace
   consolidation/          the nightly rollup engine (Runner)
@@ -116,7 +116,7 @@ ever needing to know Postgres exists.
 | `dbscope` | Open a transaction with RLS session variables set correctly | `Querier`, `SetSession`, `Run` |
 | `audit` | Single writer for every `audit_log` row, any event type | `Entry`, `Write`, `LogStandalone`, `Event*` constants |
 | `provider` | One interface per vendor wire format, not per vendor | `Provider`, `OpenAICompat`, `Anthropic`, `Registry` |
-| `auth` | Resolve API keys/operator tokens to identities; provision, list, and revoke users/teams/keys/operators | `Store` (`Resolve`, `CreateUser`, `CreateTeam`, `AddTeamMember`, `CreateAPIKey`, `ListUsers`, `ListTeams`, `ListTeamMembers`, `ListTeamsForUser`, `ListAPIKeys`, `RevokeAPIKey`, `CreateOperator`, `ResolveOperator`, `ListOperators`, `RevokeOperator`) |
+| `auth` | Scope provisioning + operator credentials (this repo); real end-user/team auth is a separate, commercially-licensed extension — see §6 | `Store` (`CreateUser`, `CreateTeam`, `ListUsers`, `ListTeams`, `CreateOperator`, `ResolveOperator`, `ListOperators`, `RevokeOperator`); `TeamAuthenticator` interface + `NewTeamAuthenticator` hook (nil unless the Tier 3 extension is present) |
 | `gateway` | The HTTP surface + the interfaces storage must implement | `Handler`, `Retriever`, `Capturer`, `Authenticator`, `Episode`, `RetrievalResult` |
 | `store` | Postgres+pgvector implementation of retrieval/capture/trace | `Store` (`Retrieve`, `Capture`, `Trace`) |
 | `consolidation` | Nightly rollup: episodes -> grounded summaries | `Runner` (`RunDaily`, `RunRollup`, `Correct`) |
@@ -252,31 +252,43 @@ Default action (no `-status`/`-prune-old-versions`) runs a rotation to completio
 
 ### `cmd/hupi-admin` — provisioning
 
-Every subcommand is a thin, direct call into `internal/auth.Store`,
-followed by `logAdminAction` — `audit.LogStandalone` with
-`event_type = 'admin_provision'`, `actor` = the `-actor` flag (default
-`$USER`), best-effort (a failed audit write logs to stderr, doesn't fail
-the command whose real work already succeeded):
+`create-user`/`create-team`/`create-operator`/`revoke-operator` are a
+thin, direct call into `internal/auth.Store` (this repo — every tier).
+`add-member`/`create-key` go through the `runAddMember`/`runCreateKey`
+hooks instead (nil unless the Tier 3 extension is present — §6); the
+switch checks for nil first and returns a clear "requires the HUPI
+Enterprise build" error rather than a panic or a confusing failure
+further down. Every subcommand that does real work is followed by
+`logAdminAction` — `audit.LogStandalone` with `event_type =
+'admin_provision'`, `actor` = the `-actor` flag (default `$USER`),
+best-effort (a failed audit write logs to stderr, doesn't fail the
+command whose real work already succeeded):
 
-| Subcommand | Calls |
-|---|---|
-| `create-user` | `auth.Store.CreateUser` — inserts into `users`, then eagerly `keys.GetOrCreate` for that user's private scope (provisions the DEK immediately, not lazily) |
-| `create-team` | `auth.Store.CreateTeam` — same pattern for a team's shared scope |
-| `add-member` | `auth.Store.AddTeamMember` — upserts `team_members` |
-| `create-key` | `auth.Store.CreateAPIKey` — generates a raw key, persists only its sha256 hash, prints the raw value once |
-| `create-operator` | `auth.Store.CreateOperator` — generates an admin-UI operator credential, persists only its sha256 hash (schema/0008_admin_operators.sql) |
-| `revoke-operator` | `auth.Store.RevokeOperator` |
+| Subcommand | Calls | Requires Tier 3 extension? |
+|---|---|---|
+| `create-user` | `auth.Store.CreateUser` — inserts into `users`, then eagerly `keys.GetOrCreate` for that user's private scope (provisions the DEK immediately, not lazily) | No |
+| `create-team` | `auth.Store.CreateTeam` — same pattern for a team's shared scope | No |
+| `add-member` | `runAddMember` hook -> `TeamAuthenticator.AddTeamMember` — upserts `team_members` | Yes |
+| `create-key` | `runCreateKey` hook -> `TeamAuthenticator.CreateAPIKey` — generates a raw key, persists only its sha256 hash, prints the raw value once | Yes |
+| `create-operator` | `auth.Store.CreateOperator` — generates an admin-UI operator credential, persists only its sha256 hash (schema/0008_admin_operators.sql) | No |
+| `revoke-operator` | `auth.Store.RevokeOperator` | No |
 
 ### `cmd/hupi-admin-ui` — provisioning, over HTTP
 
-Same `internal/auth.Store` underneath, plus the read/revoke methods the
-CLI never needed (`ListUsers`, `ListTeams`, `ListTeamMembers`,
-`ListTeamsForUser`, `ListAPIKeys`, `RevokeAPIKey`, `ListOperators`), and
-`internal/audit.Query` for the audit-log route. Routing and JSON
-marshaling only — `cmd/hupi-admin-ui/handlers.go` has no business logic
-of its own, every handler calls straight into `auth.Store` (or
-`audit.Query`) and writes a JSON response; there is no `html/template`
-anywhere in this binary anymore. Anything outside `/api/` is served by
+`internal/auth.Store` underneath for the user/operator routes (this repo
+— every tier), plus `internal/audit.Query` for the audit-log route.
+Every team/API-key route (`/api/teams...`, `/api/users/{id}/keys`,
+`/api/keys/revoke`) only exists if the Tier 3 extension registered them
+via the `mountTeamRoutes` hook (§6) — absent that, `routes()` simply
+never mounts them, a 404 rather than an error. The one route that spans
+both — `GET /api/users/{id}` — nil-checks `server.teamStore` and returns
+empty `teams`/`keys` when the extension isn't present, which is the
+correct Tier 1/2 answer (no team memberships or API keys exist there
+either way), not a degraded one. Routing and JSON marshaling only —
+`cmd/hupi-admin-ui/handlers.go` has no business logic of its own, every
+handler calls straight into `auth.Store` (or `audit.Query`) and writes a
+JSON response; there is no `html/template` anywhere in this binary
+anymore. Anything outside `/api/` is served by
 `cmd/hupi-admin-ui/assets.go`, which embeds the React frontend
 (`cmd/hupi-admin-ui/web`, a separate Vite/TypeScript/npm project — see
 `web/README.md`) via `//go:embed web/dist` and serves it with an
@@ -296,7 +308,86 @@ route list, the auth/exposure model, why named operators replaced a
 single shared token, and why this exists at all despite
 `TIER3_PLAN.md`'s original CLI-only non-goal.
 
-## 6. Where to look for what
+## 6. Tier 3: the open-core build split
+
+Tier 3 (real end-user/team authentication, `/v1/team/...` routes, team
+CLI subcommands) lives in a separate, commercially-licensed repo
+(`hupi-t3`), not this one — see [ARCHITECTURE.md § Licensing and the
+open-core split](../ARCHITECTURE.md) for the full reasoning on what
+stayed here vs. what moved. This section is the mechanical how: two
+things make it work without build tags or a Go module dependency
+between the repos.
+
+**1. Physical file overlay, not an import.** Go only allows a package's
+`internal/` directory to be imported by code rooted at that directory's
+parent — a rule enforced by looking at the file tree on disk at compile
+time, not at module or repo boundaries. `hupi-t3`'s files
+(`internal/auth/team.go`, `internal/gateway/team.go`,
+`internal/consolidation/team.go`, `cmd/hupi-admin/team.go`,
+`cmd/hupi-admin-ui/team_handlers.go`) mirror this repo's paths exactly;
+its own `build.sh` clones this repo into a temp directory, copies its
+files onto those same paths, and runs `go build` from the combined tree.
+At that point they're indistinguishable from any other file in
+`internal/auth`/`internal/gateway`/etc. — free to import
+`internal/crypto`, `internal/identity`, anything else in the tree,
+exactly as if they'd always lived there. A plain `go build ./...` in
+this repo alone never sees those files at all.
+
+**2. Nil-by-default hook variables, set via `init()`.** Even with the
+import problem solved, this repo's own shared code (`cmd/hupi/main.go`,
+`cmd/hupi-admin/main.go`, `cmd/hupi-admin-ui/handlers.go`) still needs to
+*call* the Tier 3 code when it's present — but a direct reference like
+`handler.HandleTeamChatCompletions` would fail to compile the moment
+`team.go` is absent. The fix: this repo declares package-level variables
+of function type, nil by default:
+
+```go
+// internal/gateway/handler.go (this repo)
+var MountTeamRoutes func(mux *http.ServeMux, h *Handler)
+```
+
+Callers check for `nil` before using it:
+
+```go
+// cmd/hupi/main.go (this repo)
+if gateway.MountTeamRoutes != nil {
+    gateway.MountTeamRoutes(mux, handler)
+}
+```
+
+In a plain build, nothing ever sets `MountTeamRoutes`, so it stays `nil`
+forever, the `if` never fires, and `/v1/team/...` is simply never
+registered — not an error, the correct Tier 1/2 state. When
+`hupi-t3`'s `internal/gateway/team.go` is part of the build, its `init()`
+(which Go runs automatically for every compiled package, before `main`)
+assigns a real implementation:
+
+```go
+// internal/gateway/team.go (hupi-t3, overlaid at build time)
+func init() {
+    MountTeamRoutes = func(mux *http.ServeMux, h *Handler) {
+        mux.HandleFunc("POST /v1/team/{team_id}/chat/completions", h.HandleTeamChatCompletions)
+        mux.HandleFunc("POST /v1/team/{team_id}/feedback", h.HandleTeamFeedback)
+    }
+}
+```
+
+Same source on both sides of the split, no build tags — the only thing
+that differs between the two builds is whether that one variable
+happens to be `nil`, which depends entirely on whether the file was
+present at compile time.
+
+The full set of hooks, all following this pattern:
+
+| Hook (declared here) | Set by (in `hupi-t3`) | Nil behavior |
+|---|---|---|
+| `gateway.MountTeamRoutes` | `internal/gateway/team.go` | `/v1/team/...` never mounted |
+| `auth.NewTeamAuthenticator` | `internal/auth/team.go` | `HUPI_REQUIRE_AUTH=true` fails at startup with a clear error (`cmd/hupi/main.go`'s `resolveAuth`) instead of silently granting no-auth access |
+| `consolidation`'s `teamPromptProvider` | `internal/consolidation/team.go` | Every summary uses `summarySystemPrompt`, even for a `shared` scope — harmless, since Tier 1/2 never produces one |
+| `cmd/hupi-admin`'s `runAddMember`/`runCreateKey` | `cmd/hupi-admin/team.go` | Those two subcommands return "requires the HUPI Enterprise build" instead of running |
+| `cmd/hupi-admin-ui`'s `mountTeamRoutes` | `cmd/hupi-admin-ui/team_handlers.go` | `/api/teams...`, `/api/users/{id}/keys`, `/api/keys/revoke` never mounted; `server.teamStore` stays `nil`, and the one shared route that reads it (`GET /api/users/{id}`) returns empty `teams`/`keys` rather than erroring |
+
+## 7. Where to look for what
 
 | If you're asking... | Look at |
 |---|---|
@@ -305,6 +396,7 @@ single shared token, and why this exists at all despite
 | "What's the record schema (episode/summary/entity)?" | [MEMORY_FORMAT.md](MEMORY_FORMAT.md) |
 | "Is X actually implemented, or just designed?" | [DESIGN_VS_BUILT.md](DESIGN_VS_BUILT.md) |
 | "How does the multi-tenant/team model work?" | [TIER3_PLAN.md](TIER3_PLAN.md) |
+| "Why isn't Tier 3's code in this repo, and how does the build still work?" | §6 above, [ARCHITECTURE.md § Licensing and the open-core split](../ARCHITECTURE.md) |
 | "How does encryption/RLS actually work?" | [HARDENING_PLAN.md](HARDENING_PLAN.md), §4 above |
 | "What does this product do, for whom?" | [BUSINESS_PROCESS.md](BUSINESS_PROCESS.md) |
 | "How do I deploy this to Kubernetes?" | [INSTALL.md § Containerized deployment](INSTALL.md#containerized-deployment), [Dockerfile](../Dockerfile), [deploy/k8s/](../deploy/k8s/), [deploy/helm/hupi/](../deploy/helm/hupi/) |
