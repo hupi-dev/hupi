@@ -8,6 +8,7 @@
 hupi.env
 providers.yaml
 hupi.dek.wrapped
+.env
 
 # Node (cmd/hupi-admin-ui/web, site — two independent npm projects)
 node_modules/

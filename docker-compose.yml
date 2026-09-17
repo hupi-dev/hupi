@@ -1,0 +1,79 @@
+# Quick-start / self-hosted docker-compose setup — bundles Postgres for
+# convenience, unlike the bare-metal (install.sh) and Kubernetes
+# (deploy/k8s/, deploy/helm/hupi/) paths, which are bring-your-own-Postgres
+# by design. If you already run your own Postgres, skip the `postgres`
+# service below and point HUPI_ADMIN_DATABASE_URL / HUPI_APP_DATABASE_URL
+# at it instead.
+#
+# Setup:
+#   cp .env.example .env                      # fill in the three required secrets
+#   cp providers.yaml.example providers.yaml  # pick/configure your LLM provider(s)
+#   docker compose up -d
+#
+# See docs/INSTALL.md § "Containerized deployment (docker compose)" for
+# the full walkthrough, including how to run hupi-consolidate on a
+# schedule and what each env var means.
+#
+# No pre-built image is published yet — `build: .` builds from the
+# Dockerfile in this repo. If/when a published image exists, swap
+# `build: .` for `image: <repo>/hupi:<tag>` on the migrate/gateway
+# services below.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hupi
+      # This is the Postgres *superuser* password (admin access), not
+      # hupi_app's — see HUPI_APP_DB_PASSWORD below for that one.
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD in .env}
+    volumes:
+      - hupi-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Applies schema/*.sql (idempotent, safe to re-run on every `up`) and
+  # sets hupi_app's password, then exits — `gateway` waits for this to
+  # finish successfully before starting. Not a long-running service.
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/app/migrate-entrypoint.sh"]
+    environment:
+      HUPI_ADMIN_DATABASE_URL: postgres://postgres:${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD in .env}@postgres:5432/hupi?sslmode=disable
+      HUPI_APP_DB_PASSWORD: ${HUPI_APP_DB_PASSWORD:?set HUPI_APP_DB_PASSWORD in .env}
+    volumes:
+      - ./deploy/compose/migrate-entrypoint.sh:/app/migrate-entrypoint.sh:ro
+
+  gateway:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # Passes through whatever provider API key env vars your
+    # providers.yaml's api_key_env fields name (e.g. OPENAI_API_KEY),
+    # in addition to the HUPI_* vars below — put both in the same .env.
+    env_file:
+      - .env
+    environment:
+      HUPI_APP_DATABASE_URL: postgres://hupi_app:${HUPI_APP_DB_PASSWORD:?set HUPI_APP_DB_PASSWORD in .env}@postgres:5432/hupi?sslmode=disable
+      HUPI_KEK: ${HUPI_KEK:?set HUPI_KEK in .env, e.g. output of openssl rand -base64 32}
+      HUPI_PROVIDERS_CONFIG: /app/providers.yaml
+      # Not 127.0.0.1 — see Dockerfile's own comment: the gateway must
+      # listen on all interfaces to be reachable via the port mapping
+      # below, not just from inside its own container.
+      HUPI_LISTEN_ADDR: "0.0.0.0:8787"
+    volumes:
+      - ./providers.yaml:/app/providers.yaml:ro
+    ports:
+      - "8787:8787"
+
+volumes:
+  hupi-postgres-data:

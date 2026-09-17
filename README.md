@@ -47,6 +47,8 @@ vscode-extension/     VS Code extension: chat sidebar + inline edit, backed by H
 docs/                 design docs, install guide, API reference, code guide
 install.sh            interactive/scriptable bare-metal installer
 Dockerfile            one image containing every Go binary above
+docker-compose.yml    quick-start deployment — bundles Postgres, unlike the other paths
+deploy/compose/       docker-compose's migrate service entrypoint script
 ```
 
 **Marketing website code**: [site/](site/) — an independent Astro +
@@ -71,8 +73,18 @@ how to run it locally.
 ./install.sh          # interactive: sets up Postgres, schema, keys, binaries
 ```
 
+Or, with Docker Compose (bundles Postgres for you — the fastest way to
+get a real instance running):
+
+```bash
+cp .env.example .env                       # fill in the three required secrets
+cp providers.yaml.example providers.yaml   # pick/configure your LLM provider(s)
+docker compose up -d --build
+```
+
 See [docs/INSTALL.md](docs/INSTALL.md) for the full manual walkthrough
-(bare-metal) or containerized deployment (Docker/Kubernetes/Helm).
+(bare-metal), the Docker Compose details, or containerized deployment on
+Kubernetes/Helm.
 
 ## Documentation
 

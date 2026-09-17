@@ -381,18 +381,73 @@ you have an existing `hupi.dek.wrapped` file and a single-scope database
 
 ## Containerized deployment
 
-One image (`sujithsamuel/hupi` on Docker Hub, or build your own with
-`docker build -t your-repo/hupi .`) contains every HUPI binary — the
+One image (build it yourself with `docker build -t your-repo/hupi .` —
+no pre-built image is published yet) contains every HUPI binary — the
 gateway is its default `ENTRYPOINT`; everything else
 (`hupi-consolidate`, `hupi-selfcheck`, `hupi-export`, `hupi-rotate-key`,
 etc.) runs from the same image via a `command:` override, so there's one
 thing to build, version, and scan, not eleven. See the
 [Dockerfile](../Dockerfile)'s own comments for the build.
 
-As with the bare-metal path, Postgres is bring-your-own — nothing here
-bundles a database. TLS is also bring-your-own: the manifests and chart
-deliberately have no TLS/certificate configuration, on the assumption
-your ingress controller already terminates TLS in front of the Service.
+For Kubernetes and Helm specifically, Postgres is bring-your-own —
+nothing there bundles a database. TLS is also bring-your-own for those
+two: the manifests and chart deliberately have no TLS/certificate
+configuration, on the assumption your ingress controller already
+terminates TLS in front of the Service. The Docker Compose path just
+below is the one exception — it bundles a Postgres container for
+convenience, since "try this out quickly" is exactly the case Compose
+is for.
+
+**Docker Compose** — [docker-compose.yml](../docker-compose.yml) at the
+repo root, the fastest way to get a real instance running end to end:
+
+```bash
+cp .env.example .env                       # fill in the three required secrets — see the file's own comments
+cp providers.yaml.example providers.yaml   # pick/configure your LLM provider(s)
+docker compose up -d --build
+```
+
+This starts three things: a `postgres` container (`pgvector/pgvector:pg16`,
+with a named volume so data survives restarts), a `migrate` container
+that applies every `schema/*.sql` migration in order and sets the
+`hupi_app` role's password (see
+[deploy/compose/migrate-entrypoint.sh](../deploy/compose/migrate-entrypoint.sh)),
+then exits — and a long-running `gateway` container that only starts
+once `migrate` has exited successfully. Re-running `docker compose up`
+later is safe: `migrate.sh` is idempotent, so it just confirms
+everything's already applied and exits immediately.
+
+The `.env` file holds three secrets `docker-compose.yml` requires and
+refuses to start without: `POSTGRES_ADMIN_PASSWORD` (superuser access,
+used only by `migrate`), `HUPI_APP_DB_PASSWORD` (the restricted role the
+gateway actually runs as day to day), and `HUPI_KEK` (the master
+encryption key — back this up somewhere outside of Postgres, since
+losing it makes every encrypted row permanently unreadable). Add
+whatever provider API key variables your `providers.yaml`'s
+`api_key_env` fields name (e.g. `OPENAI_API_KEY`) to the same `.env`
+file — `env_file:` on the `gateway` service passes all of it through.
+
+Already have your own Postgres and don't want the bundled one? Remove
+the `postgres` service and `depends_on: postgres` from `migrate`, and
+point `HUPI_ADMIN_DATABASE_URL`/`HUPI_APP_DATABASE_URL` at your existing
+instance instead — same idea as the bare-metal and Kubernetes paths.
+
+Nothing in `docker-compose.yml` runs `hupi-consolidate` or
+`hupi-selfcheck` on a schedule — same "bring your own scheduler"
+approach as the bare-metal path's cron entries. Run either one-off
+against the running stack with `--entrypoint`, which is required here:
+the `gateway` service's image has a fixed `ENTRYPOINT ["hupi"]` (the
+gateway server), so without overriding it, `docker compose run gateway
+hupi-consolidate ...` would actually run `hupi hupi-consolidate ...`
+(the gateway server, ignoring the extra arguments) instead of the
+consolidation binary:
+
+```bash
+docker compose run --rm --entrypoint hupi-consolidate gateway -date $(date -u +%Y-%m-%d)
+```
+
+and point your host's cron (or a scheduled CI job, etc.) at that same
+command daily.
 
 **Plain manifests** — [deploy/k8s/](../deploy/k8s/), numbered in
 apply order:
