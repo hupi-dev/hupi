@@ -159,12 +159,13 @@ don't**: every embedding column in the schema is a fixed `vector(1536)`,
 and Postgres rejects any other length outright. HUPI checks this at
 startup and refuses to start (with a clear error) rather than let it fail
 later on the first real write — see the Troubleshooting section below.
-If you're on a fresh install this just means picking a model that either
-already outputs 1536 dimensions natively, or supports being asked to
-(OpenAI's `text-embedding-3-small`/`-large`, both used as-is, truncated);
-the bundled `providers.yaml.example`'s `local-ollama` profile is
-illustrative, not a working default for embedding specifically — see its
-own comment.
+In practice this is rarely a real limitation: a model with a *shorter*
+native output (most local/offline models, including the bundled
+`providers.yaml.example`'s `local-ollama` profile) gets zero-padded up to
+1536 automatically, which is mathematically exact, not a quality
+tradeoff (see [ARCHITECTURE.md § Provider abstraction](../ARCHITECTURE.md)).
+Only a model with a *longer* native output and no truncation option —
+uncommon in practice — genuinely can't be used as-is.
 
 ## Step 6 — Environment variables
 
@@ -525,7 +526,7 @@ review what it would create.
 | `read providers.yaml: no such file or directory` | Either run the binary from the directory containing `providers.yaml`, or set `HUPI_PROVIDERS_CONFIG` to its absolute path. |
 | Team route always returns `403` | `HUPI_REQUIRE_AUTH` isn't set to `true`, or the requesting user genuinely isn't a member of that team (`hupi-admin add-member`). |
 | `insert into entities ... new row violates row-level security policy` from your own tooling | Something is writing to Postgres directly instead of through the application — everything that touches `episodes`/`summaries`/`entities` must go through a scoped transaction (`internal/dbscope`), including any ad hoc scripts you write yourself. |
-| `hupi`/`hupi-consolidate`/`hupi-reembed`/`hupi-correct`/`hupi-selfcheck` exits at startup with `produces N-dimension embeddings, not the required 1536` | Your `active_embedding_provider`'s model doesn't natively output 1536 dimensions and doesn't support being asked to (most local models via Ollama/vLLM fall in this bucket — they typically have no truncation knob at all). Pick a model that either is already 1536-dimensional (e.g. OpenAI's `text-embedding-ada-002`) or supports requesting it (OpenAI's `text-embedding-3-small`/`-large`). See [ARCHITECTURE.md § Provider abstraction](../ARCHITECTURE.md) for why the column is fixed at 1536 at all, and run `hupi-reembed` per scope after any embedding model change. |
+| `hupi`/`hupi-consolidate`/`hupi-reembed`/`hupi-correct`/`hupi-selfcheck` exits at startup with `produces N-dimension embeddings, longer than the required 1536` | Your `active_embedding_provider`'s model natively outputs *more* than 1536 dimensions and doesn't support being asked to shorten it. A model shorter than 1536 (most local/Ollama models) is handled automatically via zero-padding and would never hit this — this specifically means a larger model with no truncation option. Pick a model that's already ≤1536-dimensional, or one that supports requesting a smaller size explicitly (OpenAI's `text-embedding-3-small`/`-large` do). See [ARCHITECTURE.md § Provider abstraction](../ARCHITECTURE.md) for why the column is fixed at 1536 at all, and run `hupi-reembed` per scope after any embedding model change. |
 
 ## What this document doesn't cover
 

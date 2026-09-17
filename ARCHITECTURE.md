@@ -348,16 +348,39 @@ model whose native output isn't 1536-dimensional fail at the first real
 write, `bootstrap.VerifyEmbedding` (`internal/provider/dimensions.go`)
 checks this once at startup for every entrypoint that actually embeds
 (the gateway, `hupi-consolidate`, `hupi-reembed`, `hupi-correct`,
-`hupi-selfcheck`): it tries the model's native output first, then falls
-back to explicitly requesting 1536 dimensions (OpenAI's
-`text-embedding-3-*` family supports this; plenty of others, like
-`ada-002`, don't need it because they're already 1536 natively — and
-some of those actively error if you ask anyway, which is why native is
-tried first). If neither produces 1536 dimensions, the process refuses
-to start rather than silently corrupting vector search the moment
-something first tries to embed. After switching to a model that does
-pass this check, run `hupi-reembed` per scope to bring existing rows
-onto the new model (see `internal/reembed`'s doc comment).
+`hupi-selfcheck`), trying up to three things in order:
+
+1. The model's native output, unmodified — plenty of models (`ada-002`
+   among them) have no truncation knob at all and simply always produce
+   one fixed size; if that's already 1536, nothing else is needed.
+2. If native output is *shorter* than 1536 — true of most local/offline
+   embedding models (`nomic-embed-text` at 768, `bge-large-en`/
+   `mxbai-embed-large`/`gte-large`/`e5-large` around 1024) — zero-pad it
+   up to 1536. This is exact, not an approximation: cosine similarity
+   (what pgvector's `<=>` operator computes) is invariant to appending an
+   equal-length run of zeros to both operands, since the padding
+   contributes nothing to either vector's dot product or norm. It works
+   regardless of how the model was trained, unlike truncating a too-long
+   vector below.
+3. If native output is *longer* than 1536, explicitly request 1536
+   dimensions (OpenAI's `text-embedding-3-*` family supports this).
+   Unlike padding, this is only attempted when the provider's API
+   explicitly honors it — blindly slicing a longer vector without the
+   model's cooperation would silently discard meaningful content unless
+   it was specifically trained to keep its meaning front-loaded
+   (Matryoshka representation learning), which this can't verify from
+   the outside.
+
+Native is tried before the explicit request, not after, because asking
+for a specific dimension count is itself a hard error on some
+models — verified directly against OpenAI's API: `ada-002` returns "This
+model does not support specifying dimensions" the moment `dimensions` is
+set at all, even to its own native size. If none of the three produces
+1536 dimensions — a model longer than 1536 with no truncation option —
+the process refuses to start rather than silently corrupting vector
+search the moment something first tries to embed. After switching to a
+model that does pass this check, run `hupi-reembed` per scope to bring
+existing rows onto the new model (see `internal/reembed`'s doc comment).
 
 ## Storage security: two layers, neither owned by app-managed FUSE
 

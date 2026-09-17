@@ -449,10 +449,11 @@ snapshot outside the database.
    `internal/reembed`'s doc comment) — the same tool that handles a
    changed `active_embedding_provider` also covers a never-embedded row,
    since both cases are "this row's embedding isn't current." Whatever
-   embedding model you point HUPI at needs to produce exactly 1536
-   dimensions (natively, or by supporting an explicit request for that
-   size) — HUPI checks this at startup and refuses to run rather than
-   fail partway through a backfill; see ARCHITECTURE.md § Provider
+   embedding model you point HUPI at needs to end up producing exactly
+   1536 dimensions — natively, by supporting an explicit request for that
+   size, or (most local/offline models) by being shorter and getting
+   zero-padded up automatically — HUPI checks this at startup and refuses
+   to run rather than fail partway through a backfill; see ARCHITECTURE.md § Provider
    abstraction and docs/INSTALL.md's Troubleshooting section.
 
 Treat both the `age` identity for exports and the live store's field

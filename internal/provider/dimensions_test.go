@@ -36,9 +36,21 @@ func (f fakeProvider) Embed(_ context.Context, req EmbedRequest) (EmbedResponse,
 		if f.rejectsDimensions {
 			return EmbedResponse{}, errors.New("This model does not support specifying dimensions.")
 		}
-		return EmbedResponse{Vectors: [][]float32{make([]float32, req.Dimensions)}}, nil
+		return EmbedResponse{Vectors: [][]float32{fill(req.Dimensions, 1)}}, nil
 	}
-	return EmbedResponse{Vectors: [][]float32{make([]float32, f.nativeLen)}}, nil
+	return EmbedResponse{Vectors: [][]float32{fill(f.nativeLen, 1)}}, nil
+}
+
+// fill builds a vector of n copies of v — using a non-zero value (instead
+// of Go's zero-valued default) so padding tests can tell "the model's
+// real output" apart from "zeros appended by dimensionPadded" by content,
+// not just by length.
+func fill(n int, v float32) []float32 {
+	out := make([]float32, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
 }
 
 // TestVerifyEmbeddingDimensions_NativeMatchSkipsWrapping is the ada-002
@@ -85,11 +97,47 @@ func TestVerifyEmbeddingDimensions_WrapsWhenTruncationNeeded(t *testing.T) {
 	}
 }
 
-// TestVerifyEmbeddingDimensions_FailsWhenNeitherPathMatches covers a model
-// that's simply unusable: wrong native length, and it rejects an explicit
-// dimensions request too. Nothing should paper over this.
-func TestVerifyEmbeddingDimensions_FailsWhenNeitherPathMatches(t *testing.T) {
+// TestVerifyEmbeddingDimensions_PadsWhenNativeIsSmaller is the common
+// local-model case: something like nomic-embed-text (768 dims) or
+// bge-large-en/mxbai-embed-large (1024 dims) has no truncation knob at
+// all, but is shorter than EmbeddingDimensions rather than longer —
+// verification must zero-pad it instead of trying (and failing) an
+// explicit dimensions request that no provider offers for *upsampling*.
+func TestVerifyEmbeddingDimensions_PadsWhenNativeIsSmaller(t *testing.T) {
 	p := fakeProvider{nativeLen: 768, rejectsDimensions: true}
+	got, err := VerifyEmbeddingDimensions(context.Background(), p)
+	if err != nil {
+		t.Fatalf("VerifyEmbeddingDimensions: %v", err)
+	}
+	if _, wrapped := got.(dimensionPadded); !wrapped {
+		t.Errorf("expected the provider to be wrapped in dimensionPadded, got %T", got)
+	}
+	resp, err := got.Embed(context.Background(), EmbedRequest{Input: []string{"x"}})
+	if err != nil {
+		t.Fatalf("Embed after verify: %v", err)
+	}
+	v := resp.Vectors[0]
+	if len(v) != EmbeddingDimensions {
+		t.Fatalf("got %d dims, want %d", len(v), EmbeddingDimensions)
+	}
+	for i := 0; i < 768; i++ {
+		if v[i] != 1 {
+			t.Fatalf("v[%d] = %v, want the model's real output (1) — padding must not touch the original values", i, v[i])
+		}
+	}
+	for i := 768; i < EmbeddingDimensions; i++ {
+		if v[i] != 0 {
+			t.Fatalf("v[%d] = %v, want 0 — everything past the model's native length must be zero-padded", i, v[i])
+		}
+	}
+}
+
+// TestVerifyEmbeddingDimensions_FailsWhenNeitherPathMatches covers a model
+// that's simply unusable: native output *longer* than required (so
+// padding doesn't apply), and it rejects an explicit dimensions request
+// too. Nothing should paper over this by guessing at a blind truncation.
+func TestVerifyEmbeddingDimensions_FailsWhenNeitherPathMatches(t *testing.T) {
+	p := fakeProvider{nativeLen: 3072, rejectsDimensions: true}
 	if _, err := VerifyEmbeddingDimensions(context.Background(), p); err == nil {
 		t.Fatal("expected an error, got none")
 	}
