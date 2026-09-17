@@ -58,6 +58,16 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    # Lets the gateway reach a host-running service (e.g. Ollama for
+    # active_embedding_provider, see providers.yaml.example's
+    # local-ollama profile) via http://host.docker.internal:<port> —
+    # "localhost" from inside this container means the container
+    # itself, not the host. Docker Desktop (Mac/Windows) already
+    # resolves host.docker.internal without this; host-gateway is what
+    # makes it also resolve on native Linux Docker Engine. Harmless to
+    # leave in if you never use it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Passes through whatever provider API key env vars your
     # providers.yaml's api_key_env fields name (e.g. OPENAI_API_KEY),
     # in addition to the HUPI_* vars below — put both in the same .env.

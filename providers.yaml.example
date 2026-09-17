@@ -34,6 +34,17 @@ providers:
   local-ollama:
     kind: openai_compat
     vendor: ollama
+    # http://localhost:11434/v1 is correct for a bare-metal install
+    # (Tier 1/2, docs/INSTALL.md) where HUPI and Ollama run as plain
+    # processes on the same machine. If HUPI itself is the one running
+    # inside a container instead (docker-compose.yml's gateway service,
+    # or a Kubernetes pod) and Ollama runs on the host, "localhost"
+    # resolves to that container, not the host — use
+    # http://host.docker.internal:11434/v1 instead. docker-compose.yml's
+    # gateway service already maps that hostname for you; a Kubernetes
+    # deployment would need its own equivalent (a hostAliases entry, or
+    # simpler: run Ollama as its own in-cluster service instead of on
+    # the node's host network).
     api_base: http://localhost:11434/v1
     api_key_env: ""             # unauthenticated local endpoint
     model: nomic-embed-text     # outputs 768 dimensions, not the 1536 every embedding

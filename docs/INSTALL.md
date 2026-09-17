@@ -443,6 +443,16 @@ whatever provider API key variables your `providers.yaml`'s
 `api_key_env` fields name (e.g. `OPENAI_API_KEY`) to the same `.env`
 file — `env_file:` on the `gateway` service passes all of it through.
 
+If any of your `providers.yaml` profiles points at something running on
+the host itself rather than a real internet endpoint — most commonly
+`local-ollama` for embeddings — use `http://host.docker.internal:<port>`
+in that profile's `api_base`, not `http://localhost:<port>`: the
+`gateway` container's own "localhost" is itself, not your host machine.
+`docker-compose.yml`'s `gateway` service already maps
+`host.docker.internal` for you (via `extra_hosts`), so this is a config
+change in `providers.yaml`, not anything you need to add to the compose
+file.
+
 Already have your own Postgres and don't want the bundled one? Remove
 the `postgres` service and `depends_on: postgres` from `migrate`, and
 point `HUPI_ADMIN_DATABASE_URL`/`HUPI_APP_DATABASE_URL` at your existing
