@@ -22,6 +22,29 @@ See [docs/BUSINESS_PROCESS.md](docs/BUSINESS_PROCESS.md) for the full
 non-technical explanation, or [ARCHITECTURE.md](ARCHITECTURE.md) for the
 design.
 
+## Licensing: what's free, what isn't
+
+Tier 1 (Personal) and Tier 2 (Professional Single) — everything in this
+repo — are free and MIT-licensed, permanently. That's the single-user
+gateway, retrieval, consolidation, encryption, the admin UI and CLI
+tooling, all of it.
+
+Tier 3 (Professional Shared — teams, shared workspaces, and real
+multi-user authentication) is a separate, commercially-licensed
+extension, developed in a private repo
+([hupi-t3](https://github.com/samuel-sujith/hupi-t3)) and not included
+here. This repo compiles and runs completely standalone without it —
+Tier 1/2 has no dependency on hupi-t3 at all, not even at build time.
+The two connect only through a handful of nil-by-default extension
+points (e.g. `gateway.MountTeamRoutes`, `auth.NewTeamAuthenticator` —
+see [ARCHITECTURE.md § Licensing and the open-core split](ARCHITECTURE.md)
+for the full mechanism); with hupi-t3 absent, those stay nil and every Tier-3
+code path — the `/v1/team/...` routes, `HUPI_REQUIRE_AUTH`, team CLI
+subcommands — is simply not present in the binary, not just disabled.
+
+If you need Tier 3, contact the repository owner for a commercial
+license.
+
 ## Repository layout
 
 ```
@@ -105,5 +128,6 @@ Kubernetes/Helm.
 This is an in-development project — see
 [docs/GAP_CLOSURE_PLAN.md](docs/GAP_CLOSURE_PLAN.md) for what's been closed
 recently and [docs/DESIGN_VS_BUILT.md](docs/DESIGN_VS_BUILT.md) for an
-honest accounting of design vs. what's actually implemented. Licensed under
-the [MIT License](LICENSE).
+honest accounting of design vs. what's actually implemented. This repo is
+licensed under the [MIT License](LICENSE) — see "Licensing: what's free,
+what isn't" above for what that does and doesn't cover.

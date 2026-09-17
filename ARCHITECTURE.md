@@ -547,9 +547,12 @@ behind it instead of a single-user local file tree.
 
 ## Tiers
 
-Three tiers, same Go binary and Postgres/`pgvector` backend throughout —
-the differences are ops wrapping and, for Tier 3 only, a real schema/access
-extension, not three separate products:
+Three tiers, one Postgres/`pgvector` backend throughout — the differences
+are ops wrapping and, for Tier 3 only, a real schema/access extension, not
+three separate products. Tiers 1/2 are also one Go binary, built entirely
+from this repo; Tier 3 is a separate binary build requiring a separate,
+commercially-licensed repo — see "Licensing and the open-core split"
+below for why and how.
 
 | Tier | Who | What's different from the base system |
 |---|---|---|
@@ -576,6 +579,46 @@ and every episode captured in a session inherits that session's scope
 automatically. Moving something from private to shared is a deliberate
 action (switch workspace, or an explicit promote/share step on a specific
 memory) — never an inferred one.
+
+### Licensing and the open-core split
+
+This repo (MIT) is Tier 1/2, complete and free forever. Tier 3 — real
+end-user/team authentication, the `/v1/team/...` routes, team CLI
+subcommands, and the team-voice consolidation prompt — lives in a
+separate, commercially-licensed repo,
+[hupi-t3](https://github.com/samuel-sujith/hupi-t3), not included here.
+
+Two things made this possible without forking the codebase:
+
+1. **Most of what Tier 3 "added" turned out to be shared infrastructure,
+   not Tier-3-only code.** `identity.Scope`, `dbscope`'s RLS session
+   plumbing, per-scope encryption keys, and the scope-filtering inside
+   `internal/store` are used identically by every tier — Tier 1 is just
+   the one-scope case of the same machinery, not a special case bypassing
+   it. Those stay in this repo because Tier 1/2 depend on them too;
+   pulling them out would mean forking the schema and `internal/store`
+   itself, which contradicts Tier 2 being "the unchanged Tier 1 data
+   model."
+2. **A small set of nil-by-default hook variables** mark the actual
+   Tier-3-only extension points: `gateway.MountTeamRoutes`,
+   `auth.NewTeamAuthenticator`, and a couple of same-package CLI/route
+   hooks in `cmd/hupi-admin`/`cmd/hupi-admin-ui`. A plain build of this
+   repo alone leaves every one of them nil — team routes never mount,
+   `HUPI_REQUIRE_AUTH=true` fails with a clear error instead of silently
+   granting Tier 1/2's no-auth behavior, and the team CLI subcommands
+   report that they need the Enterprise build. hupi-t3's files set these
+   via `init()` when present.
+
+hupi-t3's own `build.sh` is what actually produces a Tier-3-capable
+binary: it clones this repo, copies hupi-t3's files onto the exact same
+relative paths (`internal/auth/team.go`, `internal/gateway/team.go`,
+etc.), and builds from that combined tree. That physical-overlay step
+isn't incidental — Go only allows a package's `internal/` directory to
+be imported by code rooted at its parent, and that check is based on the
+file tree on disk at build time, not module or repo boundaries. Copying
+hupi-t3's files into this repo's checkout makes them genuine members of
+their original packages for that purpose, while the two repos stay
+separately licensed and access-controlled otherwise.
 
 ## Suggested build order
 
