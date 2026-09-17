@@ -1,7 +1,7 @@
 package identity
 
 // Identity is the authenticated caller of a request, resolved from an API
-// key by internal/auth.Store.Resolve (Phase 3, docs/TIER3_PLAN.md). A
+// key by internal/auth.TeamStore.Resolve (Phase 3, docs/TIER3_PLAN.md). A
 // user's own private scope is always implicitly accessible; TeamIDs are
 // the shared scopes they're also allowed to reach once workspace routing
 // (Phase 4) resolves a request to a specific one.

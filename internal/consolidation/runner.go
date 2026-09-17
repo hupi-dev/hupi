@@ -38,6 +38,16 @@ type Runner struct {
 	grounding provider.Provider
 
 	embedder provider.Provider
+
+	// TeamPromptOverride, if set, supplies a different consolidation
+	// system prompt for a given scope (ok=false falls back to
+	// summarySystemPrompt) — how a Tier-3 extension plugs in the
+	// team-neutral-voice prompt (docs/TIER3_PLAN.md §5) without this
+	// package needing to know team-voice content exists. Nil in the OSS
+	// build: every summary uses summarySystemPrompt regardless of scope,
+	// which is also simply correct for a deployment with only private
+	// scopes — this hook is never consulted there.
+	TeamPromptOverride func(scope identity.Scope) (prompt string, ok bool)
 }
 
 func New(db *sql.DB, keys *crypto.KeyStore, consolidation, grounding, embedder provider.Provider) *Runner {
@@ -702,14 +712,17 @@ func (r *Runner) loadSummaries(ctx context.Context, q dbscope.Querier, scope ide
 }
 
 // generateSummary picks a scope-appropriate system prompt (team-neutral
-// voice for shared scope, per docs/TIER3_PLAN.md §5) before calling the
-// consolidation LLM. establishedRecord is non-empty only when RunDaily is
-// re-consolidating a day that already has a current draft — see
-// buildSummaryPrompt's doc comment for why that needs special handling.
+// voice for shared scope, per docs/TIER3_PLAN.md §5, via
+// Runner.TeamPromptOverride) before calling the consolidation LLM.
+// establishedRecord is non-empty only when RunDaily is re-consolidating a
+// day that already has a current draft — see buildSummaryPrompt's doc
+// comment for why that needs special handling.
 func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, level, period string, sources []textSource, establishedRecord string) (ConsolidationOutput, error) {
 	systemPrompt := summarySystemPrompt
-	if scope.Kind == identity.ScopeKindShared {
-		systemPrompt = teamSummarySystemPrompt
+	if r.TeamPromptOverride != nil {
+		if p, ok := r.TeamPromptOverride(scope); ok {
+			systemPrompt = p
+		}
 	}
 
 	resp, err := r.consolidation.ChatCompletion(ctx, provider.ChatRequest{

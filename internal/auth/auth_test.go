@@ -15,7 +15,7 @@ import (
 // See internal/store/scope_isolation_test.go's doc comment for how to run
 // these against a real Postgres instance; same HUPI_TEST_DATABASE_URL.
 
-func testAuthStore(t *testing.T) *Store {
+func testAuthStores(t *testing.T) (*Store, *TeamStore) {
 	t.Helper()
 	dsn := os.Getenv("HUPI_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -27,11 +27,11 @@ func testAuthStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { db.Close() })
 	keys := crypto.NewKeyStore(db, make([]byte, 32)) // all-zero test KEK, never used for real data
-	return New(db, keys)
+	return New(db, keys), NewTeamStore(db)
 }
 
 func TestResolve_ValidKeyIncludesTeamMemberships(t *testing.T) {
-	s := testAuthStore(t)
+	s, ts := testAuthStores(t)
 	ctx := context.Background()
 
 	userID := "user:test-auth-a"
@@ -44,15 +44,15 @@ func TestResolve_ValidKeyIncludesTeamMemberships(t *testing.T) {
 	if err := s.CreateTeam(ctx, teamID, "Test Team A"); err != nil {
 		t.Fatalf("create team: %v", err)
 	}
-	if err := s.AddTeamMember(ctx, teamID, userID, "member"); err != nil {
+	if err := ts.AddTeamMember(ctx, teamID, userID, "member"); err != nil {
 		t.Fatalf("add team member: %v", err)
 	}
-	rawKey, err := s.CreateAPIKey(ctx, userID)
+	rawKey, err := ts.CreateAPIKey(ctx, userID)
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
 
-	id, err := s.Resolve(ctx, rawKey)
+	id, err := ts.Resolve(ctx, rawKey)
 	if err != nil {
 		t.Fatalf("resolve valid key: %v", err)
 	}
@@ -65,17 +65,17 @@ func TestResolve_ValidKeyIncludesTeamMemberships(t *testing.T) {
 }
 
 func TestResolve_UnknownKeyFails(t *testing.T) {
-	s := testAuthStore(t)
+	_, ts := testAuthStores(t)
 	ctx := context.Background()
 
-	_, err := s.Resolve(ctx, "hupi_sk_this_key_was_never_created")
+	_, err := ts.Resolve(ctx, "hupi_sk_this_key_was_never_created")
 	if !errors.Is(err, ErrInvalidKey) {
 		t.Errorf("got error %v, want ErrInvalidKey", err)
 	}
 }
 
 func TestResolve_RevokedKeyFails(t *testing.T) {
-	s := testAuthStore(t)
+	s, ts := testAuthStores(t)
 	ctx := context.Background()
 
 	userID := "user:test-auth-b"
@@ -84,7 +84,7 @@ func TestResolve_RevokedKeyFails(t *testing.T) {
 	if err := s.CreateUser(ctx, userID, ""); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	rawKey, err := s.CreateAPIKey(ctx, userID)
+	rawKey, err := ts.CreateAPIKey(ctx, userID)
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestResolve_RevokedKeyFails(t *testing.T) {
 		t.Fatalf("revoke key: %v", err)
 	}
 
-	_, err = s.Resolve(ctx, rawKey)
+	_, err = ts.Resolve(ctx, rawKey)
 	if !errors.Is(err, ErrInvalidKey) {
 		t.Errorf("got error %v, want ErrInvalidKey for a revoked key", err)
 	}

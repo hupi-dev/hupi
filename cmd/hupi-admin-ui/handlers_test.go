@@ -40,7 +40,7 @@ func testServer(t *testing.T) (*server, *sql.DB) {
 	}
 	t.Cleanup(func() { db.Close() })
 	keys := crypto.NewKeyStore(db, make([]byte, 32)) // all-zero test KEK, never used for real data
-	return &server{store: auth.New(db, keys), db: db}, db
+	return &server{store: auth.New(db, keys), teamStore: auth.NewTeamStore(db), db: db}, db
 }
 
 func cleanupIDs(t *testing.T, db *sql.DB, userID, teamID string) {
@@ -187,7 +187,7 @@ func TestUserLifecycle_CreateIssueKeyRevoke(t *testing.T) {
 	if !rawKeyPattern.MatchString(keyResp.RawKey) {
 		t.Fatalf("raw_key %q doesn't look like an API key", keyResp.RawKey)
 	}
-	if id, err := srv.store.Resolve(context.Background(), keyResp.RawKey); err != nil {
+	if id, err := srv.teamStore.Resolve(context.Background(), keyResp.RawKey); err != nil {
 		t.Errorf("issued key does not resolve: %v", err)
 	} else if id.UserID != userID {
 		t.Errorf("issued key resolved to %q, want %q", id.UserID, userID)
@@ -217,9 +217,9 @@ func TestUserLifecycle_CreateIssueKeyRevoke(t *testing.T) {
 	}
 
 	// The revoked key must no longer authenticate — this is really a
-	// regression test on internal/auth.Store.RevokeAPIKey, exercised end
-	// to end through the API's revoke route.
-	if _, err := srv.store.Resolve(context.Background(), keyResp.RawKey); err == nil {
+	// regression test on internal/auth.TeamStore.RevokeAPIKey, exercised
+	// end to end through the API's revoke route.
+	if _, err := srv.teamStore.Resolve(context.Background(), keyResp.RawKey); err == nil {
 		t.Error("revoked key still resolves successfully")
 	}
 }

@@ -1,7 +1,8 @@
 // Command hupi-admin-ui is a browser-based operator surface over exactly
-// the same internal/auth.Store operations cmd/hupi-admin already exposes
-// as a CLI, plus the read/revoke operations a UI needs that the
-// create-only CLI never did (list users/teams/keys, revoke a key).
+// the same internal/auth.Store/TeamStore operations cmd/hupi-admin
+// already exposes as a CLI, plus the read/revoke operations a UI needs
+// that the create-only CLI never did (list users/teams/keys, revoke a
+// key).
 //
 // This exists despite docs/TIER3_PLAN.md's original non-goal ("no
 // team-management UI... a thin CLI, not a product surface") — see
@@ -42,7 +43,8 @@ func run() error {
 	defer deps.DB.Close()
 
 	authStore := auth.New(deps.DB, deps.Keys)
-	srv := &server{store: authStore, db: deps.DB}
+	teamStore := auth.NewTeamStore(deps.DB)
+	srv := &server{store: authStore, teamStore: teamStore, db: deps.DB}
 
 	// /api/* is the JSON API (handlers.go), behind both the CSRF mitigation
 	// and named-operator auth, exactly as before this rewrite. Everything

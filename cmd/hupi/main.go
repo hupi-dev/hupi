@@ -132,5 +132,5 @@ func resolveAuth(deps *bootstrap.Deps) gateway.Authenticator {
 	if os.Getenv("HUPI_REQUIRE_AUTH") != "true" {
 		return nil
 	}
-	return auth.New(deps.DB, deps.Keys)
+	return auth.NewTeamStore(deps.DB)
 }

@@ -29,6 +29,13 @@ Only include a key_fact if it is directly and specifically supported by the sour
 // in a neutral team voice rather than any one member's, since a shared
 // summary will be read by everyone on the team, not the one person who
 // happened to have the conversation.
+//
+// Not referenced directly by generateSummary — wire it in via
+// Runner.TeamPromptOverride instead. Kept here, currently unused by the
+// default OSS wiring, as the one piece of team-voice content still
+// living in this package pending an open-core split (see the Tier 3
+// licensing plan); nothing about a private-scope-only deployment reads
+// this constant.
 const teamSummarySystemPrompt = `You are HUPI's consolidation engine, writing a SHARED team summary (see MEMORY_FORMAT.md § Grounding & correction). Multiple team members' conversations may be in the source texts below. Write in a neutral, third-person team-knowledge voice — "the team decided X", not "I decided X" or addressing any one member directly. You must respond with exactly one JSON object, nothing else, no markdown fences, of this shape:
 
 {

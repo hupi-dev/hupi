@@ -1,9 +1,11 @@
-// Command hupi-admin provisions the identity Tier 3 needs — users, teams,
-// memberships, API keys, and (docs/GAP_CLOSURE_PLAN.md §4.3) admin-UI
-// operator credentials — see docs/TIER3_PLAN.md's non-goals ("no
-// team-management UI... direct DB writes or a thin CLI"). This is that
-// thin CLI: every subcommand is a direct call into internal/auth.Store,
-// nothing more, plus an audit_log entry per docs/GAP_CLOSURE_PLAN.md §4.3.
+// Command hupi-admin provisions identity — users, teams, memberships,
+// API keys, and (docs/GAP_CLOSURE_PLAN.md §4.3) admin-UI operator
+// credentials — see docs/TIER3_PLAN.md's non-goals ("no team-management
+// UI... direct DB writes or a thin CLI"). This is that thin CLI: every
+// subcommand is a direct call into internal/auth.Store or
+// internal/auth.TeamStore, nothing more, plus an audit_log entry per
+// docs/GAP_CLOSURE_PLAN.md §4.3. add-member/create-key's bodies live in
+// team.go, not here — see that file's doc comment.
 //
 // Usage:
 //
@@ -51,6 +53,7 @@ func run() error {
 	defer deps.DB.Close()
 
 	store := auth.New(deps.DB, deps.Keys)
+	teamStore := auth.NewTeamStore(deps.DB)
 
 	switch subcommand {
 	case "create-user":
@@ -90,44 +93,10 @@ func run() error {
 		fmt.Printf("created team %s (%s)\n", *id, *name)
 
 	case "add-member":
-		fs := flag.NewFlagSet("add-member", flag.ContinueOnError)
-		team := fs.String("team", "", "team id (required)")
-		user := fs.String("user", "", "user id (required)")
-		role := fs.String("role", "member", "member | admin")
-		actor := fs.String("actor", defaultActor(), "who's running this (audit log)")
-		if err := fs.Parse(args); err != nil {
-			return err
-		}
-		if *team == "" || *user == "" {
-			return fmt.Errorf("add-member: -team and -user are required")
-		}
-		if err := store.AddTeamMember(ctx, *team, *user, *role); err != nil {
-			return err
-		}
-		scope := identity.Scope{Kind: identity.ScopeKindShared, Owner: *team}
-		logAdminAction(ctx, deps, *actor, scope, "add-member", map[string]any{"team_id": *team, "user_id": *user, "role": *role})
-		fmt.Printf("added %s to %s as %s\n", *user, *team, *role)
+		return runAddMember(ctx, deps, teamStore, args)
 
 	case "create-key":
-		fs := flag.NewFlagSet("create-key", flag.ContinueOnError)
-		user := fs.String("user", "", "user id to issue a key for (required)")
-		actor := fs.String("actor", defaultActor(), "who's running this (audit log)")
-		if err := fs.Parse(args); err != nil {
-			return err
-		}
-		if *user == "" {
-			return fmt.Errorf("create-key: -user is required")
-		}
-		rawKey, err := store.CreateAPIKey(ctx, *user)
-		if err != nil {
-			return err
-		}
-		scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: *user}
-		logAdminAction(ctx, deps, *actor, scope, "create-key", map[string]any{"user_id": *user})
-		// The only time this key is ever available in plaintext — it is
-		// never stored or logged anywhere else (internal/auth only ever
-		// persists its sha256 hash).
-		fmt.Printf("API key for %s (save this now, it cannot be shown again):\n%s\n", *user, rawKey)
+		return runCreateKey(ctx, deps, teamStore, args)
 
 	case "create-operator":
 		fs := flag.NewFlagSet("create-operator", flag.ContinueOnError)

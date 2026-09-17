@@ -1,5 +1,14 @@
-// Package auth resolves API keys to identity.Identity and provisions the
-// users/teams/api_keys rows Tier 3 needs — see docs/TIER3_PLAN.md Phase 3.
+// Package auth provisions identity against Postgres, and backs
+// cmd/hupi-admin-ui's own operator login. Split across two files along a
+// licensing seam (see the open-core split plan): this file (Store) holds
+// what every tier uses — scope provisioning (CreateUser/CreateTeam,
+// needed by hupi-export/hupi-import's backup/restore for any tier) and
+// operator credentials (the admin UI's own login, which Tier 1/2 can use
+// too via install.sh --admin-ui). team.go (TeamStore) holds real
+// end-user/team authentication — API keys, Resolve, team membership —
+// which only ever matters once HUPI_REQUIRE_AUTH is turned on, a Tier-3
+// concept per docs/INSTALL.md's own tier definitions.
+//
 // It's a separate package from internal/store on purpose: store is about
 // memory records (episodes/summaries/entities), auth is about who's
 // allowed to touch them, and the two shouldn't blur together as Tier 3
@@ -21,13 +30,11 @@ import (
 	"hupi/internal/identity"
 )
 
-// ErrInvalidKey is returned by Resolve for a key that doesn't hash to any
-// non-revoked row — deliberately the same error for "key never existed"
-// and "key was revoked," so a caller can't distinguish the two and use
-// that to probe for valid-but-revoked keys.
-var ErrInvalidKey = errors.New("auth: invalid or revoked API key")
-
-// Store resolves and provisions identity against Postgres.
+// Store provisions scopes (users/teams — used by every tier's
+// export/import backup-restore path, docs/HPMF) and resolves/provisions
+// admin-UI operator credentials (used by any tier that opts into the
+// admin UI). See TeamStore (team.go) for real end-user/team
+// authentication, which this type deliberately does not hold.
 type Store struct {
 	db   *sql.DB
 	keys *crypto.KeyStore // provisions each new scope's DEK eagerly, see D6 below
@@ -67,47 +74,10 @@ func generateToken(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(buf), nil
 }
 
-// Resolve maps a raw API key to the Identity it authenticates, including
-// every team the underlying user is a member of.
-func (s *Store) Resolve(ctx context.Context, rawKey string) (identity.Identity, error) {
-	var userID string
-	err := s.db.QueryRowContext(ctx, `
-		select user_id from api_keys where key_hash = $1 and revoked_at is null
-	`, hashKey(rawKey)).Scan(&userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return identity.Identity{}, ErrInvalidKey
-	}
-	if err != nil {
-		return identity.Identity{}, fmt.Errorf("auth: resolve API key: %w", err)
-	}
-
-	rows, err := s.db.QueryContext(ctx, `select team_id from team_members where user_id = $1`, userID)
-	if err != nil {
-		return identity.Identity{}, fmt.Errorf("auth: load team memberships for %s: %w", userID, err)
-	}
-	defer rows.Close()
-
-	var teamIDs []string
-	for rows.Next() {
-		var teamID string
-		if err := rows.Scan(&teamID); err != nil {
-			return identity.Identity{}, err
-		}
-		teamIDs = append(teamIDs, teamID)
-	}
-	if err := rows.Err(); err != nil {
-		return identity.Identity{}, err
-	}
-
-	return identity.Identity{UserID: userID, TeamIDs: teamIDs}, nil
-}
-
-// CreateUser, CreateAPIKey, CreateTeam, and AddTeamMember are the minimal
-// provisioning operations Tier 3 needs. cmd/hupi-admin (Phase 6) is a
-// thin CLI wrapper over exactly these methods; cmd/hupi-admin-ui wraps
-// the same methods plus the List*/Revoke* ones below for a browser-based
-// operator surface — see docs/ADMIN_UI.md for why that reverses
-// TIER3_PLAN.md's original "CLI only" non-goal.
+// CreateUser and CreateTeam are the scope-provisioning operations every
+// tier's backup/restore path needs (cmd/hupi-export's loadActiveScopes,
+// cmd/hupi-import's ensureScopeExists) — see TeamStore (team.go) for the
+// CreateAPIKey/AddTeamMember provisioning that's genuinely Tier-3-only.
 
 // CreateUser also eagerly provisions the new user's private-scope DEK
 // (docs/HARDENING_PLAN.md D6) — key lifecycle stays colocated with
@@ -135,23 +105,6 @@ func nullableEmail(email string) any {
 	return email
 }
 
-// CreateAPIKey generates a new key for userID and returns the raw value —
-// the only time it's ever available in plaintext. Only the hash is
-// persisted.
-func (s *Store) CreateAPIKey(ctx context.Context, userID string) (string, error) {
-	rawKey, err := GenerateKey()
-	if err != nil {
-		return "", err
-	}
-	_, err = s.db.ExecContext(ctx, `
-		insert into api_keys (key_hash, user_id) values ($1, $2)
-	`, hashKey(rawKey), userID)
-	if err != nil {
-		return "", fmt.Errorf("auth: create API key for %s: %w", userID, err)
-	}
-	return rawKey, nil
-}
-
 // CreateTeam also eagerly provisions the new team's shared-scope DEK —
 // see CreateUser's doc comment (D6).
 func (s *Store) CreateTeam(ctx context.Context, teamID, name string) error {
@@ -169,24 +122,10 @@ func (s *Store) CreateTeam(ctx context.Context, teamID, name string) error {
 	return nil
 }
 
-func (s *Store) AddTeamMember(ctx context.Context, teamID, userID, role string) error {
-	if role == "" {
-		role = "member"
-	}
-	_, err := s.db.ExecContext(ctx, `
-		insert into team_members (team_id, user_id, role) values ($1, $2, $3)
-		on conflict (team_id, user_id) do update set role = excluded.role
-	`, teamID, userID, role)
-	if err != nil {
-		return fmt.Errorf("auth: add %s to team %s: %w", userID, teamID, err)
-	}
-	return nil
-}
-
-// The types and methods below exist only for cmd/hupi-admin-ui — the CLI
+// User and Team back cmd/hupi-admin-ui's read views — the CLI
 // (cmd/hupi-admin) never needed to read anything back, only create. A web
 // UI does: you can't render a page of "who already exists" without a
-// list query, and you can't offer a revoke button without one.
+// list query.
 
 type User struct {
 	ID        string
@@ -198,20 +137,6 @@ type Team struct {
 	ID        string
 	Name      string
 	CreatedAt time.Time
-}
-
-type Membership struct {
-	UserID string
-	Role   string
-}
-
-type APIKey struct {
-	// KeyHash identifies the row for revocation purposes. It is a sha256
-	// hash, never the raw key — the raw key was never persisted anywhere
-	// (see GenerateKey/CreateAPIKey) and can't be recovered from this.
-	KeyHash   string
-	CreatedAt time.Time
-	RevokedAt *time.Time // nil if still active
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
@@ -248,86 +173,6 @@ func (s *Store) ListTeams(ctx context.Context) ([]Team, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
-}
-
-func (s *Store) ListTeamMembers(ctx context.Context, teamID string) ([]Membership, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		select user_id, role from team_members where team_id = $1 order by user_id
-	`, teamID)
-	if err != nil {
-		return nil, fmt.Errorf("auth: list members of %s: %w", teamID, err)
-	}
-	defer rows.Close()
-
-	var out []Membership
-	for rows.Next() {
-		var m Membership
-		if err := rows.Scan(&m.UserID, &m.Role); err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
-
-// ListTeamsForUser is the inverse of ListTeamMembers — used by the admin
-// UI's user detail page so an operator can see a user's memberships
-// without cross-referencing every team separately.
-func (s *Store) ListTeamsForUser(ctx context.Context, userID string) ([]Team, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		select t.id, t.name, t.created_at
-		from teams t
-		join team_members m on m.team_id = t.id
-		where m.user_id = $1
-		order by t.created_at
-	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("auth: list teams for %s: %w", userID, err)
-	}
-	defer rows.Close()
-
-	var out []Team
-	for rows.Next() {
-		var t Team
-		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) ListAPIKeys(ctx context.Context, userID string) ([]APIKey, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		select key_hash, created_at, revoked_at from api_keys where user_id = $1 order by created_at
-	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("auth: list API keys for %s: %w", userID, err)
-	}
-	defer rows.Close()
-
-	var out []APIKey
-	for rows.Next() {
-		var k APIKey
-		if err := rows.Scan(&k.KeyHash, &k.CreatedAt, &k.RevokedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, k)
-	}
-	return out, rows.Err()
-}
-
-// RevokeAPIKey is idempotent: revoking an already-revoked or nonexistent
-// hash is not an error, matching ErrInvalidKey's "don't let a caller
-// distinguish never-existed from already-gone" posture above.
-func (s *Store) RevokeAPIKey(ctx context.Context, keyHash string) error {
-	_, err := s.db.ExecContext(ctx, `
-		update api_keys set revoked_at = now() where key_hash = $1 and revoked_at is null
-	`, keyHash)
-	if err != nil {
-		return fmt.Errorf("auth: revoke API key: %w", err)
-	}
-	return nil
 }
 
 // The types and methods below are Tier 3's admin-UI operator model
