@@ -55,7 +55,24 @@ type StreamChunk struct {
 type EmbedRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
+
+	// Dimensions, if non-zero, asks the provider to truncate its output
+	// to this many dimensions (OpenAI's text-embedding-3-* family
+	// supports this; not every model does — see EmbeddingDimensions and
+	// VerifyEmbeddingDimensions). Callers normally leave this at 0 and
+	// let VerifyEmbeddingDimensions's wrapper set it, rather than setting
+	// it themselves per call.
+	Dimensions int `json:"dimensions,omitempty"`
 }
+
+// EmbeddingDimensions is the fixed vector length every embedding column
+// in the schema expects (summaries/episodes/entities.embedding, all
+// `vector(1536)` — schema/0001_init.sql, schema/0012_entity_embeddings.sql).
+// pgvector enforces this exactly: inserting a vector of any other length
+// is a hard error, not a soft mismatch, so every Provider actually used
+// for embedding must produce vectors of exactly this length — see
+// VerifyEmbeddingDimensions.
+const EmbeddingDimensions = 1536
 
 type EmbedResponse struct {
 	Vectors [][]float32

@@ -122,6 +122,13 @@ func (r *Registry) Grounding() Provider { return r.byName[r.grounding] }
 // during consolidation.
 func (r *Registry) Embedding() Provider { return r.byName[r.embedding] }
 
+// SetEmbedding overrides what Embedding() returns from now on — used by
+// bootstrap.VerifyEmbedding to swap in VerifyEmbeddingDimensions' result
+// (unchanged, or wrapped to pin a fixed dimension count) once at startup,
+// so every later Embedding() call in the process sees the verified
+// Provider without callers needing to thread it through separately.
+func (r *Registry) SetEmbedding(p Provider) { r.byName[r.embedding] = p }
+
 // Named looks up a specific profile by name — used by the switch-provider
 // admin path and by tests, not by the request-serving hot path.
 func (r *Registry) Named(name string) (Provider, bool) {

@@ -43,6 +43,9 @@ func run() error {
 		return err
 	}
 	defer deps.DB.Close()
+	if err := bootstrap.VerifyEmbedding(ctx, deps); err != nil {
+		return err
+	}
 
 	st := store.New(deps.DB, deps.Keys, deps.Registry.Embedding())
 

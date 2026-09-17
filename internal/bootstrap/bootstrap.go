@@ -63,6 +63,34 @@ func Load(ctx context.Context) (*Deps, error) {
 	return &Deps{DB: db, Registry: registry, Keys: keys}, nil
 }
 
+// VerifyEmbedding checks that deps.Registry's active embedding profile
+// actually produces vectors the schema can store (every embedding column
+// is a fixed vector(1536) — see provider.EmbeddingDimensions), and swaps
+// in a dimension-pinned wrapper via Registry.SetEmbedding if the profile
+// needs (and supports) requesting that size explicitly. See
+// provider.VerifyEmbeddingDimensions for how.
+//
+// Call this once, right after Load, from any entrypoint that's actually
+// going to call Embed — cmd/hupi, hupi-consolidate, hupi-reembed,
+// hupi-correct, hupi-trace, hupi-selfcheck — so a misconfigured
+// active_embedding_provider fails immediately and loudly at startup
+// instead of the first time a real consolidation run or hupi-reembed
+// batch tries to write a wrong-length vector.
+//
+// Deliberately not folded into Load itself: several other entrypoints
+// that also call Load (hupi-rotate-key, hupi-audit, hupi-export,
+// hupi-import, hupi-admin) never call Embed at all, and shouldn't be
+// blocked from starting by an embedding provider outage or
+// misconfiguration that has nothing to do with what they're about to do.
+func VerifyEmbedding(ctx context.Context, deps *Deps) error {
+	verified, err := provider.VerifyEmbeddingDimensions(ctx, deps.Registry.Embedding())
+	if err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+	deps.Registry.SetEmbedding(verified)
+	return nil
+}
+
 // resolveDatabaseURL prefers HUPI_APP_DATABASE_URL — expected to
 // authenticate as the non-owner `hupi_app` role
 // (schema/0004_hardening_phase1_app_role.sql) — falling back to

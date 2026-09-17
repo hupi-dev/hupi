@@ -208,8 +208,9 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 }
 
 type openAIEmbedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model      string   `json:"model"`
+	Input      []string `json:"input"`
+	Dimensions int      `json:"dimensions,omitempty"`
 }
 
 type openAIEmbedResponse struct {
@@ -221,7 +222,7 @@ type openAIEmbedResponse struct {
 
 func (p *OpenAICompat) Embed(ctx context.Context, req EmbedRequest) (EmbedResponse, error) {
 	var raw openAIEmbedResponse
-	body := openAIEmbedRequest{Model: p.resolveModel(req.Model), Input: req.Input}
+	body := openAIEmbedRequest{Model: p.resolveModel(req.Model), Input: req.Input, Dimensions: req.Dimensions}
 	if err := p.do(ctx, http.MethodPost, "/embeddings", body, &raw); err != nil {
 		return EmbedResponse{}, err
 	}

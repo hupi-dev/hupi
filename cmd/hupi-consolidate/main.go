@@ -62,6 +62,9 @@ func run() error {
 		return err
 	}
 	defer deps.DB.Close()
+	if err := bootstrap.VerifyEmbedding(ctx, deps); err != nil {
+		return err
+	}
 
 	runner := consolidation.New(
 		deps.DB, deps.Keys,
