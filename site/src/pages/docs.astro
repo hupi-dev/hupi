@@ -201,15 +201,45 @@ export HUPI_PROVIDERS_CONFIG=./providers.yaml`,
           This repo — Tiers 1 and 2, everything most people run — is MIT-licensed and free
           forever. Team/shared-workspace support (Tier 3) is developed in a separate,
           privately-held repo (<code class="font-mono-tight text-ember-400">hupi-t3</code>)
-          under a commercial license — not free, not open source, no trial tier. It has to be
+          under a commercial license — not free, not open source. It has to be
           built in on top of this repo (its own <code class="font-mono-tight text-ember-400">build.sh</code>
           documents exactly how, once you have a license); without it, this repo alone runs Tier 1/2
           completely, with zero dependency on the extension at all — <code class="font-mono-tight text-ember-400">HUPI_REQUIRE_AUTH=true</code>
           with no license in place fails loudly at startup rather than silently doing nothing.
         </p>
+
+        <div class="mt-8 overflow-x-auto rounded-xl border border-white/10">
+          <table class="w-full min-w-[500px] border-collapse text-left text-sm">
+            <thead>
+              <tr class="bg-navy-900">
+                <th class="p-4 font-semibold text-fog-100">Team size</th>
+                <th class="p-4 font-semibold text-fog-100">Price</th>
+                <th class="p-4 font-semibold text-fog-100">Billed seats</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="odd:bg-white/[0.02]">
+                <th scope="row" class="border-t border-white/5 p-4 align-top font-semibold text-fog-100">1-9 members</th>
+                <td class="border-t border-white/5 p-4 align-top text-fog-300">$50 / member / month</td>
+                <td class="border-t border-white/5 p-4 align-top text-fog-300">Flat minimum of 10 seats</td>
+              </tr>
+              <tr class="odd:bg-white/[0.02]">
+                <th scope="row" class="border-t border-white/5 p-4 align-top font-semibold text-fog-100">10-200 members</th>
+                <td class="border-t border-white/5 p-4 align-top text-fog-300">$40 / member / month</td>
+                <td class="border-t border-white/5 p-4 align-top text-fog-300">Rounded up to the next multiple of 10 (e.g. 10-19 members bills as 20 seats), capped at 200</td>
+              </tr>
+              <tr class="odd:bg-white/[0.02]">
+                <th scope="row" class="border-t border-white/5 p-4 align-top font-semibold text-fog-100">200+ members</th>
+                <td class="border-t border-white/5 p-4 align-top text-fog-300" colspan="2">
+                  Contact <a href={`mailto:${CONTACT_EMAIL}`} class="text-ember-500 underline decoration-dotted hover:text-ember-400">{CONTACT_EMAIL}</a>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
         <p class="mt-4 leading-relaxed text-fog-300">
           Contact <a href={`mailto:${CONTACT_EMAIL}`} class="text-ember-500 underline decoration-dotted hover:text-ember-400">{CONTACT_EMAIL}</a>{' '}
-          for a Tier 3 commercial license.
+          to set up a Tier 3 commercial license.
         </p>
       </div>
     </section>
