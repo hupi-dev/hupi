@@ -17,6 +17,7 @@ import (
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
@@ -73,12 +74,26 @@ const systemActor = "system:consolidation"
 // that scope is a no-op, not an error — most days for most
 // users/teams will have gaps. Under Tier 3, this is called once per
 // active scope (docs/TIER3_PLAN.md §5), not once globally.
-func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.Time) error {
+func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.Time) (err error) {
+	start := time.Now()
+	skippedNoEpisodes := false
+	defer func() {
+		metrics.ConsolidationDuration.Observe(time.Since(start).Seconds())
+		switch {
+		case err != nil:
+			metrics.ConsolidationRunsTotal.WithLabelValues("error").Inc()
+		case skippedNoEpisodes:
+			metrics.ConsolidationRunsTotal.WithLabelValues("skipped_no_episodes").Inc()
+		default:
+			metrics.ConsolidationRunsTotal.WithLabelValues("ok").Inc()
+		}
+	}()
+
 	period := date.Format("2006-01-02")
 
 	var sources []textSource
 	var existingCurrentID string
-	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		var err error
 		sources, err = r.loadDailyEpisodes(ctx, tx, scope, date)
 		if err != nil {
@@ -91,6 +106,7 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		return fmt.Errorf("consolidation: load episodes for %s: %w", period, err)
 	}
 	if len(sources) == 0 {
+		skippedNoEpisodes = true
 		return nil
 	}
 

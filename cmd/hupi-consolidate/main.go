@@ -31,9 +31,13 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/push"
+
 	"hupi/internal/bootstrap"
 	"hupi/internal/consolidation"
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 )
 
 func main() {
@@ -98,10 +102,32 @@ func run() error {
 	rollupFailed := runDueRollups(ctx, runner, date, scopes)
 	failed += rollupFailed
 
+	pushMetrics()
+
 	if failed > 0 {
 		return fmt.Errorf("consolidation failed for %d scope-runs on %s", failed, period)
 	}
 	return nil
+}
+
+// pushMetrics sends this run's consolidation/grounding/rollup metrics
+// (internal/metrics) to a Prometheus Pushgateway, if configured. Unlike
+// cmd/hupi (a long-lived server a scraper can poll), this is a short-lived
+// cron invocation — by the time anything could scrape it, the process has
+// already exited, so a pull-based /metrics endpoint here would be
+// pointless. Pushgateway is Prometheus's own documented answer to exactly
+// this "batch job" case. Entirely optional: HUPI_PUSHGATEWAY_URL unset
+// means no push attempted, and a push failure only logs a warning — an
+// observability side-channel failing shouldn't fail the actual
+// consolidation run.
+func pushMetrics() {
+	url := os.Getenv("HUPI_PUSHGATEWAY_URL")
+	if url == "" {
+		return
+	}
+	if err := push.New(url, "hupi_consolidate").Gatherer(prometheus.DefaultGatherer).Push(); err != nil {
+		slog.Warn("failed to push metrics to HUPI_PUSHGATEWAY_URL", "url", url, "error", err)
+	}
 }
 
 // runDueRollups runs every rollup dueRollups finds for date, once per
@@ -114,12 +140,14 @@ func runDueRollups(ctx context.Context, runner *consolidation.Runner, date time.
 	for _, job := range jobs {
 		for _, scope := range scopes {
 			if err := runner.RunRollup(ctx, scope, job.level, job.sourceLevel, job.period, job.sourcePeriods); err != nil {
+				metrics.RollupRunsTotal.WithLabelValues("error").Inc()
 				slog.Error("rollup failed for scope",
 					"scope_kind", scope.Kind, "scope_owner", scope.Owner,
 					"level", job.level, "period", job.period, "error", err)
 				failed++
 				continue
 			}
+			metrics.RollupRunsTotal.WithLabelValues("ok").Inc()
 		}
 		slog.Info("rollup complete", "level", job.level, "period", job.period, "scopes", len(scopes))
 	}

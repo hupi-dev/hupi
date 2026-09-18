@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/provider"
 )
 
@@ -208,6 +209,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 			result = RetrievalResult{Gate: GateSkipped}
 		}
 	}
+	metrics.RetrievalGateTotal.WithLabelValues(string(result.Gate)).Inc()
 
 	// Step 3: context injection.
 	augmented := messages
@@ -240,6 +242,7 @@ func (h *Handler) resolveIdentity(r *http.Request) (identity.Identity, error) {
 	}
 	token := bearerToken(r)
 	if token == "" {
+		metrics.AuthResolveTotal.WithLabelValues("missing").Inc()
 		return identity.Identity{}, errors.New("missing Authorization: Bearer <api key> header")
 	}
 	id, err := h.Auth.Resolve(r.Context(), token)
@@ -249,8 +252,10 @@ func (h *Handler) resolveIdentity(r *http.Request) (identity.Identity, error) {
 		// caller — that would let an attacker probe why a token was
 		// rejected. It's still worth an operator being able to see it.
 		h.log().Warn("auth: token rejected", "err", err)
+		metrics.AuthResolveTotal.WithLabelValues("invalid").Inc()
 		return identity.Identity{}, errors.New("invalid API key")
 	}
+	metrics.AuthResolveTotal.WithLabelValues("ok").Inc()
 	return id, nil
 }
 
@@ -362,15 +367,18 @@ func (h *Handler) handleNonStream(
 	// profile name like "personal-claude" rather than a real vendor model
 	// id — the adapter falls back to its own configured Model in that
 	// case (see Provider.Model's doc comment).
+	callStart := time.Now()
 	resp, err := target.ChatCompletion(ctx, provider.ChatRequest{
 		Messages:    augmented,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 	})
 	if err != nil {
+		metrics.ProviderCallErrorsTotal.WithLabelValues(target.Name(), target.Vendor()).Inc()
 		http.Error(w, fmt.Sprintf("upstream provider error: %v", err), http.StatusBadGateway)
 		return
 	}
+	metrics.ProviderCallDuration.WithLabelValues(target.Name(), target.Vendor(), "false").Observe(time.Since(callStart).Seconds())
 
 	id := h.newID()
 	ep := h.buildEpisode(id, target, inputText, resp.Message.Content, result, false, actor)
@@ -380,8 +388,14 @@ func (h *Handler) handleNonStream(
 	// request — losing this one turn's memory is preferable to losing the
 	// answer the user is waiting on. That's a deliberate availability vs.
 	// durability call, not an oversight.
-	if err := h.Capturer.Capture(ctx, scope, ep); err != nil {
-		h.log().Error("capture failed", "episode_id", ep.ID, "error", err)
+	captureStart := time.Now()
+	captureErr := h.Capturer.Capture(ctx, scope, ep)
+	metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
+	if captureErr != nil {
+		metrics.CaptureTotal.WithLabelValues("error").Inc()
+		h.log().Error("capture failed", "episode_id", ep.ID, "error", captureErr)
+	} else {
+		metrics.CaptureTotal.WithLabelValues("ok").Inc()
 	}
 
 	out := chatCompletionResponse{
@@ -424,12 +438,14 @@ func (h *Handler) handleStream(
 	// See the comment in handleNonStream: Model is left blank so the
 	// adapter uses its own configured model rather than whatever profile
 	// name the client sent as req.Model.
+	streamStart := time.Now()
 	chunks, err := target.StreamChatCompletion(ctx, provider.ChatRequest{
 		Messages:    augmented,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 	})
 	if err != nil {
+		metrics.ProviderCallErrorsTotal.WithLabelValues(target.Name(), target.Vendor()).Inc()
 		http.Error(w, fmt.Sprintf("upstream provider error: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -476,9 +492,17 @@ drain:
 		}
 	}
 
+	metrics.ProviderCallDuration.WithLabelValues(target.Name(), target.Vendor(), "true").Observe(time.Since(streamStart).Seconds())
+
 	ep := h.buildEpisode(id, target, inputText, buf.String(), result, truncated, actor)
-	if err := h.Capturer.Capture(ctx, scope, ep); err != nil {
-		h.log().Error("capture failed", "episode_id", ep.ID, "error", err)
+	captureStart := time.Now()
+	captureErr := h.Capturer.Capture(ctx, scope, ep)
+	metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
+	if captureErr != nil {
+		metrics.CaptureTotal.WithLabelValues("error").Inc()
+		h.log().Error("capture failed", "episode_id", ep.ID, "error", captureErr)
+	} else {
+		metrics.CaptureTotal.WithLabelValues("ok").Inc()
 	}
 
 	// The terminal [DONE] is held back until capture has been attempted:

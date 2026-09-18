@@ -17,9 +17,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"hupi/internal/auth"
 	"hupi/internal/bootstrap"
 	"hupi/internal/gateway"
+	"hupi/internal/metrics"
 	"hupi/internal/store"
 )
 
@@ -56,8 +59,8 @@ func run() error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", handler.HandleChatCompletions)
-	mux.HandleFunc("POST /v1/feedback", handler.HandleFeedback)
+	mux.HandleFunc("POST /v1/chat/completions", metrics.InstrumentHandler("/v1/chat/completions", handler.HandleChatCompletions))
+	mux.HandleFunc("POST /v1/feedback", metrics.InstrumentHandler("/v1/feedback", handler.HandleFeedback))
 	// Workspace routing (docs/TIER3_PLAN.md D4): a request to these routes
 	// is scoped to the given team, authorized against the caller's own
 	// membership. Only mounted when the Tier-3 extension is present (see
@@ -76,6 +79,10 @@ func run() error {
 	// for something a restart can't fix).
 	mux.HandleFunc("GET /healthz", handleLiveness)
 	mux.HandleFunc("GET /readyz", handleReadiness(deps.DB))
+	// Prometheus text-format scrape endpoint (docs/TODO.md #8) — no auth
+	// of its own, same as /healthz/readyz: binds to 127.0.0.1 by default
+	// like the rest of this server, see the comment on addr below.
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	addr := listenAddr()
 	srv := &http.Server{Addr: addr, Handler: mux}

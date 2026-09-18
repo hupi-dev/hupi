@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"hupi/internal/metrics"
 	"hupi/internal/provider"
 )
 
@@ -55,6 +56,13 @@ func (r *Runner) groundingCheck(ctx context.Context, sourceText string, facts []
 	}
 	if len(result.Grounded) != len(facts) {
 		return nil, fmt.Errorf("grounding check returned %d results for %d facts", len(result.Grounded), len(facts))
+	}
+	for _, g := range result.Grounded {
+		if g {
+			metrics.GroundingFactsTotal.WithLabelValues("true").Inc()
+		} else {
+			metrics.GroundingFactsTotal.WithLabelValues("false").Inc()
+		}
 	}
 	return result.Grounded, nil
 }
