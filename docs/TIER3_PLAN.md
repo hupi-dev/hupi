@@ -379,10 +379,21 @@ optional parallel work.
   `gateway.RetrievalResult`/`Episode` themselves) — it's a schema-shape
   change, not just a new column, and should land in Phase 1/2 together so
   nothing is built twice.
-- **Team-voice consolidation quality is unvalidated.** Nothing has tested
-  whether an LLM actually produces a coherent "neutral team voice" summary
-  distinct from an individual's — this may need prompt iteration once
-  real team data exists to consolidate.
+- **Team-voice consolidation quality — validated, one real issue found and
+  fixed.** `internal/consolidation/team_test.go` (`hupi-t3`) is a real-LLM
+  eval, gated on `ANTHROPIC_API_KEY`, using source text in
+  `EpisodeEmbedText`'s actual "USER: ...\nASSISTANT: ..." shape with no
+  per-person label at all — the real, load-bearing fact that
+  `scanEpisodeSources` never selects `actor_user_id`, so the consolidation
+  LLM has zero structural signal about who said what and has to infer
+  voice/privacy purely from content and the prompt's instructions. First
+  real run found a genuine failure mode: the model sometimes *narrated*
+  its own redaction ("a personal note about a shellfish allergy was
+  raised... but that detail is personal rather than team knowledge"),
+  which leaks the private detail while explaining why it's excluding it.
+  Fixed by explicitly instructing the prompt not to reference that
+  anything personal was omitted at all; confirmed clean across 10
+  consecutive real-LLM trials afterward (2 scenarios × 5 repeats).
 - **Cost**: per-scope consolidation (Phase 5) multiplies consolidation LLM
   calls by the number of active scopes (users + teams), not just active
   users — worth modeling before a team with many members generates a

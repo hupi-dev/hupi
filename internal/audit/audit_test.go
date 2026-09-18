@@ -3,8 +3,10 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -29,11 +31,15 @@ func TestLogStandaloneAndQueryRoundTrip(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 
-	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:audit-test-a"}
-	actor := "user:audit-test-a"
-	t.Cleanup(func() {
-		db.Exec(`delete from audit_log where actor = $1`, actor)
-	})
+	// A unique actor per run, not a fixed literal: audit_log is
+	// deliberately insert-only for hupi_app (schema/0007 — no delete
+	// grant, matching production's append-only guarantee), so this test
+	// cannot clean up its own row afterward. A fixed actor id would let a
+	// leftover row from a previous run collide with this run's query and
+	// fail it with "want 1, got 2" — a real, previously-recurring
+	// flake, not hypothetical.
+	actor := fmt.Sprintf("user:audit-test-%d", time.Now().UnixNano())
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: actor}
 
 	entry := Entry{
 		EventType:      EventCapture,

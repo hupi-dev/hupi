@@ -23,6 +23,11 @@ test that drives the actual (unexported) loopback HTTP server code in
 (the last zero-coverage Go package) turned up a real bug along the way:
 `ParseTextArray` didn't actually reverse `TextArray` for any item
 containing a literal comma — fixed and covered by a round-trip test.
+Team-voice consolidation quality (`docs/TIER3_PLAN.md` §10) is now
+validated with a real-LLM eval (`hupi-t3`'s `internal/consolidation/team_test.go`)
+rather than just self-flagged as untested — it found and led to fixing a
+real prompt-quality issue (the model narrating its own privacy redactions)
+along the way.
 
 ## 1. Zero analytics installed anywhere
 
@@ -51,9 +56,6 @@ heavily caged) would substantially shorten time-to-"this actually works."
 
 ## Smaller items worth naming
 
-- **Team-voice consolidation quality is self-flagged as "unvalidated"**
-  (`docs/TIER3_PLAN.md` §10 Risks) — worth real validation now that OIDC
-  lowers the friction to get real teams actually using shared workspaces.
 - **No case studies/testimonials/about page anywhere** — for Tier 3 buyers
   specifically, social proof matters, and there's currently zero on the
   site.
