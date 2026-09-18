@@ -1,0 +1,88 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import FinalCta from '../components/FinalCta.astro';
+import { CONTACT_EMAIL, GITHUB_URL } from '../lib/links.js';
+
+const sections = [
+  {
+    title: 'The short version',
+    body:
+      'HUPI is self-hosted software, not a hosted service. We never see, store, or transmit your conversations or memory data — everything lives in your own Postgres, encrypted with your own key. This page covers both what the software does and what this website (hupi.dev) itself collects.',
+  },
+  {
+    title: 'What HUPI (the software) does with your data',
+    body:
+      'Nothing, because it never reaches us. There is no HUPI-run backend, no telemetry, and no phone-home in the gateway, the consolidation jobs, the admin tooling, or the Tier 3 extension. Every conversation, summary, and entity is stored in your own Postgres database, encrypted with your own key, on infrastructure you control. If you configure OIDC/SSO for Tier 3, the only data involved is what your identity provider already puts in a standard access token (a stable subject identifier and role/group claims) — verified locally against your own configured issuer, never forwarded to us or anyone else.',
+  },
+  {
+    title: 'What this website collects',
+    body:
+      'As of this writing, nothing — hupi.dev runs no analytics, advertising, or tracking scripts of any kind. If that changes (e.g. basic analytics to understand which pages are useful), this page will be updated first to disclose exactly what is collected, and a cookie/consent notice will be added before any tracking cookie is ever set for an EU visitor.',
+  },
+  {
+    title: 'If you email us',
+    body:
+      `Whatever you send to ${CONTACT_EMAIL} — for a Tier 3 license inquiry, a bug report, or anything else — is the only information about you we hold, kept only as long as needed to respond and, for a Tier 3 license, to administer it. We do not sell it, share it with third parties, or use it for anything beyond that.`,
+  },
+  {
+    title: 'Your rights (EU/EEA and elsewhere)',
+    body:
+      'Because we collect essentially nothing about site visitors and don’t process your actual data at all (it stays on your own infrastructure), there is very little for these rights to act on in practice — but where they apply, you can ask to access, correct, or delete any information we do hold about you (realistically: the contents of an email you sent us), object to how it’s used, or ask for a copy of it, by contacting the address below. We act as the data controller only for that email correspondence, not for anything stored in your own HUPI deployment.',
+  },
+  {
+    title: 'Changes to this policy',
+    body:
+      'If what we collect changes — most likely by adding basic website analytics — this page will be updated to reflect it before that change takes effect, not after.',
+  },
+];
+---
+
+<Layout
+  title="Privacy Policy | HUPI"
+  description="HUPI is self-hosted software — we never see, store, or transmit your conversations or memory data. What this website collects, and your rights under GDPR."
+>
+  <Nav />
+  <main>
+    <section class="relative overflow-hidden border-b border-white/5">
+      <div
+        class="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"
+      >
+      </div>
+      <div class="relative mx-auto max-w-4xl px-6 pb-16 pt-20 text-center sm:pt-28">
+        <p
+          class="font-mono-tight mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-navy-800/60 px-4 py-1.5 text-xs uppercase tracking-widest text-fog-300"
+        >
+          Privacy
+        </p>
+        <h1 class="text-balance text-4xl font-extrabold tracking-tight text-fog-100 sm:text-5xl">
+          We can't see your data. Here's what that actually means.
+        </h1>
+      </div>
+    </section>
+
+    {
+      sections.map((s, i) => (
+        <section class={`border-b border-white/5 ${i % 2 === 1 ? 'bg-navy-950/40' : ''}`}>
+          <div class="mx-auto max-w-4xl px-6 py-16 sm:py-20">
+            <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">{s.title}</h2>
+            <p class="mt-4 max-w-3xl leading-relaxed text-fog-300">{s.body}</p>
+          </div>
+        </section>
+      ))
+    }
+
+    <section class="border-b border-white/5">
+      <div class="mx-auto max-w-4xl px-6 py-16 sm:py-20">
+        <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">Questions</h2>
+        <p class="mt-4 leading-relaxed text-fog-300">
+          Contact <a href={`mailto:${CONTACT_EMAIL}`} class="text-ember-500 underline decoration-dotted hover:text-ember-400">{CONTACT_EMAIL}</a>{' '}
+          — or read the actual source code on{' '}
+          <a href={GITHUB_URL} class="text-ember-500 underline decoration-dotted hover:text-ember-400">GitHub</a>{' '}
+          to verify any of this yourself, rather than take our word for it.
+        </p>
+      </div>
+    </section>
+  </main>
+  <FinalCta />
+</Layout>
