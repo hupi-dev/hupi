@@ -10,31 +10,18 @@ If you fix one of these, delete it from this list rather than checking it
 off and leaving it — a stale TODO is worse than no TODO.
 
 Closed since the last pass (CI/CD, `SECURITY.md`, the `extractJSON` fix,
-Tier 3 pricing, the `/metrics` endpoint, and the privacy policy) — deleted
-per the rule above, not left as a checked-off ledger.
+Tier 3 pricing, the `/metrics` endpoint, the privacy policy, and both Go
+and VS Code extension test-coverage gaps) — deleted per the rule above,
+not left as a checked-off ledger. The VS Code extension closure needed a
+hand-written `vscode` module mock (`src/test/vscode-mock.ts`, wired in via
+`vitest.config.ts`'s `resolve.alias`) since no real `vscode` package
+exists outside a real VS Code process — every previously-zero-coverage
+file (`chatViewProvider.ts`, `config.ts`, `extension.ts`, `inlineEdit.ts`,
+`oidcAuth.ts`, `secrets.ts`) now has real tests, including an integration
+test that drives the actual (unexported) loopback HTTP server code in
+`oidcAuth.ts` end to end rather than mocking it away.
 
-## 1. Test coverage — real progress, two gaps still open
-
-Closed: `cmd/hupi`, `internal/identity`, `internal/bootstrap`,
-`internal/dbscope`, `internal/audit`, `internal/selfcheck`, and the new
-`internal/metrics` package all have real tests now (`cmd/hupi/main_test.go`
-in particular closes the "the gateway binary itself has no test file" gap
-directly).
-
-Still open:
-
-- **`internal/pgfmt`** — still zero test files. Smaller and lower-risk than
-  the packages just closed, which is why it wasn't in this pass, not because
-  it doesn't matter.
-- **VS Code extension**: `chatViewProvider.ts`, `config.ts`, `extension.ts`,
-  `inlineEdit.ts`, `oidcAuth.ts`, `secrets.ts` still have zero coverage —
-  all of them import `vscode`, which `vitest.config.ts` deliberately
-  excludes today. Closing this needs a `vscode` module mock (a real,
-  separate piece of test infrastructure), not just a test file — worth
-  scoping as its own task rather than folding into a future unrelated
-  change.
-
-## 2. Zero analytics installed anywhere
+## 1. Zero analytics installed anywhere
 
 Confirmed via grep across the whole site: no `gtag`, GA, Plausible,
 PostHog, Segment, or Mixpanel anywhere.
@@ -48,7 +35,7 @@ before spending money on ads, not after. Once it ships, `/privacy` needs a
 cookie/tracking disclosure added — it currently correctly says "we collect
 nothing," which stops being true the moment this lands.
 
-## 3. No hosted demo — self-hosting is the only way to ever see the product work
+## 2. No hosted demo — self-hosting is the only way to ever see the product work
 
 Traced the real first-run path: even the fastest documented route (Docker
 Compose) needs a real Postgres, a real LLM provider API key, and 3+ manual
@@ -61,6 +48,9 @@ heavily caged) would substantially shorten time-to-"this actually works."
 
 ## Smaller items worth naming
 
+- **`internal/pgfmt`** — still the one Go package with zero test files.
+  Smaller and lower-risk than everything else already closed, which is why
+  it's still open, not because it doesn't matter.
 - **Team-voice consolidation quality is self-flagged as "unvalidated"**
   (`docs/TIER3_PLAN.md` §10 Risks) — worth real validation now that OIDC
   lowers the friction to get real teams actually using shared workspaces.
