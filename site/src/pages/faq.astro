@@ -42,6 +42,14 @@ const groups = [
         a: `Yes. Tier 3 can authenticate users via any standards-compliant OpenID Connect provider — Azure AD/Entra ID, Okta, Auth0, Google Workspace — instead of (or alongside) hupi-admin-provisioned API keys. Team membership comes from the provider itself (Azure AD App Roles by default), so adding someone to a team in your existing directory is enough; there's no separate hupi-admin step to keep in sync. It's a second way to authenticate a request, not a replacement — API keys keep working unchanged. See <a href="/docs#full-reference" class="text-ember-500 underline decoration-dotted hover:text-ember-400">OIDC.md</a> for the setup walkthrough.`,
       },
       {
+        q: 'Which identity providers does HUPI’s OpenID Connect (OIDC) support actually work with?',
+        a: `Any provider that speaks standard OpenID Connect and publishes a <code class="font-mono-tight">.well-known/openid-configuration</code> discovery document — that's the whole integration surface, so it isn't a per-vendor integration list. Built and tested against Azure AD/Entra ID specifically (including live end-to-end sign-in testing, not just unit tests), but nothing is hardcoded to it: Okta, Auth0, Google Workspace, and any other compliant IdP work the same way, configured entirely through environment variables — no code change required to switch providers.`,
+      },
+      {
+        q: 'Does the HUPI VS Code extension support SSO sign-in too?',
+        a: `Yes. Alongside pasting an API key, the extension has a <code class="font-mono-tight">HUPI: Sign In</code> command that runs a real OpenID Connect login: it opens your system browser at your identity provider's actual login page (Authorization Code + PKCE, the same standard flow tools like the Azure CLI and GitHub CLI use) and listens for the redirect on a local port — your credentials never pass through the extension itself. See <a href="/docs#full-reference" class="text-ember-500 underline decoration-dotted hover:text-ember-400">VSCODE_EXTENSION.md</a> for setup.`,
+      },
+      {
         q: 'How does team-based isolation actually work — is it just application code trusting itself?',
         a: 'No — it’s enforced twice, independently. Scope filtering is built into every query the application makes, so even a leaked API key only lets an attacker act as the user it belongs to. Separately, Postgres row-level security enforces the same boundary at the database layer: even if a future application bug forgot to filter a query correctly, the database itself refuses to return rows outside the requesting session’s declared scope. This has been verified with tests that deliberately try to break it — including a raw query that explicitly asks for one team’s data while the database session is scoped to a different team, which correctly returns zero rows.',
       },
@@ -128,8 +136,8 @@ const faqStructuredData = {
 ---
 
 <Layout
-  title="FAQ — Tiers, isolation & how HUPI works | HUPI"
-  description="How HUPI's tier-based team isolation actually works (row-level security, per-team encryption), plus consolidation, grounding, the retrieval gate, and corrections explained."
+  title="FAQ — Tiers, isolation, SSO/OIDC & how HUPI works | HUPI"
+  description="How HUPI's tier-based team isolation and SSO/OpenID Connect (OIDC) login actually work, plus consolidation, grounding, the retrieval gate, and corrections explained."
 >
   <Nav />
   <main>

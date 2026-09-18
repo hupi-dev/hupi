@@ -47,11 +47,19 @@ const rows = [
   },
   {
     label: 'Team workspaces with real isolation',
-    hupi: 'Yes (Tier 3, commercially licensed) — per-team encryption keys + Postgres row-level security, independent of app code. Identity and team membership can come from API keys or real SSO (Azure AD/OIDC)',
+    hupi: 'Yes (Tier 3, commercially licensed) — per-team encryption keys + Postgres row-level security, independent of app code',
     vendor: 'No — single-user by design',
     mem0: 'Multi-user scoping in the API; isolation model is what you build around it',
     zep: 'Depends on plan/deployment',
     letta: 'Multi-agent, not a team-workspace/tenancy model',
+  },
+  {
+    label: 'SSO / login via OpenID Connect (OIDC)',
+    hupi: 'Yes (Tier 3) — any standards-compliant OIDC provider (Azure AD/Entra ID, Okta, Auth0, Google Workspace); team membership comes from your directory’s own roles/groups, not a separate admin step',
+    vendor: 'Account-level SSO on Enterprise plans, unrelated to any memory/isolation model — there isn’t one to authenticate into',
+    mem0: 'Not a built-in identity layer — you wire your own auth in front of it, same as any library called from your own app code',
+    zep: 'Depends on plan/deployment (cloud product)',
+    letta: 'Not applicable — no team-identity model to authenticate into',
   },
   {
     label: 'License',
@@ -74,7 +82,7 @@ const columns = [
 
 <Layout
   title="HUPI vs Mem0, Zep, Letta & vendor memory | Comparison"
-  description="How HUPI's self-hosted, provider-independent memory gateway compares to ChatGPT/Claude memory, Mem0, Zep (Graphiti), and Letta (MemGPT) — architecture, self-hosting, isolation, and audit trails."
+  description="How HUPI compares to ChatGPT/Claude memory, Mem0, Zep (Graphiti), and Letta (MemGPT) — self-hosting, provider independence, isolation, SSO/OIDC, and audit trails."
 >
   <Nav />
   <main>
