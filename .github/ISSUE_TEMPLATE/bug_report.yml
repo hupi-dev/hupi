@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in Tier 1/2 (this repo) isn't working as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. A few things first:
+        - This repo is Tier 1/2 only. If your issue is actually about Tier 3
+          (team/shared-workspace support, `hupi-t3`), email work@hupi.dev instead —
+          this repo's issue tracker can't do anything about a private repo.
+        - Found a security vulnerability? Use [SECURITY.md](../../SECURITY.md)'s
+          process instead of this template.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the system is this about?
+      options:
+        - Gateway (cmd/hupi, /v1/chat/completions)
+        - Consolidation (cmd/hupi-consolidate)
+        - Admin CLI/UI (hupi-admin, hupi-admin-ui)
+        - Other CLI tool (hupi-trace, hupi-audit, hupi-export/import, hupi-rotate-key, hupi-reembed, hupi-selfcheck, hupi-correct)
+        - VS Code extension
+        - Marketing site (hupi.dev)
+        - install.sh / schema migrations
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: The git commit or release you're running (`git rev-parse HEAD`, or the VS Code extension version if that's the component).
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: As close to minimal/copy-pasteable as you can get — a curl command, a specific providers.yaml shape, a specific VS Code action.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Gateway/CLI: stderr output (slog's structured lines). VS Code extension: the Output panel's "HUPI" channel, if there is relevant output.
+        Please redact anything sensitive first (API keys, provider credentials, actual memory content).
+      render: shell
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, how you're running Postgres (bare-metal/Docker/managed), Go version if building from source.

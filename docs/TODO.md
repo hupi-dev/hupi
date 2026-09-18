@@ -64,9 +64,6 @@ heavily caged) would substantially shorten time-to-"this actually works."
   question an enterprise security review will ask — worth having the
   mitigation (short token lifetime) ready to explain rather than it being a
   surprise mid-sales-conversation.
-- **No `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, or `.github/ISSUE_TEMPLATE`**
-  — `SECURITY.md` is done, but the rest of the contributor-scaffolding gap
-  from the original review is still open.
 
 ## If picking just one to start
 

@@ -125,6 +125,14 @@ Kubernetes/Helm.
 | [docs/CODE_GUIDE.md](docs/CODE_GUIDE.md) | Project layout and package dependency graph |
 | [docs/MEMORY_FORMAT.md](docs/MEMORY_FORMAT.md) | The portable memory format (HPMF) |
 
+## Contributing
+
+Bug reports, feature requests, and PRs for Tier 1/2 are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for scope, dev setup, and how to run
+the test suites. Everyone participating is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Found a security vulnerability?
+See [SECURITY.md](SECURITY.md) instead of opening a regular issue.
+
 ## Status
 
 This is an in-development project — see

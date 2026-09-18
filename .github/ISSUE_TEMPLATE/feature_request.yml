@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest something for Tier 1/2 (this repo).
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: is this actually a Tier 3 (team/shared-workspace)
+        request — multi-user auth, per-team anything, the `/v1/team/...`
+        routes? That's a separate, private repo (`hupi-t3`) — email
+        work@hupi.dev instead, since nothing filed here can act on it.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Gateway (cmd/hupi, /v1/chat/completions)
+        - Consolidation (cmd/hupi-consolidate)
+        - Admin CLI/UI (hupi-admin, hupi-admin-ui)
+        - Other CLI tool (hupi-trace, hupi-audit, hupi-export/import, hupi-rotate-key, hupi-reembed, hupi-selfcheck, hupi-correct)
+        - VS Code extension
+        - install.sh / schema migrations / deployment (Docker, Helm, K8s)
+        - Something else / cross-cutting
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The gap or friction you're actually hitting — not just "it would be nice if," but what's currently hard or impossible because this doesn't exist.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (optional)
+      description: If you have a specific shape in mind — a new flag, a new endpoint, a config option — sketch it out. If you don't, that's fine too.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Anything you already tried or ruled out, and why.
