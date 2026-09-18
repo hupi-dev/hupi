@@ -1,11 +1,18 @@
 # OIDC / SSO authentication for Tier 3
 
 Status: **built and verified** — real Postgres JIT-provisioning tests
-(`internal/auth/oidc_test.go`, `hupi-t3`) plus a live end-to-end run
-against a real Azure AD (Entra ID) tenant: three test identities
+(`internal/auth/oidc_test.go`, `hupi-t3`) plus two live end-to-end runs
+against a real Azure AD (Entra ID) tenant: first, three test identities
 (single-team, multi-team, and no-team) each produced a correctly-scoped
-`identity.Identity`, and the negative cases (wrong audience, expired
-token, malformed token) were all confirmed to fail closed.
+`identity.Identity` via directly-obtained tokens, with the negative cases
+(wrong audience, expired token, malformed token) confirmed to fail
+closed; second, a full interactive sign-in through the VS Code extension
+(see [VSCODE_EXTENSION.md](VSCODE_EXTENSION.md)) — real browser login,
+real loopback redirect, real JIT provisioning observed in Postgres, real
+chat response back. Two real configuration gotchas surfaced during that
+second run and are called out inline below (§ Setting it up against
+Azure AD) rather than left as something the next person rediscovers the
+hard way.
 
 This reverses [TIER3_PLAN.md](TIER3_PLAN.md)'s original non-goal —
 *"No SSO/OIDC. Federated identity is a later concern, layered on top of
@@ -129,19 +136,39 @@ existing hash lookup instead of being silently accepted.
    no redirect URI needed — this is a resource API, not an interactive
    client. Note the **Application (client) ID** and **Directory (tenant)
    ID**.
-2. **App registration → App roles → Create app role**, once per team
+2. **Set the resource app's accepted token version to 2 — easy to miss,
+   and the tokens still *look* valid without it.** App registration →
+   **Manifest** → find `"api": { "requestedAccessTokenVersion": null,
+   ... }` → change `null` to `2` → Save. Left at the default `null`, Azure
+   AD issues *v1*-format access tokens for this app's audience (issuer
+   `https://sts.windows.net/<tenant>/`) even when a client requests them
+   through the `/v2.0` endpoint — token version is controlled by the
+   *resource* app's manifest, not by which endpoint the client used. Since
+   `HUPI_OIDC_ISSUER_URL` here is the v2.0 issuer
+   (`https://login.microsoftonline.com/<tenant>/v2.0`), a v1 token fails
+   verification with `oidc: id token issued by a different provider` —
+   a real error this project hit during its own VS Code extension testing,
+   only visible server-side after [handler.go's resolveIdentity started
+   logging the underlying rejection reason](../internal/gateway/handler.go)
+   (it was previously swallowed into a generic 401, by design, so an
+   attacker can't probe rejection reasons — but that also hid this from
+   whoever's setting it up).
+3. **App registration → App roles → Create app role**, once per team
    (e.g. `Team.AcmeEng`, `Team.Research`), member type "Users/Groups."
-3. **Enterprise Applications → find your app → Users and groups → Add
+4. **Enterprise Applications → find your app → Users and groups → Add
    assignment** to put real users in one or more roles.
-4. Set:
+5. Set:
    ```bash
    export HUPI_OIDC_ISSUER_URL="https://login.microsoftonline.com/<tenant-id>/v2.0"
    export HUPI_OIDC_CLIENT_ID="<application-client-id>"
    ```
-5. A client authenticates against Azure AD however it normally would
+6. A client authenticates against Azure AD however it normally would
    (device code, auth-code flow, client credentials, etc.) and presents
    the resulting access token as `Authorization: Bearer <token>` to
-   HUPI, same as an API key would be.
+   HUPI, same as an API key would be. For the VS Code extension
+   specifically, see [VSCODE_EXTENSION.md](VSCODE_EXTENSION.md) — it
+   needs a *second*, separate app registration (a public client that
+   signs users in) plus its own redirect-URI gotcha.
 
 Any standards-compliant OIDC provider works the same way — Azure AD is
 just the one this was built and tested against; the only Azure-specific

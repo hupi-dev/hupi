@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.7
+
+- Fixed `AADSTS50011` on OIDC sign-in: the loopback redirect URI was
+  built as `http://127.0.0.1:<port>/callback`, but Azure AD's loopback
+  exception for a registered `http://localhost` matches only on that
+  literal hostname (not the `127.0.0.1` IP) and only lets the *port*
+  vary, not the path. Redirect URI is now `http://localhost:<port>`, no
+  path — found on the first real interactive sign-in test against a live
+  Azure AD tenant.
+
+## 0.1.6
+
+- Added OIDC/SSO sign-in (`HUPI: Sign In` / `HUPI: Sign Out`) as an
+  alternative to pasting an API key, for Tier 3 deployments with OIDC
+  configured (see `docs/OIDC.md`). Authorization Code + PKCE via a local
+  loopback redirect — device-code flow was deliberately not implemented,
+  since it's commonly blocked by Azure AD's Security Defaults. New
+  settings: `hupi.oidc.issuerUrl`, `hupi.oidc.clientAppId`,
+  `hupi.oidc.scope`. No new dependency.
+
 ## 0.1.5
 
 - Fixed a real concurrency bug in the chat sidebar: nothing previously

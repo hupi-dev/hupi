@@ -102,6 +102,23 @@ Azure AD app-registration steps, including the `http://localhost`
 no-port redirect URI Azure AD's "Mobile and desktop applications" platform
 type expects).
 
+**Troubleshooting, from real errors hit during this project's own live
+testing**:
+
+- `AADSTS50011: The redirect URI ... does not match` — the extension's
+  redirect URI must be exactly `http://localhost:<port>` (hostname
+  `localhost`, no path) to match Azure's loopback exception for a
+  registered value of bare `http://localhost`; fixed in the extension as
+  of v0.1.7, so this should only come up if you registered the redirect
+  URI with a path or as the literal `127.0.0.1` instead of `localhost`.
+- `oidc: id token issued by a different provider, expected ".../v2.0" got
+  "https://sts.windows.net/..."` (visible in the gateway's own log, not
+  the client error, per [handler.go's resolveIdentity](../internal/gateway/handler.go))
+  — the *resource* app (`HUPI_OIDC_CLIENT_ID`, not this extension's
+  `clientAppId`) needs its manifest's `api.requestedAccessTokenVersion`
+  set to `2`; see [OIDC.md § Setting it up against Azure
+  AD](OIDC.md#setting-it-up-against-azure-ad-entra-id).
+
 Once both `hupi.oidc.issuerUrl` and `hupi.oidc.clientAppId` are set, OIDC
 is authoritative for the workspace: the extension prompts sign-in rather
 than silently falling back to any previously-stored API key, since that
