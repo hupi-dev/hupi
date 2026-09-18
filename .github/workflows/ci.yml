@@ -1,0 +1,77 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: hupi
+          POSTGRES_DB: hupi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGPASSWORD: hupi
+      HUPI_TEST_DATABASE_URL: postgres://postgres:hupi@localhost:5432/hupi?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      # schema/0*.sql are numbered and must be applied in order — later
+      # migrations depend on tables/columns earlier ones create (same
+      # sequence docs/INSTALL.md's manual-setup path documents).
+      - name: Apply schema migrations
+        run: |
+          for f in schema/0*.sql; do
+            psql -h localhost -U postgres -d hupi -f "$f"
+          done
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+  vscode-extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode-extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  site:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      # Catches an Astro syntax error, a broken import, or (as happened
+      # once) a missing space around an inline link that only shows up in
+      # the actually-rendered HTML — see docs/TODO.md #1.
+      - run: npm run build
