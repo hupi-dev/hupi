@@ -21,7 +21,7 @@ const tiers = [
     name: 'Tier 3 — Professional (Shared)',
     who: 'A team, sharing some memory while keeping personal memory private',
     body:
-      'Real users/teams, HUPI_REQUIRE_AUTH=true, and the /v1/team/... routes. Team conversations consolidate into shared, third-person team knowledge visible to every member — while each member’s own private history, and their personal self_model, stay theirs alone. Unlike Tiers 1/2, this isn’t part of the free build: it’s a separate, commercially-licensed extension — see "Tier 3 licensing" below.',
+      'Real users/teams, HUPI_REQUIRE_AUTH=true, and the /v1/team/... routes. Team conversations consolidate into shared, third-person team knowledge visible to every member — while each member’s own private history, and their personal self_model, stay theirs alone. Identities come from hupi-admin-provisioned API keys or, via OpenID Connect, straight from your existing directory (Azure AD/Entra ID and other standards-compliant IdPs) — team membership included. Unlike Tiers 1/2, this isn’t part of the free build: it’s a separate, commercially-licensed extension — see "Tier 3 licensing" below.',
   },
 ];
 
@@ -231,6 +231,7 @@ export HUPI_PROVIDERS_CONFIG=./providers.yaml`,
               ['ARCHITECTURE.md', 'The retrieval gate, consolidation engine, provider abstraction', `${GITHUB_URL}/blob/main/ARCHITECTURE.md`],
               ['MEMORY_FORMAT.md', 'Episodes, summaries, entities, grounding & correction', docFileURL('MEMORY_FORMAT.md')],
               ['TIER3_PLAN.md', 'Team identity, workspaces, and isolation in depth', docFileURL('TIER3_PLAN.md')],
+              ['OIDC.md', 'SSO login for teams via Azure AD or any OpenID Connect provider', docFileURL('OIDC.md')],
               ['ADMIN_UI.md', 'Managing users, teams, and keys without the CLI', docFileURL('ADMIN_UI.md')],
               ['VSCODE_EXTENSION.md', 'The VS Code chat sidebar and inline-edit extension', docFileURL('VSCODE_EXTENSION.md')],
               ['API_REFERENCE.md', 'The full HTTP API surface', docFileURL('API_REFERENCE.md')],

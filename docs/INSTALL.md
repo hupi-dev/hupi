@@ -296,6 +296,21 @@ admin action (CLI or UI) is recorded in `audit_log`. Query it with:
 ./bin/hupi-audit query -scope-owner team:acme-eng -since 2026-09-01T00:00:00Z
 ```
 
+**Alternative to `hupi-admin`-provisioned API keys**: point Tier 3 at a
+real OpenID Connect identity provider (Azure AD/Entra ID, Okta, Auth0,
+any standards-compliant IdP) so users authenticate — and team membership
+comes from — your existing directory instead of manual provisioning:
+
+```bash
+export HUPI_OIDC_ISSUER_URL="https://login.microsoftonline.com/<tenant-id>/v2.0"
+export HUPI_OIDC_CLIENT_ID="<application-client-id>"
+```
+
+Coexists with API keys rather than replacing them — a request is routed
+to whichever resolver matches its token's shape. See
+[OIDC.md](OIDC.md) for the full mechanism, configuration reference, and
+an Azure AD setup walkthrough.
+
 ## Export / import (any tier)
 
 Move a scope's memory somewhere else — a personal backup, a migration to

@@ -30,7 +30,9 @@ gateway, retrieval, consolidation, encryption, the admin UI and CLI
 tooling, all of it.
 
 Tier 3 (Professional Shared — teams, shared workspaces, and real
-multi-user authentication) is a separate, commercially-licensed
+multi-user authentication, either API keys or OpenID Connect against an
+external identity provider — see [docs/OIDC.md](docs/OIDC.md)) is a
+separate, commercially-licensed
 extension, developed in a private repo
 ([hupi-t3](https://github.com/samuel-sujith/hupi-t3)) and not included
 here. This repo compiles and runs completely standalone without it —

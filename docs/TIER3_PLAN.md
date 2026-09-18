@@ -25,7 +25,10 @@ Explicitly out of scope, to keep the effort bounded:
 
 - **No SSO/OIDC.** Authentication is a bearer API key mapping to a user
   row. Federated identity is a later concern, layered on top of the same
-  `users` table.
+  `users` table. *(Addendum: this has since shipped — see
+  [OIDC.md](OIDC.md). It landed exactly as scoped here, as a second way
+  to resolve a bearer token layered on top of the same `users`/`teams`
+  tables, not a redesign of them.)*
 - **No cross-team sharing or fine-grained per-entity ACLs.** Scope is
   exactly two kinds — private to a user, or shared with a team — not an
   arbitrary permission graph.

@@ -322,9 +322,10 @@ between the repos.
 `internal/` directory to be imported by code rooted at that directory's
 parent — a rule enforced by looking at the file tree on disk at compile
 time, not at module or repo boundaries. `hupi-t3`'s files
-(`internal/auth/team.go`, `internal/gateway/team.go`,
-`internal/consolidation/team.go`, `cmd/hupi-admin/team.go`,
-`cmd/hupi-admin-ui/team_handlers.go`) mirror this repo's paths exactly;
+(`internal/auth/team.go`, `internal/auth/oidc.go`,
+`internal/gateway/team.go`, `internal/consolidation/team.go`,
+`cmd/hupi-admin/team.go`, `cmd/hupi-admin-ui/team_handlers.go`) mirror
+this repo's paths exactly;
 its own `build.sh` clones this repo into a temp directory, copies its
 files onto those same paths, and runs `go build` from the combined tree.
 At that point they're indistinguishable from any other file in
@@ -382,7 +383,7 @@ The full set of hooks, all following this pattern:
 | Hook (declared here) | Set by (in `hupi-t3`) | Nil behavior |
 |---|---|---|
 | `gateway.MountTeamRoutes` | `internal/gateway/team.go` | `/v1/team/...` never mounted |
-| `auth.NewTeamAuthenticator` | `internal/auth/team.go` | `HUPI_REQUIRE_AUTH=true` fails at startup with a clear error (`cmd/hupi/main.go`'s `resolveAuth`) instead of silently granting no-auth access |
+| `auth.NewTeamAuthenticator` | `internal/auth/team.go` (dispatches to `internal/auth/oidc.go` too, when OIDC env vars are set — see [OIDC.md](OIDC.md)) | `HUPI_REQUIRE_AUTH=true` fails at startup with a clear error (`cmd/hupi/main.go`'s `resolveAuth`) instead of silently granting no-auth access |
 | `consolidation`'s `teamPromptProvider` | `internal/consolidation/team.go` | Every summary uses `summarySystemPrompt`, even for a `shared` scope — harmless, since Tier 1/2 never produces one |
 | `cmd/hupi-admin`'s `runAddMember`/`runCreateKey` | `cmd/hupi-admin/team.go` | Those two subcommands return "requires the HUPI Enterprise build" instead of running |
 | `cmd/hupi-admin-ui`'s `mountTeamRoutes` | `cmd/hupi-admin-ui/team_handlers.go` | `/api/teams...`, `/api/users/{id}/keys`, `/api/keys/revoke` never mounted; `server.teamStore` stays `nil`, and the one shared route that reads it (`GET /api/users/{id}`) returns empty `teams`/`keys` rather than erroring |

@@ -49,5 +49,12 @@ const layers = [
         ))
       }
     </div>
+
+    <p class="mt-8 text-sm leading-relaxed text-fog-500">
+      These layers apply the same way regardless of how a request authenticated. Tier 3 identity
+      can come from hupi-admin-provisioned API keys or from a real OpenID Connect provider (Azure
+      AD/Entra ID and others) — either way, the resulting request is subject to the same scope
+      filtering, row-level security, and per-team encryption above.
+    </p>
   </div>
 </section>
