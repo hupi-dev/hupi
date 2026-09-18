@@ -244,6 +244,11 @@ func (h *Handler) resolveIdentity(r *http.Request) (identity.Identity, error) {
 	}
 	id, err := h.Auth.Resolve(r.Context(), token)
 	if err != nil {
+		// The real reason (wrong audience, expired, JWKS fetch failure,
+		// unknown key hash, ...) is deliberately not returned to the
+		// caller — that would let an attacker probe why a token was
+		// rejected. It's still worth an operator being able to see it.
+		h.log().Warn("auth: token rejected", "err", err)
 		return identity.Identity{}, errors.New("invalid API key")
 	}
 	return id, nil
