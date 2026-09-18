@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { createClient, streamChat, type ChatMessage } from './hupiClient';
-import { loadConfig } from './config';
+import { loadConfig, OidcSignInRequiredError } from './config';
+import { promptSignInRequired } from './oidcAuth';
 
 const DIFF_SCHEME = 'hupi-inline-diff';
 
@@ -54,6 +55,10 @@ export function registerInlineEdit(context: vscode.ExtensionContext): vscode.Dis
     try {
       cfg = await loadConfig(context);
     } catch (err) {
+      if (err instanceof OidcSignInRequiredError) {
+        promptSignInRequired();
+        return;
+      }
       vscode.window.showErrorMessage(`HUPI config error: ${(err as Error).message}`);
       return;
     }
@@ -81,7 +86,7 @@ export function registerInlineEdit(context: vscode.ExtensionContext): vscode.Dis
       );
     } catch (err) {
       vscode.window.showErrorMessage(
-        `HUPI request failed: ${(err as Error).message}. Check hupi.baseUrl and your API key (HUPI: Set API Key).`,
+        `HUPI request failed: ${(err as Error).message}. Check hupi.baseUrl and your API key (HUPI: Set API Key) or sign-in (HUPI: Sign In).`,
       );
       return;
     }

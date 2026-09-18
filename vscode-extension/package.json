@@ -2,7 +2,7 @@
   "name": "hupi-vscode",
   "displayName": "HUPI",
   "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "hupi",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
@@ -40,6 +40,21 @@
           "type": "string",
           "default": "",
           "description": "If set, routes requests through HUPI's team endpoint (/v1/team/{id}/chat/completions) instead of the private one — for a team-shared HUPI deployment (Tier 3)."
+        },
+        "hupi.oidc.issuerUrl": {
+          "type": "string",
+          "default": "",
+          "description": "OIDC discovery base URL, e.g. https://login.microsoftonline.com/<tenant-id>/v2.0 — set this (and clientAppId, scope) to enable HUPI: Sign In instead of a pasted API key. Leave blank to use HUPI: Set API Key. See docs/OIDC.md."
+        },
+        "hupi.oidc.clientAppId": {
+          "type": "string",
+          "default": "",
+          "description": "The extension's OWN public-client app registration ID used to sign in — NOT the same value as your HUPI deployment's server-side HUPI_OIDC_CLIENT_ID (that one identifies the resource API, not this client). See docs/OIDC.md."
+        },
+        "hupi.oidc.scope": {
+          "type": "string",
+          "default": "",
+          "description": "The OAuth scope(s) to request when signing in, e.g. \"api://<resource-client-id>/access_as_user offline_access openid profile\". Must include offline_access or silent token refresh won't work."
         }
       }
     },
@@ -47,6 +62,14 @@
       {
         "command": "hupi.setApiKey",
         "title": "HUPI: Set API Key"
+      },
+      {
+        "command": "hupi.signIn",
+        "title": "HUPI: Sign In"
+      },
+      {
+        "command": "hupi.signOut",
+        "title": "HUPI: Sign Out"
       },
       {
         "command": "hupi.inlineEdit",

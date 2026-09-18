@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { createClient, streamChat, type ChatMessage } from './hupiClient';
-import { loadConfig } from './config';
+import { loadConfig, OidcSignInRequiredError } from './config';
+import { promptSignInRequired } from './oidcAuth';
 
 // Message shapes crossing the extension-host <-> webview boundary
 // (postMessage/onDidReceiveMessage). Kept as a tiny discriminated union
@@ -90,6 +91,11 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     try {
       cfg = await loadConfig(this.context);
     } catch (err) {
+      if (err instanceof OidcSignInRequiredError) {
+        this.post(webview, { type: 'error', message: err.message });
+        promptSignInRequired();
+        return;
+      }
       this.post(webview, { type: 'error', message: `Config error: ${(err as Error).message}` });
       return;
     }
@@ -114,7 +120,7 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.post(webview, {
         type: 'error',
-        message: `HUPI request failed: ${(err as Error).message}. Check hupi.baseUrl and your API key (HUPI: Set API Key).`,
+        message: `HUPI request failed: ${(err as Error).message}. Check hupi.baseUrl and your API key (HUPI: Set API Key) or sign-in (HUPI: Sign In).`,
       });
       // Roll back the just-added user turn so a failed request doesn't
       // silently poison the conversation history sent on the next try.

@@ -43,6 +43,38 @@ autocomplete/Tab-style ghost text, and agentic multi-file edits.
      deployment and want requests routed through the team endpoint instead
      of your private one.
 
+### Signing in with OIDC/SSO instead of an API key
+
+If your HUPI deployment has OIDC turned on (`docs/OIDC.md`), skip steps 3-4
+above and instead set three more settings under "hupi":
+
+- `hupi.oidc.issuerUrl` — the OIDC discovery URL, e.g.
+  `https://login.microsoftonline.com/<tenant-id>/v2.0`.
+- `hupi.oidc.clientAppId` — the extension's own public-client app
+  registration ID (**not** the same value as your deployment's server-side
+  `HUPI_OIDC_CLIENT_ID`, which identifies the resource API, not this client).
+- `hupi.oidc.scope` — e.g. `api://<resource-client-id>/access_as_user
+  offline_access openid profile`. Must include `offline_access` or you'll
+  be prompted to sign in again every time your access token expires
+  instead of it refreshing silently.
+
+Once set, run **HUPI: Sign In** — your browser opens to your IdP's real
+login page, and control returns to VS Code automatically once you finish.
+**HUPI: Sign Out** clears the stored session. With both `issuerUrl` and
+`clientAppId` set, OIDC is authoritative for the workspace — the extension
+won't fall back to a pasted API key.
+
+Setting up the client app registration (Azure AD/Entra ID example): create
+a **second** app registration distinct from the one behind
+`HUPI_OIDC_CLIENT_ID` (that one's the resource API; this one's the client
+that signs users in), enable "Allow public client flows", add a
+"Mobile and desktop applications" platform with the literal redirect URI
+`http://localhost` (no port — Azure AD matches that against any loopback
+port at sign-in time), and pre-authorize it for the resource app's
+`access_as_user` scope (Enterprise Applications → your resource app →
+Expose an API → Authorized client applications). See `docs/OIDC.md` for
+the resource-app side.
+
 ### Using Remote-SSH / WSL / Dev Containers?
 
 This extension always runs on your **local** machine (`extensionKind:

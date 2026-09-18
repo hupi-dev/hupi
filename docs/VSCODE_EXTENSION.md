@@ -77,6 +77,38 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
    profile name — blank uses HUPI's default chat provider) and
    `hupi.teamId` (only for a Tier 3 shared-team deployment).
 
+### OIDC/SSO sign-in instead of an API key
+
+For a Tier 3 deployment with OIDC configured ([OIDC.md](OIDC.md)), skip
+steps 3-4 above and instead set `hupi.oidc.issuerUrl`,
+`hupi.oidc.clientAppId`, and `hupi.oidc.scope`, then run **HUPI: Sign In**.
+The extension runs a standard Authorization Code + PKCE flow (RFC 8252's
+"native app" pattern — the same one VS Code's own built-in Microsoft/GitHub
+auth uses): it opens your system browser at the IdP's real login page and
+listens on an ephemeral local port for the redirect back, so credentials
+never pass through the extension itself. Device-code flow was deliberately
+not implemented — it's commonly blocked by Azure AD's "Security Defaults"
+(a real result from this project's own Azure AD validation run: every
+device-code attempt failed with `AADSTS530035`, while the browser-redirect
+flow was not affected), and a browser-redirect flow doesn't have that
+failure mode.
+
+`clientAppId` here is a **separate** app registration from your gateway's
+`HUPI_OIDC_CLIENT_ID` — that one identifies the resource API the server
+validates tokens against; this one is the public client that signs users
+in and must be pre-authorized for the resource's scope (see
+[vscode-extension/README.md](../vscode-extension/README.md) for the exact
+Azure AD app-registration steps, including the `http://localhost`
+no-port redirect URI Azure AD's "Mobile and desktop applications" platform
+type expects).
+
+Once both `hupi.oidc.issuerUrl` and `hupi.oidc.clientAppId` are set, OIDC
+is authoritative for the workspace: the extension prompts sign-in rather
+than silently falling back to any previously-stored API key, since that
+key could belong to the wrong identity/team once OIDC is turned on.
+Sessions refresh silently in the background as long as `scope` includes
+`offline_access`; **HUPI: Sign Out** clears the stored session.
+
 ### Using VS Code's Remote-SSH / WSL / Dev Containers
 
 This extension declares `"extensionKind": ["ui"]` (`package.json`), so it
