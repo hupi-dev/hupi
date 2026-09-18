@@ -23,7 +23,14 @@ jobs:
           --health-retries 10
     env:
       PGPASSWORD: hupi
-      HUPI_TEST_DATABASE_URL: postgres://postgres:hupi@localhost:5432/hupi?sslmode=disable
+      # hupi_app, not the postgres superuser: row-level security
+      # (schema/0005) is bypassed by table owners and superusers, so
+      # connecting as postgres here would make internal/store's RLS tests
+      # pass for the wrong reason — they'd never actually exercise RLS at
+      # all. This is also exactly what bootstrap.go's own
+      # resolveDatabaseURL doc comment already says a real deployment
+      # should do.
+      HUPI_TEST_DATABASE_URL: postgres://hupi_app:hupi_app_test_only@localhost:5432/hupi?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -32,11 +39,15 @@ jobs:
       # schema/0*.sql are numbered and must be applied in order — later
       # migrations depend on tables/columns earlier ones create (same
       # sequence docs/INSTALL.md's manual-setup path documents).
+      # schema/0004 deliberately creates hupi_app with no password (so
+      # none lands in a file meant to be checked in) — set one here,
+      # out of band, same as a real install.sh run would.
       - name: Apply schema migrations
         run: |
           for f in schema/0*.sql; do
             psql -h localhost -U postgres -d hupi -f "$f"
           done
+          psql -h localhost -U postgres -d hupi -c "alter role hupi_app with password 'hupi_app_test_only'"
       - name: go build
         run: go build ./...
       - name: go vet
@@ -53,7 +64,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
@@ -69,7 +80,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
       - run: npm ci
       # Catches an Astro syntax error, a broken import, or (as happened
       # once) a missing space around an inline link that only shows up in
