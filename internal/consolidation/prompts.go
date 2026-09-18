@@ -54,16 +54,52 @@ func buildSummaryPrompt(level, period string, sources []textSource, establishedR
 	return sb.String()
 }
 
-// extractJSON pulls the first {...} block out of a model response, since
-// even when instructed to return "JSON only," models sometimes wrap it in
-// prose or a markdown code fence. A hardened build should use each
-// provider's structured-output/tool-calling mode instead of parsing free
-// text — this is a pragmatic stand-in for the sketch.
+// extractJSON pulls the first complete, balanced {...} object out of a
+// model response, since even when instructed to return "JSON only,"
+// models sometimes wrap it in prose or a markdown code fence. Scans by
+// brace depth rather than just first-'{'/last-'}', so it stops at the
+// first object's real closing brace instead of spanning all the way to
+// an unrelated '}' in trailing prose — and skips over braces inside
+// quoted string values (e.g. a fact whose text happens to mention "{" or
+// "}") so those don't miscount the depth. A markdown fence needs no
+// special-casing: the scan already ignores everything before the first
+// '{' and after that object's matching '}', fence characters included.
+//
+// A hardened build should use each provider's structured-output/
+// tool-calling mode instead of parsing free text at all
+// (internal/provider has no such plumbing today) — this is a more
+// careful stand-in, not that fix.
 func extractJSON(s string) string {
 	start := strings.IndexByte(s, '{')
-	end := strings.LastIndexByte(s, '}')
-	if start == -1 || end == -1 || end < start {
+	if start == -1 {
 		return s
 	}
-	return s[start : end+1]
+
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			escaped = false
+		case c == '\\' && inString:
+			escaped = true
+		case c == '"':
+			inString = !inString
+		case inString:
+			// braces inside a quoted string don't affect depth
+		case c == '{':
+			depth++
+		case c == '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	// Never balanced — same fallback as the original: hand back whatever
+	// followed the opening brace and let json.Unmarshal produce the real
+	// error.
+	return s[start:]
 }
