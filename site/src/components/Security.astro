@@ -34,11 +34,31 @@ const layers = [
       </p>
       <p class="mt-4 leading-relaxed text-fog-300">
         HUPI assumes any one layer can fail, so it doesn't rely on a single one. Here's what
-        each independent layer actually does.
+        each independent layer actually does — starting with how you get in at all.
       </p>
     </div>
 
-    <div class="mt-12 grid gap-px overflow-hidden rounded-xl border border-white/10 bg-white/5 sm:grid-cols-2">
+    <div id="identity" class="mt-10 rounded-xl border border-white/10 bg-gradient-to-r from-ember-500/10 to-transparent p-6 sm:p-8">
+      <p class="font-mono-tight text-xs uppercase tracking-widest text-ember-500">Identity, before isolation</p>
+      <h3 class="mt-2 text-lg font-semibold text-fog-100">
+        Single sign-on via OpenID Connect (OIDC) — Azure AD/Entra ID, Okta, Auth0, Google Workspace
+      </h3>
+      <p class="mt-2 max-w-3xl text-sm leading-relaxed text-fog-300">
+        Tier 3 can authenticate every request against your own identity provider instead of (or
+        alongside) hupi-admin-provisioned API keys — real SSO, not a bolted-on integration. Team
+        membership comes from your directory's own group/role claims, so adding someone to a team
+        is a change in your existing IdP, not a separate HUPI admin step. However a request gets
+        authenticated — API key or OIDC — it lands subject to the exact same four independent
+        isolation layers below, with no separate code path and no separate trust boundary.
+      </p>
+      <p class="mt-3 text-sm">
+        <a href="/docs#full-reference" class="text-ember-500 underline decoration-dotted hover:text-ember-400">
+          How OIDC/SSO works with HUPI, and how to set it up →
+        </a>
+      </p>
+    </div>
+
+    <div class="mt-6 grid gap-px overflow-hidden rounded-xl border border-white/10 bg-white/5 sm:grid-cols-2">
       {
         layers.map((layer, i) => (
           <div class="bg-navy-950 p-6 sm:p-8">
@@ -49,12 +69,5 @@ const layers = [
         ))
       }
     </div>
-
-    <p class="mt-8 text-sm leading-relaxed text-fog-500">
-      These layers apply the same way regardless of how a request authenticated. Tier 3 identity
-      can come from hupi-admin-provisioned API keys or from a real OpenID Connect provider (Azure
-      AD/Entra ID and others) — either way, the resulting request is subject to the same scope
-      filtering, row-level security, and per-team encryption above.
-    </p>
   </div>
 </section>
