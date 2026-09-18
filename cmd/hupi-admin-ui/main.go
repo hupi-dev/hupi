@@ -45,7 +45,7 @@ func run() error {
 	authStore := auth.New(deps.DB, deps.Keys)
 	var teamStore auth.TeamAuthenticator
 	if auth.NewTeamAuthenticator != nil {
-		teamStore = auth.NewTeamAuthenticator(deps.DB)
+		teamStore = auth.NewTeamAuthenticator(deps.DB, deps.Keys)
 	}
 	srv := &server{store: authStore, teamStore: teamStore, db: deps.DB}
 

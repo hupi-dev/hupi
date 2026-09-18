@@ -190,7 +190,13 @@ type TeamAuthenticator interface {
 // when the Tier-3 extension is present. Every caller that needs a
 // TeamAuthenticator checks this for nil first: nil means "no team auth
 // available," the correct and normal Tier 1/2 state, not an error.
-var NewTeamAuthenticator func(db *sql.DB) TeamAuthenticator
+//
+// Takes keys alongside db so a Tier-3 TeamAuthenticator that needs to
+// provision scopes itself (e.g. JIT-creating a user/team the first time
+// an external identity provider mentions one) can do so through the same
+// Store.CreateUser/CreateTeam path everything else uses, DEK provisioning
+// included — not a second, divergent way of creating a scope.
+var NewTeamAuthenticator func(db *sql.DB, keys *crypto.KeyStore) TeamAuthenticator
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `select id, coalesce(email, ''), created_at from users order by created_at`)

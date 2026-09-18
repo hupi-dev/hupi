@@ -146,5 +146,5 @@ func resolveAuth(deps *bootstrap.Deps) (gateway.Authenticator, error) {
 	if auth.NewTeamAuthenticator == nil {
 		return nil, fmt.Errorf("HUPI_REQUIRE_AUTH=true requires the HUPI Enterprise build (Tier 3) — see docs/INSTALL.md")
 	}
-	return auth.NewTeamAuthenticator(deps.DB), nil
+	return auth.NewTeamAuthenticator(deps.DB, deps.Keys), nil
 }

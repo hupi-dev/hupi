@@ -63,7 +63,7 @@ func run() error {
 	store := auth.New(deps.DB, deps.Keys)
 	var teamStore auth.TeamAuthenticator
 	if auth.NewTeamAuthenticator != nil {
-		teamStore = auth.NewTeamAuthenticator(deps.DB)
+		teamStore = auth.NewTeamAuthenticator(deps.DB, deps.Keys)
 	}
 
 	switch subcommand {

@@ -41,7 +41,7 @@ func testServer(t *testing.T) (*server, *sql.DB) {
 	keys := crypto.NewKeyStore(db, make([]byte, 32)) // all-zero test KEK, never used for real data
 	var teamStore auth.TeamAuthenticator
 	if auth.NewTeamAuthenticator != nil {
-		teamStore = auth.NewTeamAuthenticator(db)
+		teamStore = auth.NewTeamAuthenticator(db, keys)
 	}
 	return &server{store: auth.New(db, keys), teamStore: teamStore, db: db}, db
 }
