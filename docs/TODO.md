@@ -19,7 +19,10 @@ exists outside a real VS Code process — every previously-zero-coverage
 file (`chatViewProvider.ts`, `config.ts`, `extension.ts`, `inlineEdit.ts`,
 `oidcAuth.ts`, `secrets.ts`) now has real tests, including an integration
 test that drives the actual (unexported) loopback HTTP server code in
-`oidcAuth.ts` end to end rather than mocking it away.
+`oidcAuth.ts` end to end rather than mocking it away. `internal/pgfmt`
+(the last zero-coverage Go package) turned up a real bug along the way:
+`ParseTextArray` didn't actually reverse `TextArray` for any item
+containing a literal comma — fixed and covered by a round-trip test.
 
 ## 1. Zero analytics installed anywhere
 
@@ -48,9 +51,6 @@ heavily caged) would substantially shorten time-to-"this actually works."
 
 ## Smaller items worth naming
 
-- **`internal/pgfmt`** — still the one Go package with zero test files.
-  Smaller and lower-risk than everything else already closed, which is why
-  it's still open, not because it doesn't matter.
 - **Team-voice consolidation quality is self-flagged as "unvalidated"**
   (`docs/TIER3_PLAN.md` §10 Risks) — worth real validation now that OIDC
   lowers the friction to get real teams actually using shared workspaces.
