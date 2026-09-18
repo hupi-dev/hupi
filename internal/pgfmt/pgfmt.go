@@ -27,19 +27,43 @@ func TextArray(items []string) string {
 
 // ParseTextArray reverses TextArray for values read back out of Postgres
 // (e.g. episodes.retrieved_summary_ids on a trace-inspection read path).
+//
+// Scans by quote/escape state rather than a naive strings.Split(",") —
+// splitting on every comma would incorrectly break an item that itself
+// contains a literal comma into multiple items, since TextArray only
+// escapes '"' and '\', not ','. None of today's actual values (episode
+// ids, dates, "kind:slug" entity ids) can contain a comma, but this is
+// this function's own documented contract ("reverses TextArray"), and a
+// future caller passing more general text through it shouldn't inherit a
+// silent data-corruption bug.
 func ParseTextArray(literal string) []string {
 	trimmed := strings.TrimSuffix(strings.TrimPrefix(literal, "{"), "}")
 	if trimmed == "" {
 		return nil
 	}
-	parts := strings.Split(trimmed, ",")
-	out := make([]string, len(parts))
-	for i, p := range parts {
-		p = strings.TrimPrefix(strings.TrimSuffix(p, `"`), `"`)
-		p = strings.ReplaceAll(p, `\"`, `"`)
-		p = strings.ReplaceAll(p, `\\`, `\`)
-		out[i] = p
+
+	var out []string
+	var current strings.Builder
+	inQuotes := false
+	escaped := false
+	for i := 0; i < len(trimmed); i++ {
+		c := trimmed[i]
+		switch {
+		case escaped:
+			current.WriteByte(c)
+			escaped = false
+		case c == '\\':
+			escaped = true
+		case c == '"':
+			inQuotes = !inQuotes
+		case c == ',' && !inQuotes:
+			out = append(out, current.String())
+			current.Reset()
+		default:
+			current.WriteByte(c)
+		}
 	}
+	out = append(out, current.String())
 	return out
 }
 
