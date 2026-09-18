@@ -147,7 +147,13 @@ async function runLoopbackAuth(settings: OidcSettings, cancelToken: vscode.Cance
 
   const server = http.createServer();
   const port = await listenOnEphemeralPort(server);
-  const redirectUri = `http://127.0.0.1:${port}/callback`;
+  // Azure AD's loopback special-casing (RFC 8252 §7.3) is keyed on the
+  // literal registered value "http://localhost" (a hostname, not the IP
+  // 127.0.0.1) and only lets the *port* vary at request time — everything
+  // else, including the path, must match exactly what's registered. Since
+  // the app is registered with no path, this must have none either (no
+  // "/callback" or similar), or Azure rejects it with AADSTS50011.
+  const redirectUri = `http://localhost:${port}`;
 
   try {
     const code = await waitForCallback(server, state, cancelToken, () => {
@@ -191,11 +197,13 @@ function listenOnEphemeralPort(server: http.Server): Promise<number> {
 }
 
 /**
- * Waits for exactly one /callback request carrying a matching `state`,
- * opening the browser (via onReady, called once the server is already
- * listening) at the same time. Settles exactly once, on whichever comes
- * first: a valid callback, an error/denial callback, a state mismatch,
- * timeout, cancellation, or the browser failing to open.
+ * Waits for exactly one request carrying a matching `state` at the
+ * redirect URI's root path (no "/callback" or similar — the redirect URI
+ * has no path, since none is registered; see runLoopbackAuth), opening
+ * the browser (via onReady, called once the server is already listening)
+ * at the same time. Settles exactly once, on whichever comes first: a
+ * valid callback, an error/denial callback, a state mismatch, timeout,
+ * cancellation, or the browser failing to open.
  */
 function waitForCallback(
   server: http.Server,
@@ -219,8 +227,8 @@ function waitForCallback(
     }
 
     server.on('request', (req, res) => {
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      if (url.pathname !== '/callback') {
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      if (url.pathname !== '/') {
         res.writeHead(404).end();
         return;
       }
