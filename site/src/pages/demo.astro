@@ -1,0 +1,252 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import FinalCta from '../components/FinalCta.astro';
+import { DEMO_API_BASE } from '../lib/links.js';
+---
+
+<Layout
+  title="Live demo — HUPI"
+  description="Chat with a real HUPI gateway, trigger real consolidation on demand, and watch it recall what you told it — no signup, no install."
+>
+  <Nav />
+  <main>
+    <section class="relative overflow-hidden border-b border-white/5">
+      <div
+        class="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"
+      >
+      </div>
+      <div class="relative mx-auto max-w-3xl px-6 pb-16 pt-20 text-center sm:pt-28">
+        <p
+          class="font-mono-tight mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-navy-800/60 px-4 py-1.5 text-xs uppercase tracking-widest text-fog-300"
+        >
+          Live demo — no signup
+        </p>
+        <h1 class="text-balance text-4xl font-extrabold tracking-tight text-fog-100 sm:text-5xl">
+          Watch it remember something.
+        </h1>
+        <p class="text-balance mx-auto mt-6 max-w-xl text-lg text-fog-300">
+          This is a real HUPI gateway, not a mockup — same code as the self-hosted
+          build. Tell it something, trigger the real consolidation pass on demand
+          (normally an overnight job), then start a fresh conversation and ask about
+          it.
+        </p>
+      </div>
+    </section>
+
+    <section class="border-b border-white/5 bg-navy-950/40">
+      <div class="mx-auto max-w-2xl px-6 py-16 sm:py-20">
+        <div class="rounded-xl border border-white/10 bg-navy-800/60 shadow-2xl shadow-black/40">
+          <div id="demo-start-panel" class="flex flex-col items-center gap-4 px-6 py-16 text-center">
+            <button
+              id="demo-start-btn"
+              type="button"
+              class="rounded-lg bg-ember-500 px-6 py-3 text-base font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Start the live demo
+            </button>
+            <p id="demo-status" class="min-h-[1.25rem] text-sm text-fog-500"></p>
+            <p class="text-xs text-fog-700">
+              Anonymous, capped, and auto-expiring — nothing you type here is kept
+              beyond the session.
+            </p>
+          </div>
+
+          <div id="demo-chat-panel" class="hidden flex-col">
+            <div
+              id="demo-transcript"
+              class="flex max-h-96 min-h-[16rem] flex-col gap-3 overflow-y-auto px-5 py-5"
+            >
+            </div>
+
+            <form id="demo-form" class="flex gap-2 border-t border-white/10 px-4 py-3">
+              <input
+                id="demo-input"
+                type="text"
+                autocomplete="off"
+                placeholder={`My project codename is Aurora and it ships in March.`}
+                class="flex-1 rounded-lg border border-white/10 bg-navy-900 px-3 py-2 text-sm text-fog-100 placeholder:text-fog-700 focus:border-ember-500/60 focus:outline-none"
+              />
+              <button
+                type="submit"
+                class="rounded-lg bg-ember-500 px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-ember-400"
+              >
+                Send
+              </button>
+            </form>
+
+            <div class="flex items-center justify-between gap-4 border-t border-white/10 px-4 py-3">
+              <span id="demo-remaining" class="text-xs text-fog-500"></span>
+              <button
+                id="demo-consolidate-btn"
+                type="button"
+                class="shrink-0 rounded-lg border border-ember-500/40 px-4 py-2 text-sm font-semibold text-ember-400 transition-colors hover:border-ember-500/70 hover:bg-ember-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Watch it consolidate →
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <p class="mt-6 text-center text-sm text-fog-500">
+          Prefer to run it yourself instead?{' '}
+          <a href="/docs#quick-install" class="text-ember-500 underline decoration-dotted hover:text-ember-400">
+            Self-host it in a few minutes
+          </a>.
+        </p>
+      </div>
+    </section>
+  </main>
+  <FinalCta />
+
+  <script define:vars={{ apiBase: DEMO_API_BASE }}>
+    const startBtn = document.getElementById('demo-start-btn');
+    const startPanel = document.getElementById('demo-start-panel');
+    const chatPanel = document.getElementById('demo-chat-panel');
+    const transcript = document.getElementById('demo-transcript');
+    const form = document.getElementById('demo-form');
+    const input = document.getElementById('demo-input');
+    const remainingEl = document.getElementById('demo-remaining');
+    const consolidateBtn = document.getElementById('demo-consolidate-btn');
+    const statusEl = document.getElementById('demo-status');
+
+    let token = null;
+    let messagesRemaining = 0;
+    // The running turn history sent with every request — HUPI's chat
+    // route is stateless per call, same contract as any OpenAI-compatible
+    // API, so the client (not the server) carries same-conversation
+    // context. This is reset on consolidate, which is exactly what makes
+    // "start a fresh conversation and ask about it" a real fresh
+    // conversation rather than the model just re-reading old turns.
+    let conversation = [];
+
+    function appendMessage(role, text) {
+      const div = document.createElement('div');
+      div.className =
+        role === 'user'
+          ? 'ml-auto max-w-[85%] rounded-lg rounded-br-sm bg-ember-500 px-3 py-2 text-sm text-ink'
+          : 'mr-auto max-w-[85%] rounded-lg rounded-bl-sm bg-navy-700 px-3 py-2 text-sm text-fog-100';
+      div.textContent = text;
+      transcript.appendChild(div);
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    function appendSystemNote(text) {
+      const div = document.createElement('div');
+      div.className = 'mx-auto max-w-[90%] rounded-md border border-white/10 px-3 py-2 text-center text-xs text-fog-500';
+      div.textContent = text;
+      transcript.appendChild(div);
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    function updateRemaining() {
+      remainingEl.textContent = `${messagesRemaining} message${messagesRemaining === 1 ? '' : 's'} left this session`;
+    }
+
+    function endSession(message) {
+      token = null;
+      conversation = [];
+      chatPanel.classList.add('hidden');
+      chatPanel.classList.remove('flex');
+      startPanel.classList.remove('hidden');
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start the live demo';
+      statusEl.textContent = message;
+    }
+
+    async function startSession() {
+      startBtn.disabled = true;
+      startBtn.textContent = 'Starting…';
+      statusEl.textContent = '';
+      try {
+        const res = await fetch(`${apiBase}/demo/session`, { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        token = data.token;
+        messagesRemaining = data.messages_remaining;
+        conversation = [];
+        transcript.innerHTML = '';
+        startPanel.classList.add('hidden');
+        chatPanel.classList.remove('hidden');
+        chatPanel.classList.add('flex');
+        updateRemaining();
+        appendSystemNote('Session started — try telling it something, e.g. "My project codename is Aurora and it ships in March."');
+        input.focus();
+      } catch (err) {
+        statusEl.textContent = 'Could not start the demo right now — please try again in a moment.';
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start the live demo';
+      }
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text || !token) return;
+      input.value = '';
+      appendMessage('user', text);
+      conversation.push({ role: 'user', content: text });
+
+      try {
+        const res = await fetch(`${apiBase}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ messages: conversation }),
+        });
+        if (res.status === 401) {
+          endSession('This demo session has ended — start a new one to keep exploring.');
+          return;
+        }
+        if (!res.ok) {
+          appendSystemNote('Something went wrong on that turn — try again.');
+          return;
+        }
+        const data = await res.json();
+        const reply = data.choices?.[0]?.message?.content ?? '(no reply)';
+        appendMessage('assistant', reply);
+        conversation.push({ role: 'assistant', content: reply });
+        messagesRemaining -= 1;
+        updateRemaining();
+        if (messagesRemaining <= 0) {
+          endSession("You've used every message in this demo session — start a new one to keep exploring, or install HUPI yourself.");
+        }
+      } catch (err) {
+        appendSystemNote('Network error — try again.');
+      }
+    });
+
+    consolidateBtn.addEventListener('click', async () => {
+      if (!token) return;
+      consolidateBtn.disabled = true;
+      consolidateBtn.textContent = 'Consolidating…';
+      try {
+        const res = await fetch(`${apiBase}/demo/consolidate-now`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.status === 401) {
+          endSession('This demo session has ended — start a new one to keep exploring.');
+          return;
+        }
+        if (res.status === 429) {
+          appendSystemNote("This session has already used its consolidate-now runs, but what you already consolidated is still there — start a fresh conversation and ask about it.");
+          return;
+        }
+        if (!res.ok) {
+          appendSystemNote('Consolidation failed — try again in a moment.');
+          return;
+        }
+        conversation = [];
+        transcript.innerHTML = '';
+        appendSystemNote('Consolidated — that ran the exact same job HUPI runs nightly in production, just triggered right now. This is a brand-new conversation below — try: "When is my project shipping and what\'s its codename?"');
+      } catch (err) {
+        appendSystemNote('Network error — try again.');
+      } finally {
+        consolidateBtn.disabled = false;
+        consolidateBtn.textContent = 'Watch it consolidate →';
+      }
+    });
+
+    startBtn.addEventListener('click', startSession);
+  </script>
+</Layout>

@@ -29,3 +29,11 @@ export const VSCODE_MARKETPLACE_URL =
 
 export const LICENSE_LABEL = 'MIT';
 export const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;
+
+// cmd/hupi-demo's public origin (docs/TODO.md #2, internal/demo) — a
+// separate process/port from this site, reverse-proxied with TLS. This
+// placeholder must be replaced with the real deployed origin before
+// /demo goes live; until then the page's "Start the live demo" button
+// will fail with a network/CORS error, not silently do nothing, so a
+// stale placeholder is loud rather than quiet.
+export const DEMO_API_BASE = 'https://demo.hupi.dev';
