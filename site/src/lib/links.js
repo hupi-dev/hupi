@@ -1,6 +1,10 @@
 // Central place for placeholder values that a human must replace before
 // this site goes live. Nothing else in the codebase should hardcode these.
 
+// Moved from the samuel-sujith personal account to the hupi-dev org on
+// 2026-09-19 — GitHub's redirect covers old links indefinitely, but
+// every reference in this codebase points here directly rather than
+// relying on it.
 export const GITHUB_URL = 'https://github.com/hupi-dev/hupi';
 
 // Tier 3 (team/shared-workspace support) lives in a separate,
