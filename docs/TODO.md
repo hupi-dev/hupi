@@ -27,7 +27,16 @@ Team-voice consolidation quality (`docs/TIER3_PLAN.md` §10) is now
 validated with a real-LLM eval (`hupi-t3`'s `internal/consolidation/team_test.go`)
 rather than just self-flagged as untested — it found and led to fixing a
 real prompt-quality issue (the model narrating its own privacy redactions)
-along the way.
+along the way. Item 2 (no hosted demo) is closed too: `cmd/hupi-demo`
+serves anonymous, cost-capped guest sessions against the real
+`gateway.Handler` (no mock, no separate code path), with a `/demo`
+page wired up site-wide, live at `https://demo.hupi.dev` — DNS, nginx,
+a real TLS cert, and systemd units for both it and the main gateway,
+all verified end to end. Building it live surfaced two real, previously
+undiscovered ops gaps on the production VM itself (`ANTHROPIC_API_KEY`/
+`OPENAI_API_KEY` were only ever exported ad hoc in a shell session, never
+persisted, and the Postgres container's restart policy was `no`) — both
+fixed, not just worked around.
 
 ## 1. Zero analytics installed anywhere
 
@@ -43,17 +52,6 @@ before spending money on ads, not after. Once it ships, `/privacy` needs a
 cookie/tracking disclosure added — it currently correctly says "we collect
 nothing," which stops being true the moment this lands.
 
-## 2. No hosted demo — self-hosting is the only way to ever see the product work
-
-Traced the real first-run path: even the fastest documented route (Docker
-Compose) needs a real Postgres, a real LLM provider API key, and 3+ manual
-steps before anyone sees a single response. No sandbox, no live instance,
-nothing beyond the homepage's demo GIF.
-
-**Why**: for an infra/dev-tool product, that's a lot of commitment to ask
-before someone's confirmed they like it. A rate-limited hosted sandbox (even
-heavily caged) would substantially shorten time-to-"this actually works."
-
 ## Smaller items worth naming
 
 - **No case studies/testimonials/about page anywhere** — for Tier 3 buyers
@@ -67,7 +65,6 @@ heavily caged) would substantially shorten time-to-"this actually works."
 
 ## If picking just one to start
 
-**Analytics.** CI/CD, pricing, and the vulnerability-disclosure gap from the
-original top-3 are all closed now — of what's left, analytics is the one
-blocking something already in motion (measuring the Google Ads campaign),
-not just a general improvement.
+**Analytics.** It's the only major item left, and it's blocking something
+already in motion (measuring the Google Ads campaign), not just a general
+improvement.

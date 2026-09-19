@@ -9,17 +9,18 @@
         A real terminal session against a live HUPI gateway — not a mockup.
       </p>
       <p class="mx-auto mt-4 max-w-2xl leading-relaxed text-fog-300">
-        One request, no mention of "Aurora" in it — HUPI recalls what it already knew, injects it
-        before forwarding to the model, and logs the retrieval so it's auditable afterward.
+        Tell it something, trigger the real consolidation pass on demand instead of waiting
+        overnight, then start a brand-new conversation — no mention of "Aurora" in it — and watch
+        it recall exactly what it was told.
       </p>
     </div>
 
     <div class="mt-10 overflow-hidden rounded-xl border border-white/10 bg-ink shadow-2xl shadow-black/40">
       <img
         src="/demo.gif"
-        alt="Terminal recording: a curl request to HUPI's chat completions endpoint returns a response referencing memory that wasn't in the request, followed by hupi-audit showing the retrieval was logged with a full-confidence gate."
-        width="1102"
-        height="567"
+        alt="Terminal recording against the live public demo: a curl request tells HUPI a project's codename and ship date, a consolidate-now call runs the real nightly consolidation job on demand, and a brand-new conversation that never mentions the codename gets a reply correctly recalling both facts."
+        width="1105"
+        height="529"
         loading="lazy"
         class="w-full"
       />
