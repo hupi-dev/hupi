@@ -59,7 +59,7 @@ function required. Deploy it with any of:
 
 Centralized in `src/lib/links.js`. All resolved:
 
-- `GITHUB_URL` — `https://github.com/samuel-sujith/hupi` (public).
+- `GITHUB_URL` — `https://github.com/hupi-dev/hupi` (public).
 - `DOCS_URL` — `${GITHUB_URL}/tree/main/docs` (no standalone docs site
   exists yet, so this points into the repo itself).
 - `CONTACT_EMAIL` — `samuel.sujith@gmail.com`.

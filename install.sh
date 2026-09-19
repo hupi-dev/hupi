@@ -16,7 +16,7 @@
 #   ./install.sh --tier=3 --yes      # Tier 3 needs the separately-licensed
 #                                     # hupi-t3 extension already overlaid
 #                                     # onto this checkout first — see
-#                                     # https://github.com/samuel-sujith/hupi-t3
+#                                     # https://github.com/hupi-dev/hupi-t3
 #   ./install.sh --help              # full flag reference
 #
 # Safe to re-run: every step checks what's already true (schema already
@@ -92,7 +92,7 @@ Tier:
                              team provisioning). Prompted if omitted.
                              Tier 3 requires the separately-licensed hupi-t3
                              extension already overlaid onto this checkout
-                             (see https://github.com/samuel-sujith/hupi-t3)
+                             (see https://github.com/hupi-dev/hupi-t3)
                              — this installer refuses --tier=3 without it,
                              rather than generating an env file for a
                              gateway that would then fail to start.
@@ -338,7 +338,7 @@ resolve_tier() {
       note "  2) Professional Single   — same install as 1; IT-managed, not self-managed"
       note "  3) Professional Shared   — teams, API-key auth, admin provisioning"
       note "     (requires the separately-licensed hupi-t3 extension already"
-      note "     overlaid onto this checkout — see https://github.com/samuel-sujith/hupi-t3)"
+      note "     overlaid onto this checkout — see https://github.com/hupi-dev/hupi-t3)"
       TIER="$(ask "Tier (1/2/3)" "1")"
     fi
   fi
@@ -355,7 +355,7 @@ resolve_tier() {
     # loud failure, not silently falling back to Tier 1/2 behavior).
     # Catching that here, before generating an env file that would only
     # produce a gateway that won't start, is worth the extra check.
-    [[ -f "$REPO_ROOT/internal/auth/team.go" ]] || die "Tier 3 requires the separately-licensed hupi-t3 extension, not present in this checkout — see https://github.com/samuel-sujith/hupi-t3 (its build.sh overlays the extension's files onto a checkout like this one before building). Run --tier=1 or --tier=2 if you don't have a Tier 3 license."
+    [[ -f "$REPO_ROOT/internal/auth/team.go" ]] || die "Tier 3 requires the separately-licensed hupi-t3 extension, not present in this checkout — see https://github.com/hupi-dev/hupi-t3 (its build.sh overlays the extension's files onto a checkout like this one before building). Run --tier=1 or --tier=2 if you don't have a Tier 3 license."
   fi
   if [[ -z "$ADMIN_UI" ]]; then
     [[ "$TIER" == "3" ]] && ADMIN_UI=1 || ADMIN_UI=0

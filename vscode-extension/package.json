@@ -8,11 +8,11 @@
   "icon": "resources/marketplace-icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/samuel-sujith/hupi",
+    "url": "https://github.com/hupi-dev/hupi",
     "directory": "vscode-extension"
   },
   "bugs": {
-    "url": "https://github.com/samuel-sujith/hupi/issues"
+    "url": "https://github.com/hupi-dev/hupi/issues"
   },
   "engines": {
     "vscode": "^1.90.0"

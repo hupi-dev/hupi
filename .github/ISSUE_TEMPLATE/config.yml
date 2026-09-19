@@ -1,7 +1,7 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/samuel-sujith/hupi/issues/new
+    url: https://github.com/hupi-dev/hupi/issues/new
     about: Open a regular issue per SECURITY.md — include what you found, how to reproduce it, and its impact if known.
   - name: Tier 3 (team/shared-workspace) questions or licensing
     url: mailto:work@hupi.dev

@@ -34,7 +34,7 @@ multi-user authentication, either API keys or OpenID Connect against an
 external identity provider — see [docs/OIDC.md](docs/OIDC.md)) is a
 separate, commercially-licensed
 extension, developed in a private repo
-([hupi-t3](https://github.com/samuel-sujith/hupi-t3)) and not included
+([hupi-t3](https://github.com/hupi-dev/hupi-t3)) and not included
 here. This repo compiles and runs completely standalone without it —
 Tier 1/2 has no dependency on hupi-t3 at all, not even at build time.
 The two connect only through a handful of nil-by-default extension

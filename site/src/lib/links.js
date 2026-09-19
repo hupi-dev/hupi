@@ -1,7 +1,7 @@
 // Central place for placeholder values that a human must replace before
 // this site goes live. Nothing else in the codebase should hardcode these.
 
-export const GITHUB_URL = 'https://github.com/samuel-sujith/hupi';
+export const GITHUB_URL = 'https://github.com/hupi-dev/hupi';
 
 // Tier 3 (team/shared-workspace support) lives in a separate,
 // commercially-licensed, *private* repo (hupi-t3) — see ARCHITECTURE.md §

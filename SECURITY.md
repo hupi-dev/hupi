@@ -8,7 +8,7 @@ update before reporting an issue that a newer version may already fix.
 
 ## Reporting a vulnerability
 
-Open a [GitHub Issue](https://github.com/samuel-sujith/hupi/issues) describing
+Open a [GitHub Issue](https://github.com/hupi-dev/hupi/issues) describing
 the vulnerability. Include what you found, how to reproduce it, and its
 impact if known.
 

@@ -586,7 +586,7 @@ This repo (MIT) is Tier 1/2, complete and free forever. Tier 3 — real
 end-user/team authentication, the `/v1/team/...` routes, team CLI
 subcommands, and the team-voice consolidation prompt — lives in a
 separate, commercially-licensed repo,
-[hupi-t3](https://github.com/samuel-sujith/hupi-t3), not included here.
+[hupi-t3](https://github.com/hupi-dev/hupi-t3), not included here.
 
 Two things made this possible without forking the codebase:
 
