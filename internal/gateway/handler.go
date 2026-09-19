@@ -211,6 +211,14 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	}
 	metrics.RetrievalGateTotal.WithLabelValues(string(result.Gate)).Inc()
 
+	// Separate, orthogonal opt-out from retrieval above: skips writing this
+	// turn to memory at all. Added for clients whose turns are never worth
+	// remembering — e.g. a ghost-text-style inline completion firing on
+	// every debounced typing pause (vscode-extension's
+	// inlineCompletionProvider.ts) — since capture previously ran
+	// unconditionally regardless of how trivial the turn was.
+	skipCapture := r.Header.Get("X-Hupi-Capture") == "off"
+
 	// Step 3: context injection.
 	augmented := messages
 	if result.ContextMessage != "" {
@@ -225,10 +233,10 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	inputText := lastUserMessage(messages)
 
 	if req.Stream {
-		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner)
+		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture)
 		return
 	}
-	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner)
+	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture)
 }
 
 // resolveIdentity authenticates a request. With h.Auth nil (Tier 1/2
@@ -361,6 +369,7 @@ func (h *Handler) handleNonStream(
 	result RetrievalResult,
 	inputText string,
 	actor string,
+	skipCapture bool,
 ) {
 	// Model is left blank here on purpose: req.Model was used above only
 	// to pick a provider profile (resolveProvider) and may well be a
@@ -388,14 +397,18 @@ func (h *Handler) handleNonStream(
 	// request — losing this one turn's memory is preferable to losing the
 	// answer the user is waiting on. That's a deliberate availability vs.
 	// durability call, not an oversight.
-	captureStart := time.Now()
-	captureErr := h.Capturer.Capture(ctx, scope, ep)
-	metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
-	if captureErr != nil {
-		metrics.CaptureTotal.WithLabelValues("error").Inc()
-		h.log().Error("capture failed", "episode_id", ep.ID, "error", captureErr)
+	if skipCapture {
+		metrics.CaptureTotal.WithLabelValues("skipped").Inc()
 	} else {
-		metrics.CaptureTotal.WithLabelValues("ok").Inc()
+		captureStart := time.Now()
+		captureErr := h.Capturer.Capture(ctx, scope, ep)
+		metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
+		if captureErr != nil {
+			metrics.CaptureTotal.WithLabelValues("error").Inc()
+			h.log().Error("capture failed", "episode_id", ep.ID, "error", captureErr)
+		} else {
+			metrics.CaptureTotal.WithLabelValues("ok").Inc()
+		}
 	}
 
 	out := chatCompletionResponse{
@@ -428,6 +441,7 @@ func (h *Handler) handleStream(
 	result RetrievalResult,
 	inputText string,
 	actor string,
+	skipCapture bool,
 ) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -495,14 +509,18 @@ drain:
 	metrics.ProviderCallDuration.WithLabelValues(target.Name(), target.Vendor(), "true").Observe(time.Since(streamStart).Seconds())
 
 	ep := h.buildEpisode(id, target, inputText, buf.String(), result, truncated, actor)
-	captureStart := time.Now()
-	captureErr := h.Capturer.Capture(ctx, scope, ep)
-	metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
-	if captureErr != nil {
-		metrics.CaptureTotal.WithLabelValues("error").Inc()
-		h.log().Error("capture failed", "episode_id", ep.ID, "error", captureErr)
+	if skipCapture {
+		metrics.CaptureTotal.WithLabelValues("skipped").Inc()
 	} else {
-		metrics.CaptureTotal.WithLabelValues("ok").Inc()
+		captureStart := time.Now()
+		captureErr := h.Capturer.Capture(ctx, scope, ep)
+		metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
+		if captureErr != nil {
+			metrics.CaptureTotal.WithLabelValues("error").Inc()
+			h.log().Error("capture failed", "episode_id", ep.ID, "error", captureErr)
+		} else {
+			metrics.CaptureTotal.WithLabelValues("ok").Inc()
+		}
 	}
 
 	// The terminal [DONE] is held back until capture has been attempted:

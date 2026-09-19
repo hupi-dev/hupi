@@ -172,6 +172,16 @@ something worth making async:
 - Net effect: capture is both *faster* than the original async design (no
   scheduling/queue overhead), and strictly more durable, because durability
   no longer depends on a background worker running before the next crash.
+- **Per-request opt-out**: `X-Hupi-Capture: off` skips writing this turn to
+  memory at all — a separate, orthogonal header from retrieval's
+  `X-Hupi-Memory: off` above (one client request can set either, both, or
+  neither). Added for clients whose turns are never worth remembering,
+  e.g. a ghost-text-style inline completion firing on every debounced
+  typing pause (`vscode-extension`'s `inlineCompletionProvider.ts`) — before
+  this existed, capture ran unconditionally regardless of how trivial the
+  turn was, so turning that feature on would flood memory with a durable
+  row per keystroke pause. `hupi_capture_total`'s `result` label gains a
+  third value, `skipped`, alongside `ok`/`error`.
 
 ## Retrieval observability & evaluation
 

@@ -94,6 +94,11 @@ export interface ChatOptions {
    *  edit let the model finish naturally). */
   maxTokens?: number;
   temperature?: number;
+  /** Extra headers for this request only — e.g. X-Hupi-Memory/
+   *  X-Hupi-Capture: off (see internal/gateway/handler.go's per-request
+   *  opt-outs, ARCHITECTURE.md § Capture) for a request that shouldn't be
+   *  retrieved-from or written to memory at all. */
+  headers?: Record<string, string>;
 }
 
 /** Non-streamed variant — used by multi-file edit (needs the whole
@@ -108,7 +113,7 @@ export async function chat(client: OpenAI, opts: ChatOptions): Promise<string> {
       max_tokens: opts.maxTokens,
       temperature: opts.temperature,
     },
-    { signal: opts.signal },
+    { signal: opts.signal, headers: opts.headers },
   );
   return res.choices[0]?.message?.content ?? '';
 }

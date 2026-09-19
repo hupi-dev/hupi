@@ -35,7 +35,10 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
   accept). **Off by default** — `hupi.inlineSuggestions.enabled` — since
   unlike everything else above (all explicitly invoked), this sends a
   request to your gateway on every typing pause. `hupi.inlineSuggestions.debounceMs`
-  (default 300) controls how long you need to pause first.
+  (default 300) controls how long you need to pause first. These requests
+  are never retrieved from or captured into memory (`X-Hupi-Memory`/
+  `X-Hupi-Capture: off`) — a completion firing on every keystroke pause is
+  never a real conversation turn worth remembering.
 - **Multi-file edit** (`HUPI: Multi-File Edit`, `Ctrl+Alt+M`/`Cmd+Alt+M`) —
   pick from your open files, describe a change, and review a per-file diff
   before applying any of it. Scoped to open editors, not the whole

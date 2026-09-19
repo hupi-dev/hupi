@@ -62,6 +62,9 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
   feature here that fires on every typing pause rather than an explicit
   action — debounced (`hupi.inlineSuggestions.debounceMs`) and fails
   silently on config/auth errors rather than popping a message mid-type.
+  Every request sets `X-Hupi-Memory: off` and `X-Hupi-Capture: off`
+  (ARCHITECTURE.md § Capture) — a keystroke-pause completion is never
+  retrieved from or written into memory.
 - **Multi-file edit** (`multiFileEdit.ts`, `HUPI: Multi-File Edit`) — pick
   from currently-open files, describe a change, and a review panel (a
   webview) shows a per-file diff with a checkbox before anything is

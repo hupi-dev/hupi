@@ -99,6 +99,22 @@ describe('chat', () => {
     );
   });
 
+  it('forwards custom per-request headers (e.g. memory/capture opt-outs)', async () => {
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: { content: 'hello' } }] });
+    const client = { chat: { completions: { create } } };
+
+    await chat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      headers: { 'X-Hupi-Memory': 'off', 'X-Hupi-Capture': 'off' },
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ headers: { 'X-Hupi-Memory': 'off', 'X-Hupi-Capture': 'off' } }),
+    );
+  });
+
   it('returns an empty string when the response has no message content', async () => {
     const create = vi.fn().mockResolvedValue({ choices: [{ message: {} }] });
     const client = { chat: { completions: { create } } };

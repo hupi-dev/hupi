@@ -90,6 +90,12 @@ export class HupiInlineCompletionProvider implements vscode.InlineCompletionItem
         signal: controller.signal,
         maxTokens: MAX_COMPLETION_TOKENS,
         temperature: 0.2,
+        // Ghost text fires on every debounced typing pause — it has no
+        // business being retrieved from (it's not a real question) or
+        // written to memory at all (a durable row per keystroke pause
+        // would flood it with near-meaningless single-line completions).
+        // See ARCHITECTURE.md § Capture's per-request opt-outs.
+        headers: { 'X-Hupi-Memory': 'off', 'X-Hupi-Capture': 'off' },
       });
     } catch {
       return undefined;

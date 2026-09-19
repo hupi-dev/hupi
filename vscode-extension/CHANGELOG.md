@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.10
+
+- **Fix**: 0.1.9's inline completions (ghost text) were sending every
+  debounced completion request through HUPI's normal capture pipeline —
+  the gateway wrote a durable memory record for every one, since capture
+  ran unconditionally with no way to opt out. Turning on
+  `hupi.inlineSuggestions.enabled` would have flooded a user's memory
+  store with near-meaningless single-line completions, one per typing
+  pause. Fixed at the source: the gateway gained a new, separate
+  `X-Hupi-Capture: off` opt-out (distinct from the pre-existing
+  `X-Hupi-Memory: off`, which only ever controlled retrieval), and the
+  ghost-text client now sends both headers on every request — no
+  retrieval, no capture, for a request that was never a real
+  conversation turn to begin with. Requires a HUPI gateway build that
+  includes this fix; against an older gateway, the new header is
+  harmlessly ignored and the old (unwanted) capture-everything behavior
+  applies — upgrade the gateway if you use ghost text.
+
 ## 0.1.9
 
 - Added ghost-text-style inline completions: as you type, HUPI can suggest

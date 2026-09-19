@@ -124,6 +124,11 @@ describe('HupiInlineCompletionProvider', () => {
     expect(call.messages[1].content).toContain(text.slice(0, offset));
     expect(call.messages[1].content).toContain(text.slice(offset));
     expect(call.maxTokens).toBe(256);
+    // Ghost text fires on every debounced typing pause — it must never be
+    // retrieved from or written to memory (see ARCHITECTURE.md § Capture's
+    // per-request opt-outs; this is the fix for a real bug where every
+    // completion was flooding memory with a durable row).
+    expect(call.headers).toEqual({ 'X-Hupi-Memory': 'off', 'X-Hupi-Capture': 'off' });
   });
 
   it('strips a leading echoed <CURSOR> marker from the response', async () => {

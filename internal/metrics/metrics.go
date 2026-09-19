@@ -60,7 +60,7 @@ var (
 
 	CaptureTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hupi_capture_total",
-		Help: `Episode capture outcomes: result is "ok" or "error".`,
+		Help: `Episode capture outcomes: result is "ok", "error", or "skipped" (X-Hupi-Capture: off).`,
 	}, []string{"result"})
 
 	CaptureDuration = promauto.NewHistogram(prometheus.HistogramOpts{
