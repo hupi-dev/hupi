@@ -31,9 +31,19 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
 - **Inline edit** (`Ctrl+K` / `Cmd+K` with a selection) — describe a change,
   HUPI rewrites the selected code, you get a diff preview before anything
   is applied to your file.
+- **Inline completions** — Copilot-style ghost text as you type (Tab to
+  accept). **Off by default** — `hupi.inlineSuggestions.enabled` — since
+  unlike everything else above (all explicitly invoked), this sends a
+  request to your gateway on every typing pause. `hupi.inlineSuggestions.debounceMs`
+  (default 300) controls how long you need to pause first.
+- **Multi-file edit** (`HUPI: Multi-File Edit`, `Ctrl+Alt+M`/`Cmd+Alt+M`) —
+  pick from your open files, describe a change, and review a per-file diff
+  before applying any of it. Scoped to open editors, not the whole
+  workspace — no background scan, predictable cost.
 
-Not included in v1 (by explicit scope decision, not an oversight): inline
-autocomplete/Tab-style ghost text, and agentic multi-file edits.
+Not included in v1: fully agentic multi-file edits that plan and apply
+across files with no review step (the multi-file edit above always shows
+a diff first).
 
 ## Setup
 

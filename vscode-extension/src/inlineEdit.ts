@@ -2,32 +2,14 @@ import * as vscode from 'vscode';
 import { createClient, streamChat, type ChatMessage } from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
+import { createVirtualDiffProvider } from './diffContentProvider';
+import { stripCodeFences } from './textUtils';
 
 const DIFF_SCHEME = 'hupi-inline-diff';
 
-/** Backing store for the virtual before/after documents the diff view
- *  reads from — keyed by the virtual URI's path, so concurrent inline-edit
- *  invocations (unlikely, but cheap to get right) don't clobber each other. */
-const virtualDocs = new Map<string, string>();
-
-class InlineDiffContentProvider implements vscode.TextDocumentContentProvider {
-  provideTextDocumentContent(uri: vscode.Uri): string {
-    return virtualDocs.get(uri.path) ?? '';
-  }
-}
-
-function stripCodeFences(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
-  return fenced ? fenced[1] : trimmed;
-}
-
 export function registerInlineEdit(context: vscode.ExtensionContext): vscode.Disposable[] {
-  const provider = new InlineDiffContentProvider();
-  const providerRegistration = vscode.workspace.registerTextDocumentContentProvider(
-    DIFF_SCHEME,
-    provider,
-  );
+  const { registration: providerRegistration, set: setVirtualDoc, delete: deleteVirtualDoc } =
+    createVirtualDiffProvider(DIFF_SCHEME);
 
   const command = vscode.commands.registerCommand('hupi.inlineEdit', async () => {
     const editor = vscode.window.activeTextEditor;
@@ -105,8 +87,8 @@ export function registerInlineEdit(context: vscode.ExtensionContext): vscode.Dis
     const stamp = Date.now();
     const beforeUri = vscode.Uri.parse(`${DIFF_SCHEME}:/before-${stamp}${extFor(languageId)}`);
     const afterUri = vscode.Uri.parse(`${DIFF_SCHEME}:/after-${stamp}${extFor(languageId)}`);
-    virtualDocs.set(beforeUri.path, originalText);
-    virtualDocs.set(afterUri.path, rewritten);
+    setVirtualDoc(beforeUri, originalText);
+    setVirtualDoc(afterUri, rewritten);
 
     await vscode.commands.executeCommand(
       'vscode.diff',
@@ -122,8 +104,8 @@ export function registerInlineEdit(context: vscode.ExtensionContext): vscode.Dis
       'Reject',
     );
 
-    virtualDocs.delete(beforeUri.path);
-    virtualDocs.delete(afterUri.path);
+    deleteVirtualDoc(beforeUri);
+    deleteVirtualDoc(afterUri);
     await closeDiffTab(beforeUri, afterUri);
 
     if (choice === 'Accept') {

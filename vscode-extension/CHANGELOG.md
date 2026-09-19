@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.9
+
+- Added ghost-text-style inline completions: as you type, HUPI can suggest
+  a continuation inline (Tab to accept), the same interaction Copilot/
+  Continue/Cursor use. **Off by default** (`hupi.inlineSuggestions.enabled`)
+  — unlike the sidebar/inline edit/`@hupi` (all explicitly invoked), this
+  sends a request to your HUPI gateway on every typing pause, a real
+  latency/cost trade-off the others don't have. A debounce
+  (`hupi.inlineSuggestions.debounceMs`, default 300ms) keeps a fast typist
+  from firing a request per keystroke; config/sign-in errors fail silently
+  here rather than popping a message on every pause (the other three paths
+  already surface those clearly when explicitly used).
+- Added multi-file edit (`HUPI: Multi-File Edit`, `Ctrl+Alt+M`/`Cmd+Alt+M`):
+  pick from your currently-open files, describe a change, and HUPI proposes
+  new content for whichever of those files actually need it. A review panel
+  lists every proposed file with a per-file diff (VS Code's own diff view)
+  and a checkbox, so you can apply some, all, or none — nothing touches
+  your files until you hit Apply. Scoped to open editors rather than the
+  whole workspace, a deliberate v1 bound: predictable in scope and cost,
+  no background workspace scan.
+- These two were explicitly out of scope for v1 as of 0.1.0-0.1.8 (see
+  past versions of this file / the extension's README) — reversed by
+  request, now that the sidebar, inline edit, and `@hupi` are all
+  established and working well.
+
 ## 0.1.8
 
 - Added `@hupi` as a chat participant in VS Code's native Chat view

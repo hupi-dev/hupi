@@ -27,11 +27,13 @@ describe('activate', () => {
     activate(context);
 
     // hupi.setApiKey (1) + hupi.signIn/hupi.signOut (2) + inlineEdit's
-    // [contentProvider, command] (2) + the chat webview view provider (1)
-    // + the hupi.chat participant (1). A future registration that forgets
-    // to push its disposable would shrink this count — that's the point
-    // of asserting the exact number, not just "at least one."
-    expect(context.subscriptions.length).toBe(7);
+    // [contentProvider, command] (2) + multiFileEdit's
+    // [contentProvider, command] (2) + the inline completion provider (1)
+    // + the chat webview view provider (1) + the hupi.chat participant (1).
+    // A future registration that forgets to push its disposable would
+    // shrink this count — that's the point of asserting the exact number,
+    // not just "at least one."
+    expect(context.subscriptions.length).toBe(10);
     for (const sub of context.subscriptions) {
       expect(typeof (sub as { dispose?: unknown }).dispose).toBe('function');
     }

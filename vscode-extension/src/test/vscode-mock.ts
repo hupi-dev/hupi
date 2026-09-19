@@ -43,11 +43,14 @@ export const showInputBox = vi.fn<(...args: any[]) => Promise<string | undefined
 export const showInformationMessage = vi.fn<(...args: any[]) => Promise<string | undefined>>();
 export const showErrorMessage = vi.fn<(...args: any[]) => Promise<string | undefined>>();
 export const showWarningMessage = vi.fn<(...args: any[]) => Promise<string | undefined>>();
+export const showQuickPick = vi.fn<(...args: any[]) => Promise<unknown>>();
 export const withProgress = vi.fn<(...args: any[]) => Promise<unknown>>();
 export const registerWebviewViewProvider = vi.fn();
+export const createWebviewPanel = vi.fn();
 export const openExternal = vi.fn<(...args: any[]) => Promise<boolean>>();
 export const applyEdit = vi.fn<(...args: any[]) => Promise<boolean>>();
 export const registerTextDocumentContentProvider = vi.fn();
+export const registerInlineCompletionItemProvider = vi.fn();
 export const tabGroupsClose = vi.fn<(...args: any[]) => Promise<void>>();
 
 let activeTextEditorValue: unknown = undefined;
@@ -68,8 +71,10 @@ export const window = {
   showInformationMessage,
   showErrorMessage,
   showWarningMessage,
+  showQuickPick,
   withProgress,
   registerWebviewViewProvider,
+  createWebviewPanel,
   tabGroups: {
     get all() {
       return tabGroupsAllValue;
@@ -78,7 +83,11 @@ export const window = {
   },
 };
 
+export const languages = { registerInlineCompletionItemProvider };
+
 export const ProgressLocation = { Notification: 15 };
+export const ViewColumn = { Beside: -2 };
+export const InlineCompletionTriggerKind = { Invoke: 0, Automatic: 1 };
 
 // ---- commands.* — registerCommand also records handlers so tests can
 // invoke them directly, and executeCommand's default implementation
@@ -110,11 +119,19 @@ function asRelativePath(uri: { path?: string } | string): string {
   return typeof uri === 'string' ? uri : (uri.path ?? String(uri));
 }
 
+let textDocumentsValue: unknown[] = [];
+export function __setTextDocuments(docs: unknown[]): void {
+  textDocumentsValue = docs;
+}
+
 export const workspace = {
   getConfiguration,
   asRelativePath,
   registerTextDocumentContentProvider,
   applyEdit,
+  get textDocuments() {
+    return textDocumentsValue;
+  },
 };
 
 // ---- env.* ---------------------------------------------------------------
@@ -150,6 +167,32 @@ export class Uri {
   toString(): string {
     return this.raw;
   }
+}
+
+// ---- Position/Range/InlineCompletionItem — minimal, structural only;
+// nothing in this extension's source inspects their internals, it only
+// passes them through to real VS Code APIs (or, in tests, back out
+// through mocked ones for assertions). ------------------------------
+
+export class Position {
+  constructor(
+    public readonly line: number,
+    public readonly character: number,
+  ) {}
+}
+
+export class Range {
+  constructor(
+    public readonly start: unknown,
+    public readonly end: unknown,
+  ) {}
+}
+
+export class InlineCompletionItem {
+  constructor(
+    public readonly insertText: string,
+    public readonly range?: unknown,
+  ) {}
 }
 
 // ---- Disposable -------------------------------------------------------
@@ -240,16 +283,20 @@ export function __resetVscodeMock(): void {
   configValues = {};
   activeTextEditorValue = undefined;
   tabGroupsAllValue = [];
+  textDocumentsValue = [];
   registeredCommands.clear();
 
   showInputBox.mockReset().mockResolvedValue(undefined);
   showInformationMessage.mockReset().mockResolvedValue(undefined);
   showErrorMessage.mockReset().mockResolvedValue(undefined);
   showWarningMessage.mockReset().mockResolvedValue(undefined);
+  showQuickPick.mockReset().mockResolvedValue(undefined);
   registerWebviewViewProvider.mockReset().mockReturnValue(new Disposable());
+  createWebviewPanel.mockReset();
   openExternal.mockReset().mockResolvedValue(true);
   applyEdit.mockReset().mockResolvedValue(true);
   registerTextDocumentContentProvider.mockReset().mockReturnValue(new Disposable());
+  registerInlineCompletionItemProvider.mockReset().mockReturnValue(new Disposable());
   tabGroupsClose.mockReset().mockResolvedValue(undefined);
   registerCommand.mockClear();
   executeCommand.mockClear();

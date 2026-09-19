@@ -2,7 +2,7 @@
   "name": "hupi-vscode",
   "displayName": "HUPI",
   "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "hupi",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
@@ -55,6 +55,16 @@
           "type": "string",
           "default": "",
           "description": "The OAuth scope(s) to request when signing in, e.g. \"api://<resource-client-id>/access_as_user offline_access openid profile\". Must include offline_access or silent token refresh won't work."
+        },
+        "hupi.inlineSuggestions.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show HUPI-generated ghost-text suggestions as you type (Tab to accept). Off by default: unlike the chat sidebar/inline edit/@hupi (all explicitly invoked), this sends a request to your HUPI gateway on every typing pause."
+        },
+        "hupi.inlineSuggestions.debounceMs": {
+          "type": "number",
+          "default": 300,
+          "description": "How long to wait after you stop typing before requesting a ghost-text suggestion. Higher values mean fewer requests to your HUPI gateway but a longer wait before a suggestion appears."
         }
       }
     },
@@ -74,6 +84,10 @@
       {
         "command": "hupi.inlineEdit",
         "title": "HUPI: Inline Edit"
+      },
+      {
+        "command": "hupi.multiFileEdit",
+        "title": "HUPI: Multi-File Edit"
       }
     ],
     "keybindings": [
@@ -82,6 +96,11 @@
         "key": "ctrl+k",
         "mac": "cmd+k",
         "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "hupi.multiFileEdit",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m"
       }
     ],
     "chatParticipants": [

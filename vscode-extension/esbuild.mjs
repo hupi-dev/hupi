@@ -34,14 +34,30 @@ const webviewConfig = {
   minify,
 };
 
+const multiFileReviewWebviewConfig = {
+  entryPoints: ['src/webview/multiFileReview.ts'],
+  bundle: true,
+  outfile: 'dist/webview/multiFileReview.js',
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2022',
+  sourcemap: true,
+  minify,
+};
+
 async function run() {
   if (watch) {
     const ctxExt = await esbuild.context(extensionConfig);
     const ctxWeb = await esbuild.context(webviewConfig);
-    await Promise.all([ctxExt.watch(), ctxWeb.watch()]);
+    const ctxMultiFile = await esbuild.context(multiFileReviewWebviewConfig);
+    await Promise.all([ctxExt.watch(), ctxWeb.watch(), ctxMultiFile.watch()]);
     console.log('watching for changes...');
   } else {
-    await Promise.all([esbuild.build(extensionConfig), esbuild.build(webviewConfig)]);
+    await Promise.all([
+      esbuild.build(extensionConfig),
+      esbuild.build(webviewConfig),
+      esbuild.build(multiFileReviewWebviewConfig),
+    ]);
     console.log('build complete');
   }
 }

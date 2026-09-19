@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { resolveBaseUrl, streamChat, type ChatMessage } from './hupiClient';
+import { chat, resolveBaseUrl, streamChat, type ChatMessage } from './hupiClient';
 
 describe('resolveBaseUrl', () => {
   it('resolves the private route when no teamId is set', () => {
@@ -77,5 +77,34 @@ describe('streamChat', () => {
 
     expect(deltas).toEqual(['a', 'b']);
     expect(full).toBe('ab');
+  });
+});
+
+describe('chat', () => {
+  it('returns the non-streamed response content and forwards maxTokens/temperature', async () => {
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: { content: 'hello' } }] });
+    const client = { chat: { completions: { create } } };
+
+    const result = await chat(client as any, {
+      model: 'gpt-test',
+      messages: [{ role: 'user', content: 'hi' }],
+      maxTokens: 256,
+      temperature: 0.2,
+    });
+
+    expect(result).toBe('hello');
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gpt-test', stream: false, max_tokens: 256, temperature: 0.2 }),
+      expect.anything(),
+    );
+  });
+
+  it('returns an empty string when the response has no message content', async () => {
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: {} }] });
+    const client = { chat: { completions: { create } } };
+
+    const result = await chat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }] });
+
+    expect(result).toBe('');
   });
 });

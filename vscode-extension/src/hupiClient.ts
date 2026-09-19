@@ -89,14 +89,25 @@ export interface ChatOptions {
   model: string;
   messages: ChatMessage[];
   signal?: AbortSignal;
+  /** Caps response length — used by inline completions to keep ghost-text
+   *  suggestions short and fast; omitted elsewhere (streamed chat/inline
+   *  edit let the model finish naturally). */
+  maxTokens?: number;
+  temperature?: number;
 }
 
-/** Non-streamed variant, used where a single final answer is enough (not
- *  currently used by the chat sidebar/inline edit, which both stream, but
- *  kept available since it's a one-line wrapper and useful for tests/tools). */
+/** Non-streamed variant — used by multi-file edit (needs the whole
+ *  response parsed at once anyway) and inline completions (a single short
+ *  ghost-text suggestion, no incremental rendering to do). */
 export async function chat(client: OpenAI, opts: ChatOptions): Promise<string> {
   const res = await client.chat.completions.create(
-    { model: opts.model, messages: opts.messages, stream: false },
+    {
+      model: opts.model,
+      messages: opts.messages,
+      stream: false,
+      max_tokens: opts.maxTokens,
+      temperature: opts.temperature,
+    },
     { signal: opts.signal },
   );
   return res.choices[0]?.message?.content ?? '';

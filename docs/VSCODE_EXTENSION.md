@@ -56,12 +56,21 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
   request's `CancellationToken`) instead of hand-rolled state.
 - **Inline edit** (`Ctrl+K`/`Cmd+K` with a selection) — describe a change,
   get a diff preview (original vs. proposed) before anything is applied.
+- **Inline completions** (`inlineCompletionProvider.ts`) — Copilot-style
+  ghost text as you type, via `vscode.languages.registerInlineCompletionItemProvider`.
+  Off by default (`hupi.inlineSuggestions.enabled`) since it's the one
+  feature here that fires on every typing pause rather than an explicit
+  action — debounced (`hupi.inlineSuggestions.debounceMs`) and fails
+  silently on config/auth errors rather than popping a message mid-type.
+- **Multi-file edit** (`multiFileEdit.ts`, `HUPI: Multi-File Edit`) — pick
+  from currently-open files, describe a change, and a review panel (a
+  webview) shows a per-file diff with a checkbox before anything is
+  applied. Scoped to open editors, not a whole-workspace scan.
 
 **Explicitly out of scope for v1** (a scope decision, not an oversight):
 
-- Inline autocomplete / Tab-style ghost text completions.
-- Agentic multi-file edits (planning and editing across several files
-  autonomously).
+- Fully agentic multi-file edits with no review step — the multi-file
+  edit above always shows a diff before applying anything.
 - A `.vsix`/Marketplace release process for updates is manual — see
   [vscode-extension/README.md § Publishing](../vscode-extension/README.md#publishing-to-the-marketplace)
   for how a new version actually goes out (bump the version, `npm run
@@ -203,6 +212,13 @@ section for how a new version actually ships.
   HUPI's proposed rewrite on the right) with **Accept**/**Reject**
   presented as a follow-up prompt — nothing is written to your file until
   you accept.
+- With `hupi.inlineSuggestions.enabled` turned on, pausing while typing
+  shows a greyed-out ghost-text suggestion inline — `Tab` accepts it, same
+  interaction as Copilot/Continue.
+- `Ctrl+Alt+M`/`Cmd+Alt+M` (or **HUPI: Multi-File Edit**) lets you pick
+  from your open files, describe a change, and opens a review panel
+  listing every file HUPI proposed a change for — click a file to see its
+  diff, uncheck any you don't want, then **Apply Selected**.
 
 ## Verification
 
