@@ -13,7 +13,7 @@ const sections = [
   {
     title: 'What HUPI (the software) does with your data',
     body:
-      'Nothing, because it never reaches us. There is no HUPI-run backend, no telemetry, and no phone-home in the gateway, the consolidation jobs, the admin tooling, or the Tier 3 extension. Every conversation, summary, and entity is stored in your own Postgres database, encrypted with your own key, on infrastructure you control. If you configure OIDC/SSO for Tier 3, the only data involved is what your identity provider already puts in a standard access token (a stable subject identifier and role/group claims) — verified locally against your own configured issuer, never forwarded to us or anyone else.',
+      'Nothing, because it never reaches us. There is no HUPI-run backend, no telemetry, and no phone-home in the gateway, the consolidation jobs, the admin tooling, the VS Code extension, or HUPI Code (our VS Code fork with that extension built in). Every conversation, summary, and entity is stored in your own Postgres database, encrypted with your own key, on infrastructure you control — the extension and HUPI Code both talk only to the gateway URL you configure, nothing else. If you configure OIDC/SSO for Tier 3, the only data involved is what your identity provider already puts in a standard access token (a stable subject identifier and role/group claims) — verified locally against your own configured issuer, never forwarded to us or anyone else.',
   },
   {
     title: 'What this website collects',
