@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.11
+
+- Added `hupi.inlineSuggestions.model` — lets ghost-text completions use
+  a distinct, cheaper/faster model profile from your `providers.yaml`,
+  independent of `hupi.model` (the sidebar/`@hupi`/inline-edit model).
+  Completions fire on every typing pause, so reusing a large chat model
+  by default means real per-request cost on a paid hosted provider —
+  this was previously only documented as a known gap (0.1.10's
+  README/VSCODE_EXTENSION.md note), now it's a real setting. Leave blank
+  (the default) to keep reusing `hupi.model`, unchanged from before.
+
 ## 0.1.10
 
 - **Fix**: 0.1.9's inline completions (ghost text) were sending every

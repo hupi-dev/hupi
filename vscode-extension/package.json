@@ -2,7 +2,7 @@
   "name": "hupi-vscode",
   "displayName": "HUPI",
   "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "hupi",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
@@ -65,6 +65,11 @@
           "type": "number",
           "default": 300,
           "description": "How long to wait after you stop typing before requesting a ghost-text suggestion. Higher values mean fewer requests to your HUPI gateway but a longer wait before a suggestion appears."
+        },
+        "hupi.inlineSuggestions.model": {
+          "type": "string",
+          "default": "",
+          "description": "Profile name (from your HUPI deployment's providers.yaml) to use for ghost-text completions specifically — independent of hupi.model. Since completions fire on every typing pause, pointing this at a smaller/cheaper/local model avoids paying full chat-model cost per keystroke pause. Leave blank to reuse hupi.model/the default chat provider (the old behavior)."
         }
       }
     },

@@ -82,10 +82,17 @@ export class HupiInlineCompletionProvider implements vscode.InlineCompletionItem
     ];
 
     const client = createClient(cfg);
+    // A distinct, cheaper/faster model for ghost text, independent of
+    // hupi.model (the sidebar/@hupi/inline-edit model) — completions fire
+    // on every typing pause, so reusing a large chat model by default
+    // means real per-request cost on a paid hosted provider that the
+    // other, explicitly-invoked features don't have. Empty (the default)
+    // preserves the old behavior of reusing cfg.model.
+    const completionModel = settings.get<string>('inlineSuggestions.model', '') || cfg.model;
     let completion: string;
     try {
       completion = await chat(client, {
-        model: cfg.model,
+        model: completionModel,
         messages,
         signal: controller.signal,
         maxTokens: MAX_COMPLETION_TOKENS,

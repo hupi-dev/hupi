@@ -39,14 +39,14 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
   are never retrieved from or captured into memory (`X-Hupi-Memory`/
   `X-Hupi-Capture: off`) — a completion firing on every keystroke pause is
   never a real conversation turn worth remembering.
-  **Cost note**: completions currently reuse the same `hupi.model`/
-  default chat provider as everything else — there's no separate,
-  cheaper completion-specific model yet (the way Copilot's inline
-  suggestions run on a small dedicated model, distinct from Copilot
-  Chat's). If your active chat provider is a paid hosted API, turning
-  this on means real per-request cost on every typing pause, not just
-  on deliberate chat/edit requests. A local/free provider (e.g. an
-  Ollama profile) has no dollar cost, only local compute load.
+  **Cost note**: completions reuse `hupi.model`/the default chat
+  provider by default — if that's a paid hosted API, turning this on
+  means real per-request cost on every typing pause, not just on
+  deliberate chat/edit requests. Set `hupi.inlineSuggestions.model` to a
+  distinct, cheaper/faster `providers.yaml` profile (or a local/free one,
+  e.g. Ollama) to avoid paying full chat-model cost per keystroke pause —
+  the same reason Copilot's inline suggestions run on a small dedicated
+  model, separate from Copilot Chat's.
 - **Multi-file edit** (`HUPI: Multi-File Edit`, `Ctrl+Alt+M`/`Cmd+Alt+M`) —
   pick from your open files, describe a change, and review a per-file diff
   before applying any of it. Scoped to open editors, not the whole

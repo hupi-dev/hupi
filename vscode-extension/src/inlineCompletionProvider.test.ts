@@ -131,6 +131,44 @@ describe('HupiInlineCompletionProvider', () => {
     expect(call.headers).toEqual({ 'X-Hupi-Memory': 'off', 'X-Hupi-Capture': 'off' });
   });
 
+  it('reuses hupi.model when no completion-specific model is configured', async () => {
+    __setConfig({ 'inlineSuggestions.enabled': true, 'inlineSuggestions.debounceMs': 0 });
+    vi.mocked(loadConfig).mockResolvedValue({ ...fakeCfg, model: 'gpt-main-chat' });
+    vi.mocked(chat).mockResolvedValue('return x;');
+    const provider = new HupiInlineCompletionProvider({} as unknown as vscode.ExtensionContext);
+    const { token } = fakeCancellationToken();
+
+    await provider.provideInlineCompletionItems(
+      fakeDocument('const x = 1;', 12),
+      fakePosition(),
+      {} as vscode.InlineCompletionContext,
+      token,
+    );
+
+    expect(vi.mocked(chat).mock.calls[0][1].model).toBe('gpt-main-chat');
+  });
+
+  it('uses hupi.inlineSuggestions.model instead of hupi.model when configured', async () => {
+    __setConfig({
+      'inlineSuggestions.enabled': true,
+      'inlineSuggestions.debounceMs': 0,
+      'inlineSuggestions.model': 'cheap-local-model',
+    });
+    vi.mocked(loadConfig).mockResolvedValue({ ...fakeCfg, model: 'gpt-main-chat' });
+    vi.mocked(chat).mockResolvedValue('return x;');
+    const provider = new HupiInlineCompletionProvider({} as unknown as vscode.ExtensionContext);
+    const { token } = fakeCancellationToken();
+
+    await provider.provideInlineCompletionItems(
+      fakeDocument('const x = 1;', 12),
+      fakePosition(),
+      {} as vscode.InlineCompletionContext,
+      token,
+    );
+
+    expect(vi.mocked(chat).mock.calls[0][1].model).toBe('cheap-local-model');
+  });
+
   it('strips a leading echoed <CURSOR> marker from the response', async () => {
     __setConfig({ 'inlineSuggestions.enabled': true, 'inlineSuggestions.debounceMs': 0 });
     vi.mocked(chat).mockResolvedValue('<CURSOR>\nconsole.log("hi");');
