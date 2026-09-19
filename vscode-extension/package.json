@@ -2,7 +2,7 @@
   "name": "hupi-vscode",
   "displayName": "HUPI",
   "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "hupi",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
@@ -82,6 +82,15 @@
         "key": "ctrl+k",
         "mac": "cmd+k",
         "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "hupi.chat",
+        "name": "hupi",
+        "fullName": "HUPI",
+        "description": "Chat backed by your own HUPI memory gateway — remembers across sessions, not just this conversation.",
+        "isSticky": true
       }
     ],
     "viewsContainers": {

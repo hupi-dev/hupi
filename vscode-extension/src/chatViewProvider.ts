@@ -15,7 +15,7 @@ type ToWebview =
   | { type: 'done' }
   | { type: 'error'; message: string };
 
-function currentFileContext(): string {
+export function currentFileContext(): string {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     return '';

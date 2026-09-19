@@ -185,6 +185,53 @@ export class TabInputTextDiff {
   ) {}
 }
 
+// ---- chat.* — real classes for ChatRequestTurn/ChatResponseTurn/
+// ChatResponseMarkdownPart since chatParticipant.ts's historyToMessages
+// tells them apart with `instanceof`, same reasoning as TabInputTextDiff
+// above. Real VS Code marks these classes' constructors private (TS-only,
+// not a runtime restriction) since application code is only ever meant to
+// *receive* them from context.history, never construct one — tests still
+// need to build fake history turns, so this mock's constructors are
+// deliberately public. -----------------------------------------------
+
+export class ChatRequestTurn {
+  constructor(
+    public readonly prompt: string,
+    public readonly command: string | undefined,
+    public readonly references: unknown[],
+    public readonly participant: string,
+    public readonly toolReferences: unknown[],
+  ) {}
+}
+
+export class ChatResponseMarkdownPart {
+  public readonly value: { value: string };
+  constructor(value: string) {
+    this.value = { value };
+  }
+}
+
+export class ChatResponseTurn {
+  constructor(
+    public readonly response: ChatResponseMarkdownPart[],
+    public readonly result: unknown,
+    public readonly participant: string,
+  ) {}
+}
+
+export const createChatParticipant = vi.fn((id: string, handler: (...args: any[]) => unknown) => {
+  return {
+    id,
+    requestHandler: handler,
+    iconPath: undefined,
+    followupProvider: undefined,
+    onDidReceiveFeedback: () => new Disposable(),
+    dispose: vi.fn(),
+  };
+});
+
+export const chat = { createChatParticipant };
+
 // ---- reset ----------------------------------------------------------------
 
 /** Call from beforeEach — resets every spy and every piece of mutable mock
@@ -206,6 +253,7 @@ export function __resetVscodeMock(): void {
   tabGroupsClose.mockReset().mockResolvedValue(undefined);
   registerCommand.mockClear();
   executeCommand.mockClear();
+  createChatParticipant.mockClear();
 
   withProgress.mockReset().mockImplementation(async (_options: unknown, task: (...args: any[]) => unknown) => {
     const fakeProgress = { report() {} };

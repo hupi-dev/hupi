@@ -19,6 +19,15 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
 - **Chat sidebar** — a HUPI icon in the activity bar opens a chat panel.
   Every message automatically includes the active file (or your current
   selection) as context, the same way Cursor's chat references open files.
+- **`@hupi` in VS Code's native Chat view** — HUPI is also registered as a
+  chat participant (`vscode.chat.createChatParticipant`), so `@hupi <message>`
+  works from the same Chat view other participants (including GitHub
+  Copilot Chat, if installed) use. Marked sticky, so once a conversation
+  starts with `@hupi` it stays routed there without re-typing the mention
+  each turn. This is additional, not a replacement for the sidebar above —
+  a third-party participant can't be made that view's default, unqualified
+  handler, so the two cover different moments (always-visible vs. inside
+  the shared Chat view alongside other participants/tools).
 - **Inline edit** (`Ctrl+K` / `Cmd+K` with a selection) — describe a change,
   HUPI rewrites the selected code, you get a diff preview before anything
   is applied to your file.

@@ -3,6 +3,7 @@ import { registerSetApiKeyCommand } from './secrets';
 import { registerOidcCommands } from './oidcAuth';
 import { registerInlineEdit } from './inlineEdit';
 import { HupiChatViewProvider } from './chatViewProvider';
+import { registerChatParticipant } from './chatParticipant';
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(registerSetApiKeyCommand(context));
@@ -13,6 +14,8 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(HupiChatViewProvider.viewType, chatProvider),
   );
+
+  context.subscriptions.push(registerChatParticipant(context));
 }
 
 export function deactivate(): void {}

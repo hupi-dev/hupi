@@ -46,6 +46,14 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
 
 - **Chat sidebar** — a webview panel; every message automatically includes
   the active file or current selection as context.
+- **`@hupi` chat participant** (`chatParticipant.ts`) — HUPI registered via
+  `vscode.chat.createChatParticipant` in VS Code's own native Chat view,
+  alongside the sidebar rather than instead of it (a third-party
+  participant can't be made that view's default handler, so the two cover
+  different moments). Reuses the sidebar's exact same
+  `loadConfig`/`createClient`/`streamChat` call path; conversation history
+  and cancellation come from the platform (`ChatContext.history`, the
+  request's `CancellationToken`) instead of hand-rolled state.
 - **Inline edit** (`Ctrl+K`/`Cmd+K` with a selection) — describe a change,
   get a diff preview (original vs. proposed) before anything is applied.
 
@@ -187,6 +195,9 @@ section for how a new version actually ships.
 - An activity bar icon opens the **Chat** panel — a message log plus an
   input box. Responses stream in and render as markdown (code blocks
   included).
+- `@hupi <message>` also works from VS Code's own **Chat** view
+  (`Ctrl+Alt+I`/`Cmd+Alt+I`), backed by the same gateway — useful
+  alongside other chat participants/tools already living in that view.
 - Selecting code and pressing `Ctrl+K`/`Cmd+K` prompts for an instruction,
   then opens VS Code's built-in diff view (current code on the left,
   HUPI's proposed rewrite on the right) with **Accept**/**Reject**

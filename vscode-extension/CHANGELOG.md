@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.8
+
+- Added `@hupi` as a chat participant in VS Code's native Chat view
+  (`vscode.chat.createChatParticipant`), alongside the existing
+  dedicated HUPI sidebar rather than replacing it — a third-party
+  participant can't be made the Chat view's default, unqualified
+  handler (that's reserved for the host's own default participant), so
+  the always-visible sidebar and `@hupi` genuinely serve different
+  moments. Marked `isSticky` so a conversation stays routed to HUPI
+  after the first `@hupi` mention. Reuses the exact same
+  config/client/streaming code the sidebar already used — conversation
+  history and cancellation now come from the platform
+  (`context.history`, the request's `CancellationToken`) instead of
+  this extension's own hand-rolled state.
+
 ## 0.1.7
 
 - Fixed `AADSTS50011` on OIDC sign-in: the loopback redirect URI was

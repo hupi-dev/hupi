@@ -12,7 +12,7 @@ function fakeContext(): vscode.ExtensionContext {
       store: async () => {},
       delete: async () => {},
     },
-    extensionUri: { path: '/fake/extension' },
+    extensionUri: vscode.Uri.file('/fake/extension'),
   } as unknown as vscode.ExtensionContext;
 }
 
@@ -27,11 +27,11 @@ describe('activate', () => {
     activate(context);
 
     // hupi.setApiKey (1) + hupi.signIn/hupi.signOut (2) + inlineEdit's
-    // [contentProvider, command] (2) + the chat webview view provider (1).
-    // A future registration that forgets to push its disposable would
-    // shrink this count — that's the point of asserting the exact number,
-    // not just "at least one."
-    expect(context.subscriptions.length).toBe(6);
+    // [contentProvider, command] (2) + the chat webview view provider (1)
+    // + the hupi.chat participant (1). A future registration that forgets
+    // to push its disposable would shrink this count — that's the point
+    // of asserting the exact number, not just "at least one."
+    expect(context.subscriptions.length).toBe(7);
     for (const sub of context.subscriptions) {
       expect(typeof (sub as { dispose?: unknown }).dispose).toBe('function');
     }
