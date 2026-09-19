@@ -7,6 +7,7 @@
 # Local secrets / runtime config — never commit real values
 hupi.env
 providers.yaml
+providers.demo.yaml
 hupi.dek.wrapped
 .env
 

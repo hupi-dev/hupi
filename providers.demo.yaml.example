@@ -1,0 +1,33 @@
+# Copy to providers.demo.yaml and point cmd/hupi-demo /
+# cmd/hupi-demo-sweep's HUPI_PROVIDERS_CONFIG at it — deliberately
+# separate from providers.yaml (your own real config), so the public,
+# anonymous demo can never reach whatever model you actually use day to
+# day, no matter what a client sends as `model`
+# (gateway.Handler.resolveProvider falls back to this registry's one
+# chat profile for any name it doesn't recognize, and this registry has
+# no other profile to recognize).
+#
+# Cheap/fast models only, on purpose — see internal/demo's doc comment
+# and docs/TODO.md #2 for why: this endpoint is unauthenticated and
+# public, so cost has to be capped by model choice as well as by
+# internal/demo's session/message/consolidate limits.
+
+active_chat_provider: demo-chat
+active_consolidation_provider: demo-chat
+active_grounding_provider: demo-chat
+active_embedding_provider: demo-embed
+
+providers:
+  demo-chat:
+    kind: openai_compat
+    vendor: openai
+    api_base: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o-mini
+
+  demo-embed:
+    kind: openai_compat
+    vendor: openai
+    api_base: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: text-embedding-3-small

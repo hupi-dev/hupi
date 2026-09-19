@@ -457,6 +457,7 @@ migration_probe() {
     0011_key_rotation_audit_event.sql) echo "select (select pg_get_constraintdef(oid) from pg_constraint where conname = 'audit_log_event_type_check') like '%key_rotation%'" ;;
     0012_entity_embeddings.sql)        echo "select exists(select 1 from information_schema.columns where table_name='entities' and column_name='embedding')" ;;
     0013_embedding_model_tracking.sql)  echo "select exists(select 1 from information_schema.columns where table_name='summaries' and column_name='embedding_model')" ;;
+    0014_demo_sessions.sql)            echo "select (to_regclass('public.demo_sessions') is not null)" ;;
     *) die "no idempotency probe defined for migration $1 (add one to migration_probe)" ;;
   esac
 }
@@ -478,7 +479,8 @@ apply_all_migrations() {
   for f in 0001_init.sql 0002_tier3_phase1_identity.sql 0003_tier3_phase2_retrieved_refs.sql \
            0004_hardening_phase1_app_role.sql 0005_hardening_phase3_rls.sql 0006_hardening_phase4_scope_keys.sql \
            0007_audit_log.sql 0008_admin_operators.sql 0009_export_import_audit_events.sql \
-           0010_key_rotation.sql 0011_key_rotation_audit_event.sql 0012_entity_embeddings.sql 0013_embedding_model_tracking.sql; do
+           0010_key_rotation.sql 0011_key_rotation_audit_event.sql 0012_entity_embeddings.sql 0013_embedding_model_tracking.sql \
+           0014_demo_sessions.sql; do
     apply_migration "$f"
   done
 }

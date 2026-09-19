@@ -392,6 +392,45 @@ the single most important background job to get running correctly.
 fixed list of "does memory still know this" questions. See the example
 `probes.yaml` in the repo root for the shape.
 
+## Running the public hosted demo (optional)
+
+`cmd/hupi-demo` serves an anonymous, cost-capped demo — separate from
+your real `hupi` gateway, on its own listen address, backed by its own
+`providers.demo.yaml` (see `providers.demo.yaml.example`) containing only
+cheap/fast model profiles, so a public unauthenticated endpoint can never
+reach an expensive model regardless of what a client asks for. See
+`internal/demo`'s doc comment for the full design (session/message/
+consolidate caps, why a guest is a plain private-scope user and not a
+team).
+
+Run it the same way you run `hupi` itself — same environment variables,
+plus:
+
+```bash
+export HUPI_PROVIDERS_CONFIG=/path/to/providers.demo.yaml
+export HUPI_DEMO_LISTEN_ADDR=127.0.0.1:8789   # put a TLS-terminating reverse proxy in front of this
+export HUPI_DEMO_ALLOWED_ORIGIN=https://hupi.dev
+./bin/hupi-demo
+```
+
+Every cap has a conservative built-in default (`internal/demo.DefaultLimits`)
+and an env var override — `HUPI_DEMO_SESSION_TTL`,
+`HUPI_DEMO_MAX_MESSAGES_PER_SESSION`, `HUPI_DEMO_MAX_CONSOLIDATE_PER_SESSION`,
+`HUPI_DEMO_MAX_SESSIONS_PER_DAY`, `HUPI_DEMO_MAX_SESSIONS_PER_IP_PER_HOUR`.
+
+Add its cleanup job to the same crontab as above, more frequently since
+it's just deleting expired rows, not calling an LLM:
+
+```cron
+# every 15 minutes — deletes expired demo guests and everything they wrote
+*/15 * * * * HUPI_PROVIDERS_CONFIG=/path/to/providers.demo.yaml /path/to/bin/hupi-demo-sweep
+```
+
+Without this running, expired demo sessions stop being usable (their
+token simply stops resolving) but their data lingers in Postgres until
+the next successful sweep — not a correctness problem, but worth
+noticing quickly if it stops running.
+
 ## Upgrading an existing (pre-Tier-3) deployment
 
 If you already had HUPI running before the Tier 3/hardening work — i.e.
