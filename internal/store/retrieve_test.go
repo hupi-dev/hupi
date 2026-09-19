@@ -187,3 +187,68 @@ func TestRetrieve_FindsEntityByVectorSearchWhenSubstringMatchMisses(t *testing.T
 		t.Errorf("self_model entity leaked into vector-searched context, got: %q", result.ContextMessage)
 	}
 }
+
+// TestStage1QuestionSignal is a pure unit test for the helper added
+// alongside stage1KeywordSignal after live testing found real recall
+// questions ("What is my project's codename?") that contain none of
+// stage1SignalKeywords' fixed phrases and were silently skipped instead
+// of searched — see stage1QuestionSignal's own doc comment.
+func TestStage1QuestionSignal(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{"trailing question mark", "What is my project's codename?", true},
+		{"leading what, no question mark", "whats my project codename", true},
+		{"leading is, mixed case", "Is there a preferred language for this", true},
+		{"leading can", "Can you tell me the ship date", true},
+		{"leading auxiliary did", "Did we decide on a name for this", true},
+		{"plain statement", "The project ships in March.", false},
+		{"imperative, not a question", "Write me a poem about cats", false},
+		{"empty string", "", false},
+		{"whitespace only", "   ", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stage1QuestionSignal(tc.query); got != tc.want {
+				t.Errorf("stage1QuestionSignal(%q) = %v, want %v", tc.query, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetrieve_QuestionWithoutKeywordPhraseStillSearches is a regression
+// test for the same live-testing gap TestStage1QuestionSignal covers,
+// but proves it end to end through Retrieve rather than just the helper
+// in isolation: a query that's clearly a question but shares no
+// stage1SignalKeywords phrase and no entity substring match must still
+// reach stage 2 and find a real, on-record summary — before
+// stage1QuestionSignal existed, this exact shape of query returned
+// GateSkipped regardless of what was in memory.
+func TestRetrieve_QuestionWithoutKeywordPhraseStillSearches(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-question-signal"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	insertSummary(t, s, scope, "sum_test-question-signal_2026-01-01_daily_v1", "2026-01-01",
+		"the project's codename is Aurora and it ships in March", "")
+
+	// Deliberately contains none of stage1SignalKeywords' fixed phrases
+	// (no "remember", "recall", "what did", etc.) and no entity to match
+	// by substring — the only reason this should reach stage 2 at all is
+	// stage1QuestionSignal recognizing it as a question.
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "What is my project's codename?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if result.Gate != gateway.GateFull {
+		t.Fatalf("gate = %q, want %q — a question with no stage1SignalKeywords phrase should still reach stage 2 (context: %q)", result.Gate, gateway.GateFull, result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "Aurora") {
+		t.Errorf("context message missing the on-record fact, got: %q", result.ContextMessage)
+	}
+}

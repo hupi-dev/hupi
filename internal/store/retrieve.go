@@ -229,10 +229,10 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs}, nil
 	}
 
-	hasKeywordSignal := stage1KeywordSignal(query)
+	hasSignal := stage1KeywordSignal(query) || stage1QuestionSignal(query)
 
 	// Stage 1 found nothing at all: skipped, no search ever ran.
-	if len(matchedEntityIDs) == 0 && !hasKeywordSignal {
+	if len(matchedEntityIDs) == 0 && !hasSignal {
 		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs}, nil
 	}
 
@@ -403,6 +403,55 @@ func stage1KeywordSignal(query string) bool {
 	lower := strings.ToLower(query)
 	for _, kw := range stage1SignalKeywords {
 		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// stage1QuestionStarters backs stage1QuestionSignal — a bounded, common
+// set of English interrogative/auxiliary words that open a question when
+// the message isn't punctuated with a trailing "?". Includes the
+// apostrophe-dropped contractions ("whats", "whos", ...) alongside their
+// proper spellings — found via a real failure during live testing:
+// "whats my project codename" (no apostrophe, a very ordinary way to
+// type quickly) doesn't start with "what " and was missed until this was
+// added, the same informal-spelling gap a fixed keyword list can't avoid
+// without deliberately enumerating it.
+var stage1QuestionStarters = []string{
+	"what", "whats", "when", "whens", "where", "wheres",
+	"who", "whos", "whom", "whose", "why", "whys", "how", "hows",
+	"is", "are", "was", "were", "do", "does", "did",
+	"can", "could", "should", "would", "will", "has", "have", "had",
+}
+
+// stage1QuestionSignal is stage1KeywordSignal's counterpart for
+// interrogative-shaped messages, added after live testing found real
+// recall questions with no stage1SignalKeywords phrase in them (e.g.
+// "What do you remember about my project?" contains "remember" and
+// passes; "What is my project's codename?" doesn't contain any fixed
+// phrase and was silently skipped instead of searched).
+// ARCHITECTURE.md's request-lifecycle table already describes stage 1 as
+// catching "a question about something previously discussed" — this
+// closes the gap between that documented intent and what the fixed
+// keyword list actually caught. A trailing "?" or a leading
+// interrogative/auxiliary word is treated as worth attempting a search
+// for; vectorSimilarityThreshold and friends downstream are the actual
+// precision gate (see their own measured-calibration comments, e.g.
+// "write me a haiku about the ocean" at 0.0985 — well below threshold),
+// so this only costs an occasional wasted embedding call on an
+// unrelated question, never a wrong final answer.
+func stage1QuestionSignal(query string) bool {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasSuffix(trimmed, "?") {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	for _, w := range stage1QuestionStarters {
+		if lower == w || strings.HasPrefix(lower, w+" ") {
 			return true
 		}
 	}
