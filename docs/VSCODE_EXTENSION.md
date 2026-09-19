@@ -64,7 +64,12 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
   silently on config/auth errors rather than popping a message mid-type.
   Every request sets `X-Hupi-Memory: off` and `X-Hupi-Capture: off`
   (ARCHITECTURE.md § Capture) — a keystroke-pause completion is never
-  retrieved from or written into memory.
+  retrieved from or written into memory. Known gap: it reuses whatever
+  model `hupi.model`/the default chat provider resolves to — there's no
+  separate, cheaper completion-specific model yet (unlike e.g. Copilot,
+  whose inline suggestions run on a small dedicated model distinct from
+  its chat model), so a paid hosted provider bills real cost on every
+  typing pause, not just on deliberate requests.
 - **Multi-file edit** (`multiFileEdit.ts`, `HUPI: Multi-File Edit`) — pick
   from currently-open files, describe a change, and a review panel (a
   webview) shows a per-file diff with a checkbox before anything is
