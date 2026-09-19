@@ -8,9 +8,24 @@ const features = [
       'A HUPI panel in the activity bar. Every message automatically includes your active file or current selection as context — ask questions about your codebase without pasting anything in.',
   },
   {
+    title: '@hupi in the Chat view',
+    body:
+      "HUPI is also a chat participant in VS Code's own native Chat view — type @hupi alongside Copilot Chat or any other participant already living there. Marked sticky, so a conversation stays routed to HUPI after the first mention.",
+  },
+  {
     title: 'Inline edit — Ctrl+K / Cmd+K',
     body:
       'Select some code, describe the change, and HUPI rewrites it. You get a real diff preview — original vs. proposed — before anything touches your file. Accept or reject, nothing applies silently.',
+  },
+  {
+    title: 'Inline completions',
+    body:
+      'Copilot-style ghost text as you type, powered by your own HUPI gateway — Tab to accept. Off by default (it fires on every typing pause, unlike everything else here); turn on hupi.inlineSuggestions.enabled when you want it.',
+  },
+  {
+    title: 'Multi-file edit — Ctrl+Alt+M / Cmd+Alt+M',
+    body:
+      "Pick from your open files, describe a change, and review a real diff for every file HUPI proposes — accept some, all, or none. Scoped to files you already have open, not a whole-workspace scan.",
   },
 ];
 ---
@@ -20,7 +35,7 @@ const features = [
     <div>
       <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">In your editor</h2>
       <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
-        A Cursor-style chat and inline edit for VS Code — backed by your own HUPI, not a vendor.
+        A Cursor-style chat, inline edit, and code completions for VS Code — backed by your own HUPI, not a vendor.
       </p>
       <p class="mt-5 leading-relaxed text-fog-300">
         The HUPI VS Code extension is a plain extension built on the public VS Code API —
