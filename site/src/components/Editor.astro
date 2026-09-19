@@ -28,6 +28,69 @@ const features = [
       "Pick from your open files, describe a change, and review a real diff for every file HUPI proposes — accept some, all, or none. Scoped to files you already have open, not a whole-workspace scan.",
   },
 ];
+
+const settingGroups = [
+  {
+    title: 'Connection',
+    settings: [
+      {
+        name: 'hupi.baseUrl',
+        default: '"http://localhost:8787"',
+        body: "Your gateway's root URL — no trailing slash, no /v1 suffix.",
+      },
+      {
+        name: 'hupi.model',
+        default: '""',
+        body: 'A providers.yaml profile name for chat, inline edit, multi-file edit, and @hupi. Blank uses your default chat provider.',
+      },
+      {
+        name: 'hupi.teamId',
+        default: '""',
+        body: 'Routes through the team endpoint instead of your private one, for a Tier 3 shared deployment.',
+      },
+    ],
+  },
+  {
+    title: 'Sign-in (OIDC/SSO, instead of a pasted API key)',
+    settings: [
+      {
+        name: 'hupi.oidc.issuerUrl',
+        default: '""',
+        body: 'Your identity provider\'s OIDC discovery URL. Set this and clientAppId to enable HUPI: Sign In.',
+      },
+      {
+        name: 'hupi.oidc.clientAppId',
+        default: '""',
+        body: "The extension's own public-client app registration — not the same value as your gateway's server-side client ID.",
+      },
+      {
+        name: 'hupi.oidc.scope',
+        default: '""',
+        body: 'OAuth scopes to request. Must include offline_access or you\'ll be prompted to sign in again on every token expiry.',
+      },
+    ],
+  },
+  {
+    title: 'Ghost-text inline completions',
+    settings: [
+      {
+        name: 'hupi.inlineSuggestions.enabled',
+        default: 'false',
+        body: 'Turns on ghost-text suggestions as you type. Off by default — unlike everything else, this fires on every typing pause, not an explicit action.',
+      },
+      {
+        name: 'hupi.inlineSuggestions.debounceMs',
+        default: '300',
+        body: 'How long to pause before requesting a suggestion. Higher = fewer requests, longer wait.',
+      },
+      {
+        name: 'hupi.inlineSuggestions.model',
+        default: '""',
+        body: 'A separate, cheaper/faster/local providers.yaml profile just for completions, independent of hupi.model.',
+      },
+    ],
+  },
+];
 ---
 
 <section id="editor" class="border-b border-white/5 bg-navy-950/40">
@@ -88,6 +151,41 @@ const features = [
           </div>
         ))
       }
+    </div>
+
+    <div class="mt-10">
+      <h3 class="text-sm font-semibold uppercase tracking-widest text-ember-500">All settings</h3>
+      <p class="mt-2 max-w-3xl text-sm leading-relaxed text-fog-300">
+        Every setting the extension has, not just the two in the example above — search "hupi" in
+        VS Code's Settings (<code class="font-mono-tight rounded bg-navy-800 px-1 py-0.5 text-ember-400">Ctrl+,</code>)
+        to set any of these through the UI instead of JSON.
+      </p>
+      <div class="mt-4 space-y-6">
+        {
+          settingGroups.map((group) => (
+            <div>
+              <p class="font-mono-tight text-xs uppercase tracking-widest text-fog-700">{group.title}</p>
+              <div class="mt-2 overflow-x-auto rounded-xl border border-white/10">
+                <table class="w-full border-collapse text-left text-sm">
+                  <tbody>
+                    {group.settings.map((s, i) => (
+                      <tr class={i % 2 === 1 ? 'bg-navy-900/40' : ''}>
+                        <td class="w-px whitespace-nowrap border-b border-white/5 px-4 py-3 align-top font-mono-tight text-ember-400">
+                          {s.name}
+                        </td>
+                        <td class="w-px whitespace-nowrap border-b border-white/5 px-4 py-3 align-top font-mono-tight text-xs text-fog-700">
+                          {s.default}
+                        </td>
+                        <td class="border-b border-white/5 px-4 py-3 align-top text-fog-300">{s.body}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))
+        }
+      </div>
     </div>
 
     <div class="mt-6 rounded-xl border border-white/10 bg-gradient-to-r from-ember-500/10 to-transparent p-6 sm:p-8">
