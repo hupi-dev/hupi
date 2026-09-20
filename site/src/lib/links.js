@@ -34,6 +34,21 @@ export const VSCODE_MARKETPLACE_URL =
 export const LICENSE_LABEL = 'MIT';
 export const LICENSE_URL = `${GITHUB_URL}/blob/main/LICENSE`;
 
+// HUPI Code — the HUPI-native VS Code fork, a separate repo from the
+// gateway (this one). Linux/Windows/macOS all build in CI there; see
+// src/pages/downloads.astro for per-platform distribution status.
+export const HUPI_CODE_GITHUB_URL = 'https://github.com/hupi-dev/hupi-code';
+export const HUPI_CODE_BUILD_DOCS_URL = `${HUPI_CODE_GITHUB_URL}/blob/main/docs/BUILD.md`;
+
+// HUPI Code's Microsoft Store listing. Reserved and submitted as of
+// 2026-09-19/20, but still in Microsoft's certification/publishing
+// pipeline as of this writing — this URL may 404 or show a placeholder
+// until that finishes. downloads.astro deliberately doesn't link to
+// this directly yet (shows a "coming soon" state instead); flip that
+// once the listing is confirmed live rather than risking a public,
+// visibly-broken link on the marketing site.
+export const HUPI_CODE_STORE_URL = 'https://apps.microsoft.com/detail/9NRF25SF22ZV';
+
 // cmd/hupi-demo's public origin (docs/TODO.md #2, internal/demo) —
 // live on hupi-azvm, nginx-proxied to 127.0.0.1:8789 with a real
 // Let's Encrypt cert (auto-renewing via certbot's own systemd timer).
