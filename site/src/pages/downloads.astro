@@ -6,33 +6,43 @@ import {
   VSCODE_MARKETPLACE_URL,
   HUPI_CODE_GITHUB_URL,
   HUPI_CODE_BUILD_DOCS_URL,
+  HUPI_CODE_LINUX_DOWNLOAD_URL,
+  HUPI_CODE_MACOS_DOWNLOAD_URL,
 } from '../lib/links.js';
 
-// HUPI Code's own per-platform build/signing status, kept in sync with
-// hupi-code's README "Distribution status (Phase 4)" section by hand —
-// this is marketing copy, not generated from CI, so it can go stale;
-// check that README before trusting this if it's been a while.
+// HUPI Code's own per-platform build/signing/distribution status, kept
+// in sync with hupi-code's README "Distribution status (Phase 4)"
+// section by hand — this is marketing copy, not generated from CI, so
+// it can go stale; check that README before trusting this if it's been
+// a while. macOS/Linux downloadHref points at hupi-code's own CI-
+// published "latest" GitHub Release (see build.yml) — always the
+// current build off main, not a specific pinned version.
 const platforms = [
   {
     name: 'Windows',
     status: 'Coming soon — Microsoft Store',
     body:
       "Submitted to the Microsoft Store, currently in Microsoft's certification pipeline. The Store signs the package itself during certification, so there's no separate download to trust here — once published, this becomes a normal Store install with automatic updates.",
-    cta: null,
+    downloadHref: null,
+    secondaryHref: null,
   },
   {
     name: 'macOS',
-    status: 'Signed & notarized in CI — build from source',
+    status: 'Signed & notarized — download now',
     body:
-      'Every push is code-signed with a real Apple Developer ID Application certificate and notarized by Apple in CI, so a build you make yourself installs cleanly with no Gatekeeper warning. A ready-made binary download is coming; until then, building it yourself is a documented, one-command process.',
-    cta: { href: HUPI_CODE_BUILD_DOCS_URL, label: 'Build instructions' },
+      'Every push is code-signed with a real Apple Developer ID Application certificate and notarized by Apple, so this installs cleanly with no Gatekeeper warning. Apple Silicon (arm64) only for now.',
+    downloadHref: HUPI_CODE_MACOS_DOWNLOAD_URL,
+    downloadLabel: 'Download for macOS (.zip)',
+    secondaryHref: HUPI_CODE_BUILD_DOCS_URL,
   },
   {
     name: 'Linux',
-    status: 'Builds and smoke-tests in CI — build from source',
+    status: 'Builds and smoke-tests in CI — download now',
     body:
-      "The most exercised of the three platforms so far. A ready-made tarball download is coming; until then, building it yourself is a documented, one-command process.",
-    cta: { href: HUPI_CODE_BUILD_DOCS_URL, label: 'Build instructions' },
+      'The most exercised of the three platforms so far. x64 only for now.',
+    downloadHref: HUPI_CODE_LINUX_DOWNLOAD_URL,
+    downloadLabel: 'Download for Linux (.tar.gz)',
+    secondaryHref: HUPI_CODE_BUILD_DOCS_URL,
   },
 ];
 ---
@@ -108,9 +118,16 @@ const platforms = [
         </p>
         <p class="mt-4 max-w-3xl leading-relaxed text-fog-300">
           A HUPI-native fork of VS Code — the same chat/inline-edit experience, but bundled
-          in from first launch, no install step. It's real and building in CI today; it's
-          just not packaged for a one-click public download on every platform yet. Exactly
-          where each one stands:
+          in from first launch, no install step. macOS and Linux builds are real, signed
+          (macOS) downloads today, always the current build off <code class="font-mono-tight">main</code> — not
+          a stable numbered release yet, and no auto-update between downloads. Windows ships
+          through the Microsoft Store instead of a direct download; see why in{' '}
+          <a
+            href={`${HUPI_CODE_GITHUB_URL}#distribution-status-phase-4`}
+            class="text-ember-400 underline decoration-dotted hover:text-ember-300"
+          >
+            hupi-code's README
+          </a>.
         </p>
 
         <div class="mt-8 grid gap-6 md:grid-cols-3">
@@ -122,14 +139,24 @@ const platforms = [
                   {p.status}
                 </p>
                 <p class="mt-3 flex-1 text-sm leading-relaxed text-fog-300">{p.body}</p>
-                {p.cta && (
-                  <a
-                    href={p.cta.href}
-                    class="mt-5 self-start rounded-lg border border-white/15 px-4 py-2 text-sm font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5"
-                  >
-                    {p.cta.label} →
-                  </a>
-                )}
+                <div class="mt-5 flex flex-wrap gap-3">
+                  {p.downloadHref && (
+                    <a
+                      href={p.downloadHref}
+                      class="self-start rounded-lg bg-ember-500 px-4 py-2 text-sm font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400"
+                    >
+                      {p.downloadLabel}
+                    </a>
+                  )}
+                  {p.secondaryHref && (
+                    <a
+                      href={p.secondaryHref}
+                      class="self-start rounded-lg border border-white/15 px-4 py-2 text-sm font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5"
+                    >
+                      Build from source →
+                    </a>
+                  )}
+                </div>
               </div>
             ))
           }

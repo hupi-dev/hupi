@@ -49,6 +49,17 @@ export const HUPI_CODE_BUILD_DOCS_URL = `${HUPI_CODE_GITHUB_URL}/blob/main/docs/
 // visibly-broken link on the marketing site.
 export const HUPI_CODE_STORE_URL = 'https://apps.microsoft.com/detail/9NRF25SF22ZV';
 
+// hupi-code's own CI (.github/workflows/build.yml) publishes signed/
+// notarized macOS and Linux builds to a single rolling "latest" GitHub
+// Release on every push to main — there's no numbered versioning scheme
+// of hupi-code's own yet. These are GitHub's own stable "always the
+// current latest release" URLs, not links to a specific release/tag, so
+// they never need updating here as new builds land. Deliberately no
+// Windows entry: that platform ships via the Microsoft Store only (see
+// HUPI_CODE_STORE_URL above and hupi-code's own README).
+export const HUPI_CODE_LINUX_DOWNLOAD_URL = `${HUPI_CODE_GITHUB_URL}/releases/latest/download/hupi-code-linux-x64.tar.gz`;
+export const HUPI_CODE_MACOS_DOWNLOAD_URL = `${HUPI_CODE_GITHUB_URL}/releases/latest/download/hupi-code-darwin-arm64.zip`;
+
 // cmd/hupi-demo's public origin (docs/TODO.md #2, internal/demo) —
 // live on hupi-azvm, nginx-proxied to 127.0.0.1:8789 with a real
 // Let's Encrypt cert (auto-renewing via certbot's own systemd timer).
