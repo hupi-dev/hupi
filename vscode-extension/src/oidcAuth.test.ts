@@ -103,13 +103,18 @@ describe('getValidAccessToken', () => {
 
   it('returns undefined without touching the stored session when settings no longer match', async () => {
     const context = fakeContext();
-    await storeOidcSession(context, baseSession());
+    // Built once and reused for both the store and the expectation below —
+    // baseSession() calls Date.now() internally, so calling it a second
+    // time just for the comparison was a real, if rare, source of flakiness
+    // (the two Date.now() calls can land a millisecond apart under load).
+    const session = baseSession();
+    await storeOidcSession(context, session);
     const differentSettings = { ...settings, clientAppId: 'a-different-client' };
 
     expect(await getValidAccessToken(context, differentSettings)).toBeUndefined();
     // The mismatched session is left alone, not cleared — confirmed by
     // still being readable under the *original* settings.
-    expect(await getOidcSession(context)).toEqual(baseSession());
+    expect(await getOidcSession(context)).toEqual(session);
   });
 
   it('refreshes and stores a new session when expiring soon and a refresh token exists', async () => {
