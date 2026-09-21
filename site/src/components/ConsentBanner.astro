@@ -1,0 +1,63 @@
+---
+// Gates Google Ads conversion tracking behind explicit consent, shown
+// to every visitor (not just EU-geolocated ones — geolocation on a
+// static site would need a third-party IP-lookup call, which is itself
+// a privacy trade-off not worth making just to narrow who sees this).
+// See src/pages/privacy.astro for what this actually controls.
+---
+
+<div
+  id="hupi-consent-banner"
+  class="fixed inset-x-0 bottom-0 z-50 hidden border-t border-white/10 bg-navy-950/95 backdrop-blur"
+>
+  <div class="mx-auto flex max-w-6xl flex-col items-center gap-4 px-6 py-4 sm:flex-row sm:justify-between">
+    <p class="text-sm leading-relaxed text-fog-300">
+      hupi.dev uses Google Ads conversion tracking to see which pages are useful — nothing is
+      loaded until you accept. See <a href="/privacy" class="text-ember-400 underline decoration-dotted hover:text-ember-300">Privacy Policy</a>.
+    </p>
+    <div class="flex shrink-0 gap-3">
+      <button
+        id="hupi-consent-decline"
+        type="button"
+        class="rounded-lg border border-white/15 px-4 py-2 text-sm font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5"
+      >
+        Decline
+      </button>
+      <button
+        id="hupi-consent-accept"
+        type="button"
+        class="rounded-lg bg-ember-500 px-4 py-2 text-sm font-semibold text-ink transition-all hover:bg-ember-400"
+      >
+        Accept
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  import { getConsent, setConsent, loadGoogleAds, wireLinkConversions, wireEngagementConversion } from '../lib/analytics.js';
+
+  const banner = document.getElementById('hupi-consent-banner');
+  const consent = getConsent();
+
+  if (consent === 'granted') {
+    loadGoogleAds();
+    wireLinkConversions();
+    wireEngagementConversion();
+  } else if (consent !== 'denied' && banner) {
+    banner.classList.remove('hidden');
+  }
+
+  document.getElementById('hupi-consent-accept')?.addEventListener('click', () => {
+    setConsent('granted');
+    banner?.classList.add('hidden');
+    loadGoogleAds();
+    wireLinkConversions();
+    wireEngagementConversion();
+  });
+
+  document.getElementById('hupi-consent-decline')?.addEventListener('click', () => {
+    setConsent('denied');
+    banner?.classList.add('hidden');
+  });
+</script>

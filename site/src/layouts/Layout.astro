@@ -1,6 +1,7 @@
 ---
 import '../styles/global.css';
 import { GITHUB_URL } from '../lib/links.js';
+import ConsentBanner from '../components/ConsentBanner.astro';
 
 interface Props {
   title?: string;
@@ -76,5 +77,6 @@ const structuredData = {
   </head>
   <body class="bg-ink text-fog-100 selection:bg-ember-500">
     <slot />
+    <ConsentBanner />
   </body>
 </html>

@@ -18,7 +18,12 @@ const sections = [
   {
     title: 'What this website collects',
     body:
-      'As of this writing, nothing — hupi.dev runs no analytics, advertising, or tracking scripts of any kind. If that changes (e.g. basic analytics to understand which pages are useful), this page will be updated first to disclose exactly what is collected, and a cookie/consent notice will be added before any tracking cookie is ever set for an EU visitor.',
+      'hupi.dev uses Google Ads conversion tracking to see which pages and ad campaigns are actually useful — nothing else. This is scoped to the website only: it is never loaded, referenced, or shipped in HUPI the software (the gateway, the VS Code extension, or HUPI Code), which remains fully self-hosted with zero telemetry, exactly as described above. On this website, it sets a Google-controlled cookie and records: which page you\'re on, whether you clicked through to our GitHub repo or the VS Code Marketplace, whether you clicked a mailto link, whether you submitted the contact form, and whether you stayed on certain pages for a while. It does not see the content of anything you type into the contact form beyond what Google\'s own ad-attribution system needs (essentially none of it) — form submissions themselves go to Web3Forms, a third-party form-processing service, not through Google Ads at all (see "If you use the contact form" below). Nothing loads until you explicitly accept the cookie banner shown on first visit; declining (or ignoring it) means none of this ever runs for you.',
+  },
+  {
+    title: 'If you use the contact form',
+    body:
+      'Whatever you submit through the /contact form — name, email, company, and message — is sent directly to Web3Forms (web3forms.com), a third-party form-processing service, which emails it to us. We don\'t run our own backend for this (hupi.dev is a fully static site), so this is the one place data you type in passes through infrastructure we don\'t control before reaching us. We only use it to respond to your inquiry.',
   },
   {
     title: 'If you email us',
@@ -33,7 +38,7 @@ const sections = [
   {
     title: 'Changes to this policy',
     body:
-      'If what we collect changes — most likely by adding basic website analytics — this page will be updated to reflect it before that change takes effect, not after.',
+      'If what we collect changes further, this page will be updated to reflect it before that change takes effect, not after — same commitment that led to this page being rewritten when Google Ads conversion tracking was added, rather than left silently out of date.',
   },
 ];
 ---

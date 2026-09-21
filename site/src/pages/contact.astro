@@ -1,0 +1,114 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import FinalCta from '../components/FinalCta.astro';
+import { CONTACT_EMAIL } from '../lib/links.js';
+
+// Public and safe to commit — Web3Forms' own docs: "Don't worry this
+// can be public." Get one at web3forms.com (free, no account beyond an
+// email address to receive the key). Empty means the form still
+// renders but submissions will fail — fill this in before relying on
+// this page for real leads.
+const WEB3FORMS_ACCESS_KEY = '';
+---
+
+<Layout
+  title="Contact HUPI — Talk to us about Tier 3 or Enterprise | HUPI"
+  description="Get in touch about HUPI Tier 3 (team workspaces, SSO/OIDC) or enterprise deployments."
+>
+  <Nav />
+  <main>
+    <section class="relative overflow-hidden border-b border-white/5">
+      <div
+        class="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"
+      >
+      </div>
+      <div class="relative mx-auto max-w-4xl px-6 pb-16 pt-20 text-center sm:pt-28">
+        <p
+          class="font-mono-tight mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-navy-800/60 px-4 py-1.5 text-xs uppercase tracking-widest text-fog-300"
+        >
+          Contact
+        </p>
+        <h1 class="text-balance text-4xl font-extrabold tracking-tight text-fog-100 sm:text-5xl">
+          Talk to us about Tier 3 or an enterprise deployment.
+        </h1>
+        <p class="text-balance mx-auto mt-6 max-w-2xl text-lg text-fog-300">
+          Team workspaces, SSO/OIDC, licensing, or anything else — tell us what you're trying to
+          do and we'll get back to you. Prefer email? Write directly to{' '}
+          <a href={`mailto:${CONTACT_EMAIL}`} class="text-ember-500 underline decoration-dotted hover:text-ember-400">
+            {CONTACT_EMAIL}
+          </a>.
+        </p>
+      </div>
+    </section>
+
+    <section class="border-b border-white/5">
+      <div class="mx-auto max-w-2xl px-6 py-16 sm:py-20">
+        {!WEB3FORMS_ACCESS_KEY && (
+          <p class="mb-8 rounded-lg border border-ember-500/30 bg-ember-500/5 p-4 text-sm text-ember-400">
+            Form backend not yet configured — submissions will fail until a Web3Forms access key
+            is added.
+          </p>
+        )}
+        <form action="https://api.web3forms.com/submit" method="POST" class="space-y-5">
+          <input type="hidden" name="access_key" value={WEB3FORMS_ACCESS_KEY} />
+          <input type="hidden" name="subject" value="New HUPI contact form submission" />
+          <input type="hidden" name="from_name" value="hupi.dev contact form" />
+          <input type="hidden" name="redirect" value="https://hupi.dev/thank-you" />
+          {/* Honeypot: real visitors never see or fill this (aria-hidden + visually hidden);
+              Web3Forms silently discards the submission if it's non-empty. */}
+          <input type="checkbox" name="botcheck" class="hidden" style="display: none;" aria-hidden="true" tabindex="-1" autocomplete="off" />
+
+          <div>
+            <label for="name" class="mb-1.5 block text-sm font-medium text-fog-100">Name</label>
+            <input
+              type="text" id="name" name="name" required
+              class="w-full rounded-lg border border-white/15 bg-navy-900/60 px-4 py-2.5 text-sm text-fog-100 outline-none transition-colors focus:border-ember-500"
+            />
+          </div>
+          <div>
+            <label for="email" class="mb-1.5 block text-sm font-medium text-fog-100">Work email</label>
+            <input
+              type="email" id="email" name="email" required
+              class="w-full rounded-lg border border-white/15 bg-navy-900/60 px-4 py-2.5 text-sm text-fog-100 outline-none transition-colors focus:border-ember-500"
+            />
+          </div>
+          <div>
+            <label for="company" class="mb-1.5 block text-sm font-medium text-fog-100">Company</label>
+            <input
+              type="text" id="company" name="company"
+              class="w-full rounded-lg border border-white/15 bg-navy-900/60 px-4 py-2.5 text-sm text-fog-100 outline-none transition-colors focus:border-ember-500"
+            />
+          </div>
+          <div>
+            <label for="team_size" class="mb-1.5 block text-sm font-medium text-fog-100">Team size</label>
+            <select
+              id="team_size" name="team_size"
+              class="w-full rounded-lg border border-white/15 bg-navy-900/60 px-4 py-2.5 text-sm text-fog-100 outline-none transition-colors focus:border-ember-500"
+            >
+              <option value="1-10">1–10</option>
+              <option value="11-50">11–50</option>
+              <option value="51-200">51–200</option>
+              <option value="200+">200+</option>
+            </select>
+          </div>
+          <div>
+            <label for="message" class="mb-1.5 block text-sm font-medium text-fog-100">What are you trying to do?</label>
+            <textarea
+              id="message" name="message" required rows="5"
+              class="w-full rounded-lg border border-white/15 bg-navy-900/60 px-4 py-2.5 text-sm text-fog-100 outline-none transition-colors focus:border-ember-500"
+            ></textarea>
+          </div>
+
+          <button
+            type="submit"
+            class="w-full rounded-lg bg-ember-500 px-5 py-3 text-center text-sm font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400"
+          >
+            Send
+          </button>
+        </form>
+      </div>
+    </section>
+  </main>
+  <FinalCta />
+</Layout>
