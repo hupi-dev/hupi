@@ -31,11 +31,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"hupi/internal/auth"
 	"hupi/internal/bootstrap"
 	"hupi/internal/consolidation"
 	"hupi/internal/demo"
 	"hupi/internal/gateway"
+	"hupi/internal/metrics"
 	"hupi/internal/store"
 )
 
@@ -78,11 +81,19 @@ func run() error {
 	allowedOrigin := envOr("HUPI_DEMO_ALLOWED_ORIGIN", "https://hupi.dev")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /demo/session", handleCreateSession(demoStore, ipLimiter))
-	mux.HandleFunc("POST /v1/chat/completions", handler.HandleChatCompletions)
-	mux.HandleFunc("POST /demo/consolidate-now", handleConsolidateNow(demoStore))
+	mux.HandleFunc("POST /demo/session", metrics.InstrumentHandler("/demo/session", handleCreateSession(demoStore, ipLimiter)))
+	mux.HandleFunc("POST /v1/chat/completions", metrics.InstrumentHandler("/v1/chat/completions", handler.HandleChatCompletions))
+	mux.HandleFunc("POST /demo/consolidate-now", metrics.InstrumentHandler("/demo/consolidate-now", handleConsolidateNow(demoStore)))
 	mux.HandleFunc("GET /healthz", handleLiveness)
 	mux.HandleFunc("GET /readyz", handleReadiness(deps.DB))
+	// Prometheus text-format scrape endpoint, same as cmd/hupi's own (see
+	// docs/TODO.md #8) — binds to 127.0.0.1 by default like the rest of
+	// this server, so it was never a security concern that it was missing
+	// here; it just never got ported when this binary was split out from
+	// cmd/hupi. Only aggregate, label-bounded counters (see
+	// internal/metrics's own package doc on cardinality/privacy), same
+	// "no customer data" bar the real gateway's /metrics holds to.
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	addr := envOr("HUPI_DEMO_LISTEN_ADDR", "127.0.0.1:8789")
 	srv := &http.Server{Addr: addr, Handler: withCORS(allowedOrigin, mux)}
