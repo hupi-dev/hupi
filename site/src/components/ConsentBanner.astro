@@ -35,7 +35,7 @@
 </div>
 
 <script>
-  import { getConsent, setConsent, loadGoogleAds, wireLinkConversions, wireEngagementConversion } from '../lib/analytics.js';
+  import { getConsent, setConsent, loadGoogleAds, wireLinkConversions } from '../lib/analytics.js';
 
   const banner = document.getElementById('hupi-consent-banner');
   const consent = getConsent();
@@ -43,7 +43,6 @@
   if (consent === 'granted') {
     loadGoogleAds();
     wireLinkConversions();
-    wireEngagementConversion();
   } else if (consent !== 'denied' && banner) {
     banner.classList.remove('hidden');
   }
@@ -53,7 +52,6 @@
     banner?.classList.add('hidden');
     loadGoogleAds();
     wireLinkConversions();
-    wireEngagementConversion();
   });
 
   document.getElementById('hupi-consent-decline')?.addEventListener('click', () => {

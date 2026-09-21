@@ -17,8 +17,6 @@ export const CONVERSION_LABELS = {
 	leadForm: '',
 	githubClick: 'TGA9CObCxf8cENvElOJE',
 	marketplaceClick: 'RCdLCOnCxf8cENvElOJE',
-	contactClick: '',
-	docsEngagement: '',
 };
 
 const CONSENT_KEY = 'hupi-ads-consent';
@@ -61,10 +59,6 @@ export function loadGoogleAds() {
 	document.head.appendChild(script);
 }
 
-export function initGoogleAdsIfConsented() {
-	if (getConsent() === 'granted') loadGoogleAds();
-}
-
 // label is a key into CONVERSION_LABELS — e.g. trackConversion('githubClick').
 export function trackConversion(label) {
 	if (getConsent() !== 'granted' || !CONVERSION_ID) return;
@@ -75,7 +69,7 @@ export function trackConversion(label) {
 	window.gtag('event', 'conversion', { send_to: `${CONVERSION_ID}/${conversionLabel}` });
 }
 
-// Wires up the three link-click conversions site-wide. Safe to call on
+// Wires up the two link-click conversions site-wide. Safe to call on
 // every page — querySelectorAll just finds nothing on pages without
 // these links.
 export function wireLinkConversions() {
@@ -85,14 +79,4 @@ export function wireLinkConversions() {
 	document.querySelectorAll('a[href*="marketplace.visualstudio.com"]').forEach((el) => {
 		el.addEventListener('click', () => trackConversion('marketplaceClick'), { once: false });
 	});
-	document.querySelectorAll('a[href^="mailto:"]').forEach((el) => {
-		el.addEventListener('click', () => trackConversion('contactClick'), { once: false });
-	});
-}
-
-// 30-second-dwell engagement conversion for /docs and /faq — a weaker
-// proxy signal for pages with no click-through action of their own.
-export function wireEngagementConversion() {
-	if (!['/docs', '/docs/', '/faq', '/faq/'].includes(window.location.pathname)) return;
-	setTimeout(() => trackConversion('docsEngagement'), 30_000);
 }
