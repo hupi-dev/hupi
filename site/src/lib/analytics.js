@@ -15,8 +15,8 @@
 export const CONVERSION_ID = 'AW-18459468379';
 export const CONVERSION_LABELS = {
 	leadForm: '',
-	githubClick: '',
-	marketplaceClick: '',
+	githubClick: 'TGA9CObCxf8cENvElOJE',
+	marketplaceClick: 'RCdLCOnCxf8cENvElOJE',
 	contactClick: '',
 	docsEngagement: '',
 };
