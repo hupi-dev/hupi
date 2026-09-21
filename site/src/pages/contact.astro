@@ -50,11 +50,19 @@ const WEB3FORMS_ACCESS_KEY = '022ad9dc-ce40-408a-9959-171b2d9434fe';
             is added.
           </p>
         )}
-        <form action="https://api.web3forms.com/submit" method="POST" class="space-y-5">
+        <p id="contact-form-error" class="mb-6 hidden rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-400">
+          Something went wrong sending your message — please try again, or email{' '}
+          <a href={`mailto:${CONTACT_EMAIL}`} class="underline decoration-dotted">{CONTACT_EMAIL}</a>{' '}directly.
+        </p>
+        <form id="contact-form" action="https://api.web3forms.com/submit" method="POST" class="space-y-5">
           <input type="hidden" name="access_key" value={WEB3FORMS_ACCESS_KEY} />
           <input type="hidden" name="subject" value="New HUPI contact form submission" />
           <input type="hidden" name="from_name" value="hupi.dev contact form" />
-          <input type="hidden" name="redirect" value="https://hupi.dev/thank-you" />
+          {/* No "redirect" field here on purpose — that field only works for
+              a plain (non-JS) HTML POST. This form submits via fetch (see
+              the script below) so it can redirect client-side after
+              confirming success, since Web3Forms' own server-side redirect
+              wasn't reliably landing on /thank-you. */}
           {/* Honeypot: real visitors never see or fill this (aria-hidden + visually hidden);
               Web3Forms silently discards the submission if it's non-empty. */}
           <input type="checkbox" name="botcheck" class="hidden" style="display: none;" aria-hidden="true" tabindex="-1" autocomplete="off" />
@@ -101,8 +109,9 @@ const WEB3FORMS_ACCESS_KEY = '022ad9dc-ce40-408a-9959-171b2d9434fe';
           </div>
 
           <button
+            id="contact-form-submit"
             type="submit"
-            class="w-full rounded-lg bg-ember-500 px-5 py-3 text-center text-sm font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400"
+            class="w-full rounded-lg bg-ember-500 px-5 py-3 text-center text-sm font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
             Send
           </button>
@@ -112,3 +121,38 @@ const WEB3FORMS_ACCESS_KEY = '022ad9dc-ce40-408a-9959-171b2d9434fe';
   </main>
   <FinalCta />
 </Layout>
+
+<script>
+  // Submits via fetch instead of a plain HTML POST so we can redirect
+  // client-side after confirming success — Web3Forms' own server-side
+  // "redirect" field wasn't reliably landing on /thank-you, and their
+  // own docs warn that field only works for a non-JS form submission
+  // anyway (mixing the two causes a redirect CORS error on their end).
+  const form = document.getElementById('contact-form');
+  const submitButton = document.getElementById('contact-form-submit');
+  const errorBox = document.getElementById('contact-form-error');
+
+  form?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorBox?.classList.add('hidden');
+    submitButton?.setAttribute('disabled', 'true');
+
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: { Accept: 'application/json' },
+      });
+      const result = await response.json();
+      if (result.success) {
+        window.location.href = '/thank-you';
+        return;
+      }
+      throw new Error(result.message || 'submission rejected');
+    } catch (err) {
+      console.error('contact form submission failed', err);
+      errorBox?.classList.remove('hidden');
+      submitButton?.removeAttribute('disabled');
+    }
+  });
+</script>
