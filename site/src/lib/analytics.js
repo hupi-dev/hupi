@@ -12,7 +12,7 @@
 // Conversions): CONVERSION_ID is the one shared "AW-XXXXXXXXX" tag ID
 // for the whole account; each entry in CONVERSION_LABELS is the
 // per-action label Google generates for that specific conversion goal.
-export const CONVERSION_ID = '';
+export const CONVERSION_ID = 'AW-18459468379';
 export const CONVERSION_LABELS = {
 	leadForm: '',
 	githubClick: '',
