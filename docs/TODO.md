@@ -10,9 +10,25 @@ If you fix one of these, delete it from this list rather than checking it
 off and leaving it — a stale TODO is worse than no TODO.
 
 Closed since the last pass (CI/CD, `SECURITY.md`, the `extractJSON` fix,
-Tier 3 pricing, the `/metrics` endpoint, the privacy policy, and both Go
-and VS Code extension test-coverage gaps) — deleted per the rule above,
-not left as a checked-off ledger. The VS Code extension closure needed a
+Tier 3 pricing, the `/metrics` endpoint, the privacy policy, zero
+analytics installed anywhere, and both Go and VS Code extension
+test-coverage gaps) — deleted per the rule above, not left as a
+checked-off ledger. Analytics landed as Google Ads conversion tracking,
+website-only (`site/src/lib/analytics.js`, `ConsentBanner.astro`) — never
+loaded, referenced, or shipped in HUPI the software, which stays fully
+self-hosted with zero telemetry; nothing fires until a visitor explicitly
+accepts the consent banner, and `/privacy` was rewritten to disclose
+exactly what it collects instead of the previous "we track nothing" line,
+which stopped being true the moment this landed. It also surfaced a real
+gap this review didn't originally name: there was no way to capture a
+lead at all (no signup funnel, HUPI's whole model doesn't have one) —
+`/contact` (a real form, backed by Web3Forms since the site is fully
+static with no backend of its own) and `/thank-you` (where the lead-form
+conversion actually fires) didn't exist until this pass added them.
+Worth knowing for next time: Web3Forms' own server-side `redirect` field
+turned out unreliable in practice — the form now submits via `fetch` and
+redirects client-side after confirming `{success: true}` in the response,
+which is the version actually live now. The VS Code extension closure needed a
 hand-written `vscode` module mock (`src/test/vscode-mock.ts`, wired in via
 `vitest.config.ts`'s `resolve.alias`) since no real `vscode` package
 exists outside a real VS Code process — every previously-zero-coverage
@@ -38,20 +54,6 @@ undiscovered ops gaps on the production VM itself (`ANTHROPIC_API_KEY`/
 persisted, and the Postgres container's restart policy was `no`) — both
 fixed, not just worked around.
 
-## 1. Zero analytics installed anywhere
-
-Confirmed via grep across the whole site: no `gtag`, GA, Plausible,
-PostHog, Segment, or Mixpanel anywhere.
-
-**Why now, not later**: this directly blocks measuring the Google Ads
-campaign plan already drafted — you cannot tell if any of those keyword
-groups convert without it. It also means there's no way to know whether the
-OIDC content (the Security-section strip, the FAQ entries, the
-Editor.astro callout) is actually being seen or clicked. Install this
-before spending money on ads, not after. Once it ships, `/privacy` needs a
-cookie/tracking disclosure added — it currently correctly says "we collect
-nothing," which stops being true the moment this lands.
-
 ## Smaller items worth naming
 
 - **No case studies/testimonials/about page anywhere** — for Tier 3 buyers
@@ -65,6 +67,8 @@ nothing," which stops being true the moment this lands.
 
 ## If picking just one to start
 
-**Analytics.** It's the only major item left, and it's blocking something
-already in motion (measuring the Google Ads campaign), not just a general
-improvement.
+No major item is currently open — what's left are the two smaller,
+named items above. Of those, **case studies/testimonials** is the one
+with a clearer trigger: worth doing once the first real Tier 3
+conversation from the Google Ads campaign (now actually measurable)
+turns into a customer, not before there's a real story to tell.
