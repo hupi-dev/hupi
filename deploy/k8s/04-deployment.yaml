@@ -3,7 +3,10 @@
 # unreachable from the Service in front of it (see the Dockerfile's
 # EXPOSE comment). HUPI_REQUIRE_AUTH=true because this is a real
 # deployment, not a laptop default (cmd/hupi/main.go's own doc comment
-# on that flag).
+# on that flag). HUPI_ENABLE_KEYWORD_SEARCH is spelled out explicitly
+# (rather than left to its own "true" default) so it's a one-line edit
+# away, in the same file you're already editing by hand — see
+# docs/INSTALL.md's section on it for the tradeoff before flipping it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,6 +36,8 @@ spec:
               value: "true"
             - name: HUPI_PROVIDERS_CONFIG
               value: "/app/config/providers.yaml"
+            - name: HUPI_ENABLE_KEYWORD_SEARCH
+              value: "true"
           envFrom:
             - secretRef:
                 name: hupi-app

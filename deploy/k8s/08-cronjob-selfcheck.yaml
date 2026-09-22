@@ -33,6 +33,13 @@ spec:
               env:
                 - name: HUPI_PROVIDERS_CONFIG
                   value: "/app/config/providers.yaml"
+                # Kept in sync with 04-deployment.yaml's setting — probes
+                # rely on the retrieval gate reaching "full" the same way
+                # live traffic does, so a mismatch here would make a
+                # probe fail for a reason that has nothing to do with a
+                # real regression.
+                - name: HUPI_ENABLE_KEYWORD_SEARCH
+                  value: "true"
           volumes:
             - name: providers-config
               configMap:
