@@ -531,7 +531,16 @@ behind it instead of a single-user local file tree.
 
 - **Added latency per turn** from the retrieval step (mitigated by keeping
   the vector index small — summaries, not raw text — and running keyword/
-  entity lookup in parallel with vector search).
+  entity lookup alongside vector search). "Keyword" here is now real BM25
+  scoring (`internal/store/bm25.go`, `keywordSearchSummaries`/
+  `keywordSearchEpisodes`), not just substring matching — it catches an
+  exact name/ID/acronym a dense embedding can dilute or miss entirely,
+  at a real cost of its own: BM25 over application-encrypted text has no
+  index to search with (Postgres's own full-text search can't see through
+  ciphertext), so it decrypts and scores the whole scope's matching
+  corpus per query rather than using an index the way vector search's
+  HNSW index does. Fine at personal/team-history scale, the same
+  trade-off `stage1EntityMatches` already makes elsewhere in this file.
 - **Consolidation costs real LLM calls**, now roughly doubled by the
   grounding-check pass (daily/weekly/monthly/yearly summarization, each
   verified). At years of scale this is the dominant recurring cost of the

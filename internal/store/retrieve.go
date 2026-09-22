@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"hupi/internal/audit"
@@ -262,6 +263,8 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	}
 	queryVector := pgfmt.VectorLiteral(embedResp.Vectors[0])
 
+	queryTerms := tokenize(query)
+
 	err = dbscope.Run(ctx, s.db, workspace, workspace, func(tx *sql.Tx) error {
 		summaryRefs, err := s.vectorSearchSummaries(ctx, tx, workspace, queryVector, &sb, &strongHit)
 		if err != nil {
@@ -280,6 +283,30 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 			return fmt.Errorf("vector search entities: %w", err)
 		}
 		refs = append(refs, entityRefs...)
+
+		// Keyword (BM25) search runs after its vector counterpart, over
+		// the same two content types, excluding whatever vector search
+		// already surfaced — the same "second chance, skip duplicates"
+		// shape vectorSearchEntities already uses for stage 1's own
+		// matches. See keywordSearchSummaries' doc comment for why this
+		// isn't a symmetric rank-fusion of two independently-run
+		// searches: BM25 over encrypted text has no index to search with,
+		// so it already decrypts and scores the whole scope's corpus by
+		// the time it has an answer, unlike vector search's cheap,
+		// index-accelerated top-K.
+		if len(queryTerms) > 0 {
+			summaryKeywordRefs, err := s.keywordSearchSummaries(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindSummary), &sb, &strongHit)
+			if err != nil {
+				return fmt.Errorf("keyword search summaries: %w", err)
+			}
+			refs = append(refs, summaryKeywordRefs...)
+
+			episodeKeywordRefs, err := s.keywordSearchEpisodes(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEpisode), &sb, &strongHit)
+			if err != nil {
+				return fmt.Errorf("keyword search episodes: %w", err)
+			}
+			refs = append(refs, episodeKeywordRefs...)
+		}
 		return nil
 	})
 	if err != nil {
@@ -656,6 +683,200 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 		*strongHit = true
 	}
 	return refs, rows.Err()
+}
+
+// refIDsOfKind extracts the IDs of every already-collected ref of the
+// given kind — used to build keywordSearchSummaries/Episodes' excludeIDs
+// from whatever vector search already found for that content type.
+func refIDsOfKind(refs []identity.Ref, kind string) []string {
+	var ids []string
+	for _, r := range refs {
+		if r.Kind == kind {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids
+}
+
+// keywordSearchSummaries is vectorSearchSummaries' BM25 counterpart —
+// catches exact-term matches (a specific name, ID, or acronym) a dense
+// embedding can miss or dilute, at a cost this function pays
+// deliberately: BM25 over application-encrypted text (ARCHITECTURE.md §
+// Storage security) has no index to search with, since Postgres's own
+// full-text search machinery can't see through ciphertext. So this
+// decrypts and scores every matching summary in scope on every call —
+// fine at personal/team-history scale (the same trade-off
+// stage1EntityMatches already makes fetching a whole entity table per
+// request), genuinely bad if a scope's corpus ever grew past what a
+// single query should fully decrypt.
+//
+// Deliberately not a symmetric rank-fusion (e.g. reciprocal rank fusion)
+// with vectorSearchSummaries: since this already decrypts the whole
+// corpus to score it, there's no cost saved by deferring to a later
+// fusion step, so it simply runs after its vector counterpart and skips
+// whatever excludeIDs already found — the same shape vectorSearchEntities
+// already uses for stage 1's own matches.
+//
+// Not restricted to "embedding is not null" the way keywordSearchEpisodes
+// mirrors vectorSearchEpisodes' restriction: BM25 doesn't need an
+// embedding to exist at all, and a summary missing one (an embedding-
+// provider failure at creation time, say) shouldn't also be invisible to
+// keyword search — this is a genuine, small coverage improvement over
+// what vector search alone can offer for summaries specifically.
+//
+// No calibrated score threshold yet (unlike vectorSimilarityThreshold and
+// friends, which have real measured examples in their own doc comments)
+// — any summary with a positive BM25 score against the query is
+// included, up to maxVectorResults. Revisit once this has real query
+// traffic to measure against.
+func (s *Store) keywordSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+	rows, err := q.QueryContext(ctx, `
+		select id, summary, key_version
+		from summaries s
+		where summary is not null
+		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		  and not (id = any($1::text[]))
+		  and scope_kind = $2 and scope_owner = $3
+	`, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	textByID := make(map[string]string)
+	var docs []bm25Document
+	for rows.Next() {
+		var id string
+		var summaryCT []byte
+		var keyVersion int
+		if err := rows.Scan(&id, &summaryCT, &keyVersion); err != nil {
+			return nil, err
+		}
+		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
+		}
+		text, err := enc.Decrypt(summaryCT)
+		if err != nil {
+			return nil, err
+		}
+		textByID[id] = text
+		docs = append(docs, newBM25Document(id, text))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	matches := rankBM25(docs, queryTerms)
+
+	var refs []identity.Ref
+	for _, m := range matches {
+		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s, keyword match): %s", m, textByID[m]))
+		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: m})
+		*strongHit = true
+	}
+	return refs, nil
+}
+
+// keywordSearchEpisodes is keywordSearchSummaries' sibling over
+// `episodes` — see that function's doc comment for the shared design
+// (why this decrypts the whole matching set rather than using an index,
+// why it isn't a rank-fusion with vectorSearchEpisodes). Restricted to
+// the same "type = 'interaction' and embedding is not null" set
+// vectorSearchEpisodes already covers, not every interaction episode
+// ever recorded — keeping the two search mechanisms' corpus identical
+// for episodes avoids a surprising asymmetry where keyword search finds
+// something vector search structurally can never see. BM25 doesn't
+// actually need an embedding to exist, so widening this to every
+// interaction episode is a real, available future option — deliberately
+// not done here to keep this first version's decrypt cost bounded to the
+// same set vector search already pays for (episodes accumulate per
+// turn, unlike summaries which accumulate at most once a day, so this
+// restriction matters far more for episodes than it did for summaries).
+func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+	rows, err := q.QueryContext(ctx, `
+		select id, input_text, output_text, key_version
+		from episodes
+		where embedding is not null and type = 'interaction'
+		  and not (id = any($1::text[]))
+		  and scope_kind = $2 and scope_owner = $3
+	`, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type exchange struct{ input, output string }
+	byID := make(map[string]exchange)
+	var docs []bm25Document
+	for rows.Next() {
+		var id string
+		var inputCT, outputCT []byte
+		var keyVersion int
+		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion); err != nil {
+			return nil, err
+		}
+		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			return nil, fmt.Errorf("resolve encryption key for episode %s: %w", id, err)
+		}
+		input, err := enc.Decrypt(inputCT)
+		if err != nil {
+			return nil, err
+		}
+		output, err := enc.Decrypt(outputCT)
+		if err != nil {
+			return nil, err
+		}
+		byID[id] = exchange{input: input, output: output}
+		docs = append(docs, newBM25Document(id, input+" "+output))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	matches := rankBM25(docs, queryTerms)
+
+	var refs []identity.Ref
+	for _, m := range matches {
+		ex := byID[m]
+		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s, keyword match): USER: %s ASSISTANT: %s", m, ex.input, ex.output))
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m})
+		*strongHit = true
+	}
+	return refs, nil
+}
+
+// rankBM25 scores every document against queryTerms using corpus stats
+// computed from that same document set (see bm25DocFrequency's doc
+// comment), returns IDs of every positively-scored document ordered
+// highest-score-first, capped at maxVectorResults — the same result cap
+// vector search uses, so keyword search can't unboundedly outweigh it in
+// the final context.
+func rankBM25(docs []bm25Document, queryTerms []string) []string {
+	docFreq := bm25DocFrequency(docs)
+	avgDocLen := bm25AverageDocLength(docs)
+
+	type scored struct {
+		id    string
+		score float64
+	}
+	var matches []scored
+	for _, doc := range docs {
+		if score := bm25Score(doc, queryTerms, docFreq, len(docs), avgDocLen); score > 0 {
+			matches = append(matches, scored{id: doc.id, score: score})
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+	if len(matches) > maxVectorResults {
+		matches = matches[:maxVectorResults]
+	}
+
+	ids := make([]string, len(matches))
+	for i, m := range matches {
+		ids[i] = m.id
+	}
+	return ids
 }
 
 func truncateToBudget(s string, maxChars int) string {
