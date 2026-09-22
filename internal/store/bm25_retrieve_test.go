@@ -198,3 +198,70 @@ func TestRetrieve_KeywordSearchSkipsWhatVectorSearchAlreadyFound(t *testing.T) {
 		t.Errorf("context message shows a keyword match for a summary that was actually a vector-search hit, got: %q", result.ContextMessage)
 	}
 }
+
+// insertEpisodeWithoutEmbedding seeds a plain interaction episode with no
+// embedding at all (the column stays NULL) — the case
+// vectorSearchEpisodes' own "embedding is not null" filter means it can
+// never even be a candidate for vector search, regardless of similarity.
+func insertEpisodeWithoutEmbedding(t *testing.T, s *Store, scope identity.Scope, id, input, output string) {
+	t.Helper()
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	inputCT, err := enc.Encrypt(input)
+	if err != nil {
+		t.Fatalf("encrypt test episode input: %v", err)
+	}
+	outputCT, err := enc.Encrypt(output)
+	if err != nil {
+		t.Fatalf("encrypt test episode output: %v", err)
+	}
+
+	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into episodes (id, type, input_text, output_text, hash, scope_kind, scope_owner, key_version)
+			values ($1, 'interaction', $2, $3, $4, $5, $6, $7)
+		`, id, inputCT, outputCT, hash(id), scope.Kind, scope.Owner, keyVersion)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test episode %s: %v", id, err)
+	}
+}
+
+// TestRetrieve_KeywordSearchFindsEpisodeWithNoEmbeddingAtAll is the real
+// reason keywordSearchEpisodes was widened beyond vectorSearchEpisodes'
+// own "embedding is not null" restriction: a low-importance episode
+// consolidation never deemed worth embedding was never even a candidate
+// for vector search — no similarity score, however low, could ever
+// surface it, since it isn't in that query's result set at all. BM25
+// needs no embedding, so it's still reachable via exact-term overlap.
+func TestRetrieve_KeywordSearchFindsEpisodeWithNoEmbeddingAtAll(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-bm25-no-embedding"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	insertEpisodeWithoutEmbedding(t, s, scope,
+		"ep_test-bm25-no-embedding_1",
+		"quick note: Meridian's scheduler now uses tokio for its async runtime",
+		"got it, noted",
+	)
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "what async runtime does Meridian use?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if result.Gate != gateway.GateFull {
+		t.Fatalf("gate = %q, want %q (context: %q) — an unembedded episode should still be reachable via keyword search", result.Gate, gateway.GateFull, result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "ep_test-bm25-no-embedding_1") {
+		t.Errorf("context message missing the unembedded episode, got: %q", result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "keyword match") {
+		t.Errorf("context message doesn't show this as a keyword match, got: %q", result.ContextMessage)
+	}
+}

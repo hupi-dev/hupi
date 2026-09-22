@@ -787,23 +787,31 @@ func (s *Store) keywordSearchSummaries(ctx context.Context, q dbscope.Querier, s
 // keywordSearchEpisodes is keywordSearchSummaries' sibling over
 // `episodes` — see that function's doc comment for the shared design
 // (why this decrypts the whole matching set rather than using an index,
-// why it isn't a rank-fusion with vectorSearchEpisodes). Restricted to
-// the same "type = 'interaction' and embedding is not null" set
-// vectorSearchEpisodes already covers, not every interaction episode
-// ever recorded — keeping the two search mechanisms' corpus identical
-// for episodes avoids a surprising asymmetry where keyword search finds
-// something vector search structurally can never see. BM25 doesn't
-// actually need an embedding to exist, so widening this to every
-// interaction episode is a real, available future option — deliberately
-// not done here to keep this first version's decrypt cost bounded to the
-// same set vector search already pays for (episodes accumulate per
-// turn, unlike summaries which accumulate at most once a day, so this
-// restriction matters far more for episodes than it did for summaries).
+// why it isn't a rank-fusion with vectorSearchEpisodes).
+//
+// Deliberately NOT restricted to "embedding is not null" the way
+// vectorSearchEpisodes is: that restriction exists there because a
+// vector index only has entries for episodes consolidation actually
+// embedded (the smaller, "high-importance" subset), but BM25 needs no
+// embedding to exist at all. Covering every interaction episode, not
+// just the embedded subset, is the entire point of adding this — a
+// low-importance episode consolidation never deemed worth embedding is
+// exactly the kind of thing vector search can structurally never find,
+// and BM25 finding an exact term there is a real capability gain, not
+// just parity with vector search.
+//
+// This is a genuinely bigger decrypt cost than keywordSearchSummaries
+// pays, and worth being explicit about: episodes accumulate per turn,
+// not per day like summaries, so this corpus grows much faster over a
+// long-lived deployment. Still fine at personal/team-history scale
+// (same trade-off stage1EntityMatches already makes elsewhere in this
+// file), but the first mechanism in this file where that scale
+// assumption is worth re-checking if it ever stops holding.
 func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, input_text, output_text, key_version
 		from episodes
-		where embedding is not null and type = 'interaction'
+		where type = 'interaction'
 		  and not (id = any($1::text[]))
 		  and scope_kind = $2 and scope_owner = $3
 	`, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner)
