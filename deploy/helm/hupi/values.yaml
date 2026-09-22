@@ -9,6 +9,19 @@ gateway:
   listenAddr: "0.0.0.0:8787"
   requireAuth: true
 
+# BM25 keyword search runs alongside vector search on every query with
+# any signal to search for (see docs/INSTALL.md's
+# `HUPI_ENABLE_KEYWORD_SEARCH` section for the full tradeoff). It has no
+# database index to accelerate it — every stored field is encrypted at
+# rest, so it decrypts and scores a scope's matching history live per
+# query — a real cost that scales with corpus size, unlike vector
+# search's index-accelerated top-K. Defaults to enabled: most
+# deployments never accumulate enough history for that cost to matter.
+# Set to false only if you know yours does (an unusually large or
+# long-lived corpus, or a latency-sensitive setting).
+retrieval:
+  enableKeywordSearch: true
+
 # Every entry becomes an env var on the gateway, cronjobs, and admin UI
 # via envFrom — the app-role DB DSN, the field-encryption key, and each
 # provider's API key all live here. Two ways to supply it:

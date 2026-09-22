@@ -24,6 +24,8 @@ spec:
               env:
                 - name: HUPI_PROVIDERS_CONFIG
                   value: "/app/config/providers.yaml"
+                - name: HUPI_ENABLE_KEYWORD_SEARCH
+                  value: {{ .Values.retrieval.enableKeywordSearch | quote }}
               envFrom:
                 - secretRef:
                     name: {{ include "hupi.appSecretName" . }}
