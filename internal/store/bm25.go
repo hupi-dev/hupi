@@ -45,6 +45,18 @@ func tokenize(text string) []string {
 	})
 	terms := make([]string, 0, len(raw))
 	for _, t := range raw {
+		// Splitting on anything non-alphanumeric (including apostrophes)
+		// turns every possessive into a spurious single-letter "s" token
+		// ("Meridian's" -> "meridian", "s"; "what's" -> "what", "s") —
+		// found via real calibration measurement: an unrelated
+		// true-negative query scored identically to a genuine near-miss
+		// purely because both happened to contain a possessive. Bare
+		// single-character tokens carry no real lexical content anyway,
+		// so dropping them fixes this rather than special-casing
+		// apostrophes specifically.
+		if len(t) < 2 {
+			continue
+		}
 		if !bm25StopWords[t] {
 			terms = append(terms, t)
 		}

@@ -4,7 +4,11 @@ import "testing"
 
 func TestTokenize(t *testing.T) {
 	got := tokenize("Meridian's job scheduler uses Rust and tokio!")
-	want := []string{"meridian", "s", "job", "scheduler", "uses", "rust", "tokio"}
+	// "s" (the leftover from splitting the possessive "Meridian's" on its
+	// apostrophe) is deliberately absent — single-character tokens are
+	// dropped, see tokenize's own doc comment for the real bug this
+	// fixed.
+	want := []string{"meridian", "job", "scheduler", "uses", "rust", "tokio"}
 	if len(got) != len(want) {
 		t.Fatalf("tokenize() = %v, want %v", got, want)
 	}

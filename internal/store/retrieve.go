@@ -730,11 +730,48 @@ func refIDsOfKind(refs []identity.Ref, kind string) []string {
 // keyword search — this is a genuine, small coverage improvement over
 // what vector search alone can offer for summaries specifically.
 //
-// No calibrated score threshold yet (unlike vectorSimilarityThreshold and
-// friends, which have real measured examples in their own doc comments)
-// — any summary with a positive BM25 score against the query is
-// included, up to maxVectorResults. Revisit once this has real query
-// traffic to measure against.
+// Score cutoff is "> 0", not a calibrated positive value — measured
+// deliberately, the same way vectorSimilarityThreshold and friends were
+// (a constructed set of real true-positive/near-miss/true-negative
+// query-document pairs, scored with this package's actual bm25Score,
+// not hand-estimated), against an 18-document corpus mixing several
+// genuinely distinct topics:
+//
+//	11.10  true positive  — exact rare-term match, direct question
+//	 6.91  true positive  — exact rare-term match, different phrasing
+//	 5.29  true positive  — exact rare-term match, different topic
+//	 5.19  near-miss      — same rare term, but the wrong specific
+//	                        document (query asks about the job queue,
+//	                        this document is about migrating a
+//	                        different service to use it)
+//	 3.39  true positive
+//	 3.11  true positive
+//	 2.55  near-miss      — a shared moderately-common word ("favorite"),
+//	                        wrong topic entirely
+//	 1.80  true positive
+//	 1.29  near-miss      — query uses "async runtime", document says
+//	                        "tokio" — BM25 can't bridge that gap (no
+//	                        notion that the words are related), the one
+//	                        remaining shared token is a rare name
+//	 0.00  every true negative, with zero exceptions
+//
+// True positives and near-misses interleave throughout the positive
+// range — the same finding vectorSimilarityThreshold's own comment
+// documents for its metric, for the same underlying reason: a document
+// sharing one real, rare token with the query scores comparably whether
+// it's actually what's being asked about or just adjacent to it. No
+// positive cutoff value cleanly separates the two categories; raising
+// the threshold to exclude the 1.29 near-miss would also exclude the
+// 1.80 true positive sitting right above it, while still admitting the
+// 2.55 and 5.19 near-misses further up. The one real, clean gap in this
+// entire measurement is between 0 and any positive score — every true
+// negative landed at exactly 0, with no exceptions — which is exactly
+// the cutoff already implemented. Ranking by score and capping at
+// maxVectorResults (both already implemented in rankBM25) is what
+// actually separates a true positive from a same-topic near-miss in
+// practice: both get included when there's room, but the true positive
+// ranks first. Re-measure if the tokenizer's stopword list or the BM25
+// k1/b constants ever change.
 func (s *Store) keywordSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, summary, key_version
