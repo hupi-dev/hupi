@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 
@@ -294,7 +295,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// so it already decrypts and scores the whole scope's corpus by
 		// the time it has an answer, unlike vector search's cheap,
 		// index-accelerated top-K.
-		if len(queryTerms) > 0 {
+		if len(queryTerms) > 0 && keywordSearchEnabled() {
 			summaryKeywordRefs, err := s.keywordSearchSummaries(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindSummary), &sb, &strongHit)
 			if err != nil {
 				return fmt.Errorf("keyword search summaries: %w", err)
@@ -689,6 +690,42 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 		*strongHit = true
 	}
 	return refs, rows.Err()
+}
+
+// keywordSearchEnabled is the installing admin's own escape hatch for
+// BM25/keyword search's real, documented cost: it has no index over
+// application-encrypted text (Postgres full-text search can't see
+// through ciphertext — see keywordSearchSummaries' own doc comment), so
+// it decrypts and scores every matching row in scope on every query
+// where stage 1 found any signal at all. That's fine at the
+// personal/team-history scale this product targets by default — real
+// measurement (see keywordSearchSummaries' calibration table) found
+// nothing wrong with the results themselves — but it's the one
+// mechanism in this file whose cost genuinely scales with how much
+// history a scope has accumulated, unlike vector search's index-
+// accelerated top-K, which stays fast regardless of corpus size.
+//
+// Defaults to enabled: this is real, working functionality with a
+// measured-correct threshold, not an experimental feature, and the
+// vast majority of deployments (a single person's or team's own
+// history) will never accumulate enough episodes for the cost to
+// matter. The flag exists specifically for the informed minority who
+// know their deployment doesn't fit that assumption — a very large
+// or very long-lived corpus, or a latency-sensitive setting where
+// even a few extra milliseconds of decrypt-and-score per turn isn't
+// acceptable — and want vector search's index-accelerated top-K as
+// the only retrieval mechanism, at the cost of losing BM25's exact-
+// term recall (a specific name, ID, or acronym vector search can
+// dilute or miss — see keywordSearchSummaries' own doc comment) and
+// losing the ability to reach episodes consolidation never deemed
+// important enough to embed.
+//
+// Checked on every call rather than cached at startup: os.Getenv reads
+// an in-memory copy of the process environment, not a syscall, so
+// there's no real cost to re-checking it, and this way a change takes
+// effect on the next request rather than requiring a restart.
+func keywordSearchEnabled() bool {
+	return os.Getenv("HUPI_ENABLE_KEYWORD_SEARCH") != "false"
 }
 
 // refIDsOfKind extracts the IDs of every already-collected ref of the

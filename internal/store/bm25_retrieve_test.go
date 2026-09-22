@@ -265,3 +265,44 @@ func TestRetrieve_KeywordSearchFindsEpisodeWithNoEmbeddingAtAll(t *testing.T) {
 		t.Errorf("context message doesn't show this as a keyword match, got: %q", result.ContextMessage)
 	}
 }
+
+// TestRetrieve_KeywordSearchDisabledByFlag confirms the admin escape
+// hatch (HUPI_ENABLE_KEYWORD_SEARCH=false) actually turns keyword search
+// off — reusing the exact scenario
+// TestRetrieve_KeywordSearchFindsExactTermVectorSearchMisses proves finds
+// something with it enabled, and confirming it's genuinely unreachable
+// with it disabled: not just unranked lower, but not present in the
+// context or refs at all, and the gate correctly falls back to partial
+// rather than full.
+func TestRetrieve_KeywordSearchDisabledByFlag(t *testing.T) {
+	t.Setenv("HUPI_ENABLE_KEYWORD_SEARCH", "false")
+
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-bm25-flag-disabled"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	insertSummaryWithEmbeddingIndex(t, s, scope,
+		"sum_test-bm25-flag_2026-01-01_daily_v1", "2026-01-01",
+		"Meridian's job scheduler is built in Rust with tokio, using Postgres instead of Redis for its queue.",
+		1, // orthogonal to fakeEmbedder's query vector — same as the "enabled" test
+	)
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "what async runtime does Meridian use?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if result.Gate == gateway.GateFull {
+		t.Errorf("gate = %q with keyword search disabled, want %q — the summary should be unreachable (only orthogonal vector similarity, no keyword fallback)", result.Gate, gateway.GatePartial)
+	}
+	if strings.Contains(result.ContextMessage, "tokio") {
+		t.Errorf("context message contains the summary's content even with keyword search disabled, got: %q", result.ContextMessage)
+	}
+	for _, ref := range result.Refs {
+		if ref.ID == "sum_test-bm25-flag_2026-01-01_daily_v1" {
+			t.Errorf("Refs contains the summary even with keyword search disabled, got: %+v", result.Refs)
+		}
+	}
+}

@@ -191,6 +191,41 @@ has an old, single-file encryption key (see "Upgrading an existing
 deployment" below). A brand-new install generates each scope's key
 on demand in the database, automatically, the first time it's needed.
 
+### Optional: `HUPI_ENABLE_KEYWORD_SEARCH`
+
+Retrieval runs two complementary search mechanisms side by side: vector
+(semantic) search, and BM25 keyword search — a classic exact-term
+ranking technique that catches a specific name, ID, or acronym a dense
+embedding can dilute or miss (see `ARCHITECTURE.md` § Key tradeoffs to
+accept going in). Both are on by default; this variable is a deliberate
+escape hatch for the one real cost keyword search has that vector search
+doesn't.
+
+**The tradeoff, plainly**: every text field HUPI stores is encrypted at
+rest, application-level, so there's no way to build a database index
+over it the way normal full-text search would (an index can't see
+through ciphertext). Keyword search's workaround is to decrypt and score
+every matching row in a scope on each query where there's any signal to
+search for at all — correct, and measured to have no accuracy problems
+of its own, but genuinely more work than vector search's index-
+accelerated top-K, and that cost scales with how much history a scope
+has accumulated (episodes especially, since those grow per conversation
+turn, not per day like summaries).
+
+For the vast majority of deployments — one person's or one team's own
+history — this is a non-issue; leave it on. Turn it off only if you know
+your situation doesn't fit that assumption (an unusually large or very
+long-lived corpus, or a setting where every millisecond of added
+per-turn latency genuinely matters) and have decided the trade is worth
+it — with keyword search off, you keep vector search's full recall for
+anything phrased close to how it's stored, but lose exact-term matches
+that don't happen to also be close in vector space, and lose the ability
+to reach episodes consolidation never deemed important enough to embed.
+
+```bash
+export HUPI_ENABLE_KEYWORD_SEARCH=false   # opt out; any other value (or unset) leaves it on
+```
+
 At this point the shared setup is done. What differs per tier is what you
 do next.
 
