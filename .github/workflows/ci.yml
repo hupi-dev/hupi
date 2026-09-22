@@ -86,3 +86,52 @@ jobs:
       # once) a missing space around an inline link that only shows up in
       # the actually-rendered HTML — see docs/TODO.md #1.
       - run: npm run build
+
+  # Deployment manifests are hand-edited YAML with no compiler to catch a
+  # typo'd key or a broken template reference — this job is that check,
+  # for deploy/helm/, deploy/k8s/, and docker-compose.yml the same way
+  # the jobs above catch mistakes in Go/TS/Astro before they're only
+  # found the next time someone actually tries to deploy.
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "v3.20.0"
+
+      - name: helm lint
+        run: helm lint deploy/helm/hupi
+
+      # Rendered twice — default values, and with the one flag this repo's
+      # BM25 keyword search work added — so a broken template reference
+      # under either setting fails here, not on a real cluster.
+      - name: helm template (default values)
+        run: helm template test deploy/helm/hupi > /dev/null
+
+      - name: helm template (keyword search disabled)
+        run: helm template test deploy/helm/hupi --set retrieval.enableKeywordSearch=false > /dev/null
+
+      # kubeconform validates structure against the Kubernetes OpenAPI
+      # schema entirely offline — no cluster or kubeconfig involved, unlike
+      # `kubectl apply --dry-run=client`, which still reaches out to a live
+      # API server for schema validation and would just fail here with no
+      # cluster to reach.
+      - name: Validate raw k8s manifests (kubeconform)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          ./kubeconform -strict -summary deploy/k8s/*.yaml
+
+      - name: docker compose config
+        run: |
+          cp .env.example .env
+          # Dummy values only to satisfy compose's required-var checks —
+          # this validates config syntax/interpolation, it never runs
+          # anything.
+          sed -i \
+            -e 's/^POSTGRES_ADMIN_PASSWORD=$/POSTGRES_ADMIN_PASSWORD=ci-dummy/' \
+            -e 's/^HUPI_APP_DB_PASSWORD=$/HUPI_APP_DB_PASSWORD=ci-dummy/' \
+            -e 's/^HUPI_KEK=$/HUPI_KEK=ci-dummy/' \
+            .env
+          docker compose config > /dev/null
