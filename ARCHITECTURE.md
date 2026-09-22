@@ -533,7 +533,8 @@ behind it instead of a single-user local file tree.
   the vector index small — summaries, not raw text — and running keyword/
   entity lookup alongside vector search). "Keyword" here is now real BM25
   scoring (`internal/store/bm25.go`, `keywordSearchSummaries`/
-  `keywordSearchEpisodes`), not just substring matching — it catches an
+  `keywordSearchEpisodes`/`keywordSearchEntities`), not just substring
+  matching — it catches an
   exact name/ID/acronym a dense embedding can dilute or miss entirely,
   at a real cost of its own: BM25 over application-encrypted text has no
   index to search with (Postgres's own full-text search can't see through

@@ -52,6 +52,72 @@ func insertSummaryWithEmbeddingIndex(t *testing.T, s *Store, scope identity.Scop
 	}
 }
 
+// insertEntityWithEmbeddingIndex is insertEntityWithEmbedding's sibling
+// with a controllable embedding dimension — see
+// insertSummaryWithEmbeddingIndex's doc comment for why.
+func insertEntityWithEmbeddingIndex(t *testing.T, s *Store, scope identity.Scope, id, kind, name, attrsJSON string, dim int) {
+	t.Helper()
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	attrsCT, err := enc.Encrypt(attrsJSON)
+	if err != nil {
+		t.Fatalf("encrypt test entity attrs: %v", err)
+	}
+	vec := make([]float32, 1536)
+	vec[dim] = 1
+	embeddingLiteral := pgfmt.VectorLiteral(vec)
+
+	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into entities (id, kind, name, attributes, scope_kind, scope_owner, key_version, embedding)
+			values ($1, $2, $3, $4, $5, $6, $7, $8::vector)
+		`, id, kind, name, attrsCT, scope.Kind, scope.Owner, keyVersion, embeddingLiteral)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test entity %s: %v", id, err)
+	}
+}
+
+// TestRetrieve_KeywordSearchFindsEntityByAttributeContentVectorSearchMisses
+// mirrors the summary/episode BM25 tests, but proves the entity path
+// specifically: the query shares no substring with the entity's own name
+// (so stage1EntityMatches can't find it either), and the entity's
+// embedding is deliberately orthogonal to the query's (so vector search
+// can't find it) — only BM25 scoring the *decrypted attributes* against
+// the query finds it, via a distinctive token that appears in neither
+// the entity's name nor stage1's substring check at all.
+func TestRetrieve_KeywordSearchFindsEntityByAttributeContentVectorSearchMisses(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-bm25-entity"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	insertEntityWithEmbeddingIndex(t, s, scope,
+		"tool:job-queue-note", "skill", "Job processing note",
+		`{"detail":"uses zephyrbatch for background job processing"}`,
+		1, // orthogonal to fakeEmbedder's query vector
+	)
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "what is zephyrbatch used for?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if result.Gate != gateway.GateFull {
+		t.Fatalf("gate = %q, want %q (context: %q)", result.Gate, gateway.GateFull, result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "entity tool:job-queue-note") || !strings.Contains(result.ContextMessage, "keyword match") {
+		t.Errorf("context message missing the entity keyword match, got: %q", result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "zephyrbatch") {
+		t.Errorf("context message missing the entity's actual attribute content, got: %q", result.ContextMessage)
+	}
+}
+
 // TestRetrieve_KeywordSearchFindsExactTermVectorSearchMisses is BM25's
 // actual reason for existing alongside vector search, exercised
 // end-to-end through Retrieve rather than just bm25_test.go's isolated

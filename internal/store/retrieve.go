@@ -306,6 +306,12 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 				return fmt.Errorf("keyword search episodes: %w", err)
 			}
 			refs = append(refs, episodeKeywordRefs...)
+
+			entityKeywordRefs, err := s.keywordSearchEntities(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEntity), &sb, &strongHit)
+			if err != nil {
+				return fmt.Errorf("keyword search entities: %w", err)
+			}
+			refs = append(refs, entityKeywordRefs...)
 		}
 		return nil
 	})
@@ -842,6 +848,72 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 		ex := byID[m]
 		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s, keyword match): USER: %s ASSISTANT: %s", m, ex.input, ex.output))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m})
+		*strongHit = true
+	}
+	return refs, nil
+}
+
+// keywordSearchEntities is keywordSearchSummaries' sibling over
+// `entities` — see that function's doc comment for the shared design.
+// excludeIDs should be every entity ID already found by this point
+// (stage 1's own substring matches plus whatever vectorSearchEntities
+// just added — both already live in retrieve()'s single, growing refs
+// slice by the time this runs), same exclusion vectorSearchEntities
+// itself applies against stage 1. self_model is excluded the same way
+// stage1EntityMatches and vectorSearchEntities both exclude it: handled
+// unconditionally by buildAnchor, never something that should compete
+// for a keyword-search slot.
+//
+// BM25 document text is name + decrypted attributes, not attributes
+// alone — name is already plaintext (stage1EntityMatches substring-
+// matches it directly with no decryption step), so including it costs
+// nothing and lets a query matching an entity's name but not its stored
+// attribute values still score.
+func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+	rows, err := q.QueryContext(ctx, `
+		select id, name, attributes, key_version
+		from entities
+		where attributes is not null and kind != 'self_model'
+		  and not (id = any($1::text[]))
+		  and scope_kind = $2 and scope_owner = $3
+	`, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type entity struct{ name, attrs string }
+	byID := make(map[string]entity)
+	var docs []bm25Document
+	for rows.Next() {
+		var id, name string
+		var attrsCT []byte
+		var keyVersion int
+		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion); err != nil {
+			return nil, err
+		}
+		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			return nil, fmt.Errorf("resolve encryption key for entity %s: %w", id, err)
+		}
+		attrs, err := enc.Decrypt(attrsCT)
+		if err != nil {
+			return nil, err
+		}
+		byID[id] = entity{name: name, attrs: attrs}
+		docs = append(docs, newBM25Document(id, name+" "+attrs))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	matches := rankBM25(docs, queryTerms)
+
+	var refs []identity.Ref
+	for _, m := range matches {
+		e := byID[m]
+		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s, %s, keyword match): %s", m, e.name, e.attrs))
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: m})
 		*strongHit = true
 	}
 	return refs, nil
