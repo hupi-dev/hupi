@@ -1,0 +1,37 @@
+# Same fully-local profile as providers.local.yaml.example, but for
+# docker-compose.local.yml specifically: Ollama runs as its own service
+# in that stack (named `ollama`), reachable over the compose network by
+# service name — not "localhost" (that's the gateway container itself)
+# and not "host.docker.internal" (that's for a *host-installed* Ollama,
+# which this override doesn't need at all). docker-compose.local.yml
+# mounts this file in as the gateway's providers.yaml automatically —
+# you don't need to copy or edit anything yourself for that path.
+#
+# See providers.local.yaml.example for the bare-metal (Tier 1/2,
+# install.sh) equivalent, and docs/INSTALL.md's "fully local" section
+# for the full picture. The two files are identical except for
+# api_base below.
+
+active_chat_provider: local-ollama
+active_consolidation_provider: local-ollama
+# active_grounding_provider omitted on purpose — reuses
+# active_consolidation_provider's own profile.
+active_embedding_provider: local-ollama-embed
+
+providers:
+  local-ollama:
+    kind: openai_compat
+    vendor: ollama
+    api_base: http://ollama:11434/v1
+    api_key_env: ""
+    model: llama3.2
+
+  local-ollama-embed:
+    kind: openai_compat
+    vendor: ollama
+    api_base: http://ollama:11434/v1
+    api_key_env: ""
+    model: nomic-embed-text     # 768 dimensions, zero-padded to 1536 at
+                                 # startup — see providers.local.yaml.example's
+                                 # own comment for why that's exact, not a
+                                 # quality tradeoff.

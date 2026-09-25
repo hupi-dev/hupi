@@ -1,0 +1,58 @@
+# Fully local override: adds an in-compose Ollama service and points
+# the gateway at it, so this needs nothing beyond Docker itself — no
+# host-installed Ollama, no cloud AI vendor account, no API key in .env
+# at all. See docs/INSTALL.md's "fully local" section and
+# providers.local.docker.yaml.example (mounted into the gateway below)
+# for what's actually running.
+#
+# Usage:
+#   cp .env.example .env   # still need POSTGRES_ADMIN_PASSWORD / HUPI_APP_DB_PASSWORD /
+#                           # HUPI_KEK — those are HUPI's own DB/encryption secrets,
+#                           # unrelated to any AI vendor, and unaffected by this override
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# First run pulls ~2.3GB of model weights (llama3.2 + nomic-embed-text)
+# before the gateway starts — watch progress with:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f ollama-pull
+# Re-running `up` afterward is fast: `ollama pull` no-ops once a model
+# is already present in the hupi-ollama-data volume, so it only
+# re-downloads if that volume is removed.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - hupi-ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot, same pattern the base compose file already uses for its
+  # own `migrate` service: pulls the two models
+  # providers.local.docker.yaml.example references, then exits, and
+  # `gateway` below waits for it to finish successfully before starting.
+  # OLLAMA_HOST points the `ollama` CLI baked into this same image at
+  # the *other* container's server instead of trying to start its own.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    entrypoint: ["sh", "-c", "ollama pull llama3.2 && ollama pull nomic-embed-text"]
+
+  gateway:
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      ollama-pull:
+        condition: service_completed_successfully
+    volumes:
+      - ./providers.local.docker.yaml.example:/app/providers.yaml:ro
+
+volumes:
+  hupi-ollama-data:

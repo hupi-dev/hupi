@@ -574,6 +574,35 @@ the `postgres` service and `depends_on: postgres` from `migrate`, and
 point `HUPI_ADMIN_DATABASE_URL`/`HUPI_APP_DATABASE_URL` at your existing
 instance instead — same idea as the bare-metal and Kubernetes paths.
 
+**Fully local, via Compose** —
+[docker-compose.local.yml](../docker-compose.local.yml) is an override
+that adds Ollama as its own service and points the gateway at it, so
+the whole stack needs nothing beyond Docker itself — no host-installed
+Ollama (unlike the `host.docker.internal` path above), no cloud AI
+vendor account, no API key in `.env` at all:
+
+```bash
+cp .env.example .env   # still need the three DB/encryption secrets above — unrelated to any AI vendor
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+```
+
+This adds two services on top of the base three: `ollama` (the model
+server) and a one-shot `ollama-pull` (pulls `llama3.2` and
+`nomic-embed-text` into a named volume, then exits — `gateway` waits for
+it the same way it already waits for `migrate`) — and mounts
+[providers.local.docker.yaml.example](../providers.local.docker.yaml.example)
+in as the gateway's `providers.yaml` automatically, so there's nothing
+to copy or edit by hand. First run pulls ~2.3GB of model weights before
+the gateway starts; watch progress with
+`docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f ollama-pull`.
+Verified end to end against the real containerized stack: `ollama-pull`
+completing, the gateway starting clean against the real containerized
+Ollama, and a real `/v1/chat/completions` request round-tripping to a
+genuinely locally-generated response — see
+[providers.local.yaml.example](../providers.local.yaml.example)'s own
+comments for why `llama3.2` is the default (realistic on a laptop CPU,
+not tuned for best quality) and how to swap in a larger local model.
+
 Nothing in `docker-compose.yml` runs `hupi-consolidate` or
 `hupi-selfcheck` on a schedule — same "bring your own scheduler"
 approach as the bare-metal path's cron entries. Run either one-off
