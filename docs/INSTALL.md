@@ -167,6 +167,33 @@ tradeoff (see [ARCHITECTURE.md § Provider abstraction](../ARCHITECTURE.md)).
 Only a model with a *longer* native output and no truncation option —
 uncommon in practice — genuinely can't be used as-is.
 
+**Want to try HUPI with zero cloud API keys at all?**
+[`providers.local.yaml.example`](../providers.local.yaml.example) points
+every role — chat, consolidation, grounding, and embeddings — at a local
+[Ollama](https://ollama.com) instance instead:
+
+```bash
+ollama pull llama3.2
+ollama pull nomic-embed-text
+cp providers.local.yaml.example providers.yaml
+```
+
+Then continue with Step 6 below as normal, just skip the
+`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` line — nothing in this profile
+reads a cloud credential at all. Verified end to end against a real
+local Ollama instance: the gateway's own startup embedding-dimension
+check succeeds against `nomic-embed-text`'s real 768-dimension output
+(zero-padded to 1536, see above), and a real `/v1/chat/completions`
+request round-trips through to a locally-generated response — no
+network egress to any AI vendor at any point. `hupi-code` and the
+`hupi-vscode` extension need no changes to work this way either: they
+only ever talk to HUPI's own gateway endpoint, never to OpenAI or
+Anthropic directly, so once the gateway itself is configured like this,
+they're fully local automatically. Swap in a larger local model (e.g.
+`llama3.1:8b`) for better consolidation/grounding quality if your
+hardware can take it — `llama3.2` here is chosen specifically to be
+realistic on a laptop CPU with no GPU, not for best quality.
+
 ## Step 6 — Environment variables
 
 These are the same for every tier:

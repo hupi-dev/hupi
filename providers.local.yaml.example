@@ -1,0 +1,58 @@
+# A fully local profile: copy to providers.yaml and every model call —
+# chat, consolidation, grounding, and embeddings — goes to a local
+# Ollama instance instead of any cloud vendor. No OPENAI_API_KEY,
+# ANTHROPIC_API_KEY, or any other cloud credential is read at all with
+# this file in place; api_key_env is left empty on every profile below
+# on purpose, since a local, unauthenticated Ollama endpoint has no key
+# to send. See providers.yaml.example for the general reference (this
+# file is one specific, ready-to-use profile of it, not a replacement).
+#
+# Setup:
+#   ollama pull llama3.2
+#   ollama pull nomic-embed-text
+#   cp providers.local.yaml.example providers.yaml
+#   ./install.sh --provider-preset=existing-file --provider-existing-file=providers.yaml
+#
+# llama3.2 (the 3B variant) is the default here specifically because
+# it's realistic on a laptop CPU with no GPU — this profile is aimed at
+# "try HUPI without any cloud account or API key," not at maximum
+# consolidation/grounding quality. Swap in a larger local model (e.g.
+# llama3.1:8b, qwen2.5:14b) via `ollama pull` + editing `model:` below
+# if your hardware can take it and you want better fact-extraction
+# quality — nothing else in this file needs to change to do that.
+
+active_chat_provider: local-ollama
+active_consolidation_provider: local-ollama
+# active_grounding_provider omitted on purpose — reuses
+# active_consolidation_provider's own profile, same as
+# providers.yaml.example's own convention.
+active_embedding_provider: local-ollama-embed
+
+providers:
+  local-ollama:
+    kind: openai_compat
+    vendor: ollama
+    # http://localhost:11434/v1 is correct for a bare-metal install
+    # (Tier 1/2, docs/INSTALL.md) where HUPI and Ollama run as plain
+    # processes on the same machine. If HUPI itself runs inside a
+    # container instead (docker-compose.yml's gateway service, or a
+    # Kubernetes pod) and Ollama runs on the host, "localhost" resolves
+    # to that container, not the host — use
+    # http://host.docker.internal:11434/v1 instead (docker-compose.yml's
+    # gateway service already maps that hostname for you).
+    api_base: http://localhost:11434/v1
+    api_key_env: ""             # unauthenticated local endpoint
+    model: llama3.2
+
+  local-ollama-embed:
+    kind: openai_compat
+    vendor: ollama
+    api_base: http://localhost:11434/v1
+    api_key_env: ""
+    model: nomic-embed-text     # outputs 768 dimensions, not the 1536 every embedding
+                                 # column requires — HUPI zero-pads it up to 1536 at
+                                 # startup automatically (see ARCHITECTURE.md § Provider
+                                 # abstraction; the padding is exact, not a quality
+                                 # tradeoff). A local model *longer* than 1536 with no
+                                 # truncation option would still fail to start — this
+                                 # one works because it's shorter, not despite it.
