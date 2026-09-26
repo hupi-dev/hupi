@@ -185,10 +185,14 @@ func runBaselineConversation(handler *gateway.Handler, userID, answerModel strin
 // exercises the real retrieval+generation+capture path exactly like any
 // other request, not a special "QA mode." Returns one prediction per
 // question, in the same order as conv.qa.
-func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv benchConversation, queryTime time.Time) ([]string, error) {
-	handler.Now = func() time.Time { return queryTime }
+func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv benchConversation, defaultQueryTime time.Time) ([]string, error) {
 	answers := make([]string, len(conv.qa))
 	for i, qa := range conv.qa {
+		qt := defaultQueryTime
+		if !qa.queryTime.IsZero() {
+			qt = qa.queryTime
+		}
+		handler.Now = func() time.Time { return qt }
 		answer, err := sendChatTurn(handler, userID, answerModel, qaConcisenessPrompt, qa.question)
 		if err != nil {
 			return nil, fmt.Errorf("bench: answer question %d of %s: %w", i, conv.id, err)

@@ -39,6 +39,18 @@ type qaItem struct {
 	// single-session-preference, single-session-assistant) — unused by
 	// the LoCoMo adapter.
 	questionType string
+	// queryTime is when this specific question was asked — LongMemEval
+	// gives every instance its own question_date (several question types
+	// are explicitly temporal-reasoning, so getting "today" right matters
+	// for the answer), where LoCoMo gives QA no date of its own at all.
+	// Zero value means "unset" — the caller falls back to one day after
+	// the conversation's last session, LoCoMo's own heuristic.
+	queryTime time.Time
+	// id is LongMemEval's own question_id — its scoring script's hypothesis
+	// file keys predictions by this, not by position (unlike LoCoMo, which
+	// scores in place via the raw annotation object below). Empty/unused
+	// for LoCoMo.
+	id string
 	// raw is this question's exact original JSON object, byte for byte —
 	// kept so the harness's output can be the real annotation file's own
 	// qa entries plus one added field (hupi_prediction), which is what

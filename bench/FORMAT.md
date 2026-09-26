@@ -116,10 +116,41 @@ run completely unmodified — `hyp_file` is JSONL of
 `{"question_id": ..., "hypothesis": ...}`, one line per question. This
 is an LLM-judge (not F1), using the exact per-`question_type` grading
 prompts in `get_anscheck_prompt` — quoted in the plan file for
-transparency, not re-derived.
+transparency, not re-derived. `evaluate_qa.py`'s own `model_zoo` only has
+three judge options (`gpt-4o`, `gpt-4o-mini`, `llama-3.1-70b-instruct`
+via a local vLLM endpoint) — there's no judge-free scoring path, unlike
+LoCoMo's F1/EM.
 
-## Still open for Step 2
+**Two more real discrepancies found reading the scoring code directly
+(Step 6), not from the README**:
+- The README documents `print_qa_metrics.py`'s usage as
+  `python print_qa_metrics.py gpt-4o your_hypothesis_file.log ref.json`
+  (3 args) — the actual code only accepts 2 (`in_file ref_file`;
+  `len(sys.argv) != 3` counts the script name itself). Running the
+  README's own documented command fails immediately.
+- `print_qa_metrics.py` hardcodes
+  `assert entry['autoeval_label']['model'] == 'gpt-4o-2024-08-06'` — it
+  only works when `evaluate_qa.py` was run with `gpt-4o` specifically
+  (the one `model_zoo` entry resolving to that exact string).
+  `gpt-4o-mini` or `llama-3.1-70b-instruct` both produce a valid
+  `evaluate_qa.py` results file, but crash `print_qa_metrics.py`'s own
+  per-category breakdown outright.
 
-- Exact Go time-parsing format strings for both date formats above.
+See `bench/score_longmemeval.sh` for the wrapper that invokes both
+scripts unmodified, with both of the above noted at the point they bite.
+
+## Go time-parsing layouts (confirmed against real data, Step 6)
+
+- LoCoMo (`session_N_date_time`): `"3:04 pm on 2 January, 2006"`.
+- LongMemEval (`question_date`, `haystack_dates[i]`): `"2006/01/02 (Mon) 15:04"`.
+  Go's `time.Parse` doesn't validate the weekday abbreviation against the
+  computed date — it's consumed and discarded — so a real file having a
+  technically-wrong `(Tue)` for a Wednesday (if that ever happened)
+  wouldn't fail the parse.
+
+## Still open
+
 - Whether to also fetch `longmemeval_oracle.json` early (small, useful
-  as a "perfect retrieval" ceiling reference) even while deferring `_m`.
+  as a "perfect retrieval" ceiling reference) even while deferring `_m` —
+  still not fetched as of Step 6; only `_s_cleaned.json` has been used so
+  far, per the scope decision above.

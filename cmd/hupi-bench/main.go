@@ -6,13 +6,16 @@
 // the reviewed plan (docs/BENCHMARKS.md, once Step 6 lands) for the
 // full design and why each piece works the way it does.
 //
-// Writes predictions in LoCoMo's own annotation-file shape (see the
-// predictionKey doc comment below) so bench/score_locomo.py can score
-// them with LoCoMo's real, unmodified scoring code — no reimplemented
-// metric logic in this repo at all.
+// Writes predictions in each benchmark's own expected shape — LoCoMo's
+// annotation-file shape (see the predictionKey doc comment below) so
+// bench/score_locomo.py can score with LoCoMo's real, unmodified scoring
+// code, or LongMemEval's {question_id, hypothesis} JSONL hypothesis-file
+// shape for their own unmodified src/evaluation/evaluate_qa.py — no
+// reimplemented metric logic in this repo at all, for either benchmark.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -29,6 +32,15 @@ import (
 	"hupi/internal/store"
 )
 
+// conversationResult pairs one replayed conversation/instance with its
+// answers, in conv.qa order — the shared input both output writers
+// (marshalLoCoMoPredictions, marshalLongMemEvalHypotheses) format
+// differently, per their respective benchmark's own expected shape.
+type conversationResult struct {
+	conv    benchConversation
+	answers []string
+}
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("hupi-bench exited with error", "error", err)
@@ -43,17 +55,21 @@ func main() {
 const predictionKey = "hupi_prediction"
 
 func run() error {
-	dataFile := flag.String("data-file", "", "path to locomo10.json")
-	convIndex := flag.Int("conv-index", 0, "which conversation to replay (0-based); ignored if -all-conversations is set")
-	allConversations := flag.Bool("all-conversations", false, "process every conversation in the data file, not just -conv-index")
+	benchmark := flag.String("benchmark", "locomo", "which benchmark to replay: locomo or longmemeval")
+	dataFile := flag.String("data-file", "", "path to locomo10.json (locomo) or longmemeval_*_cleaned.json (longmemeval)")
+	convIndex := flag.Int("conv-index", 0, "which conversation/instance to replay (0-based); ignored if -all-conversations is set")
+	allConversations := flag.Bool("all-conversations", false, "process every conversation/instance in the data file, not just -conv-index")
 	baseline := flag.Bool("baseline", false, "no-memory baseline: skip HUPI replay/consolidation, stuff raw session transcripts directly into the answer-model's context instead")
 	answerModel := flag.String("answer-model", "", "providers.yaml profile name to answer with (defaults to active_chat_provider)")
-	outFile := flag.String("out-file", "", "where to write predictions JSON (default: stdout)")
+	outFile := flag.String("out-file", "", "where to write predictions (default: stdout)")
 	consolidateBin := flag.String("consolidate-bin", "./hupi-consolidate", "path to the real hupi-consolidate binary")
 	flag.Parse()
 
 	if *dataFile == "" {
 		return fmt.Errorf("bench: -data-file is required")
+	}
+	if *benchmark != "locomo" && *benchmark != "longmemeval" {
+		return fmt.Errorf("bench: -benchmark must be locomo or longmemeval, got %q", *benchmark)
 	}
 
 	ctx := context.Background()
@@ -68,25 +84,28 @@ func run() error {
 
 	var convs []benchConversation
 	if *allConversations {
-		convs, err = loadLoCoMoAll(*dataFile)
+		convs, err = loadAll(*benchmark, *dataFile)
 		if err != nil {
 			return fmt.Errorf("bench: load conversations: %w", err)
 		}
 	} else {
-		conv, err := loadLoCoMo(*dataFile, *convIndex)
+		all, err := loadAll(*benchmark, *dataFile)
 		if err != nil {
-			return fmt.Errorf("bench: load conversation: %w", err)
+			return fmt.Errorf("bench: load conversations: %w", err)
 		}
-		convs = []benchConversation{conv}
+		if *convIndex < 0 || *convIndex >= len(all) {
+			return fmt.Errorf("bench: conv-index %d out of range (0-%d)", *convIndex, len(all)-1)
+		}
+		convs = []benchConversation{all[*convIndex]}
 	}
-	slog.Info("loaded conversations", "count", len(convs), "baseline", *baseline)
+	slog.Info("loaded conversations", "benchmark", *benchmark, "count", len(convs), "baseline", *baseline)
 
 	authStore := auth.New(deps.DB, deps.Keys)
 	st := store.New(deps.DB, deps.Keys, deps.Registry.Embedding())
 
 	model := *answerModel
 
-	convOuts := make([]map[string]any, len(convs))
+	results := make([]conversationResult, len(convs))
 	for ci, conv := range convs {
 		slog.Info("processing conversation", "index", ci, "id", conv.id, "sessions", len(conv.sessions), "questions", len(conv.qa))
 
@@ -100,7 +119,7 @@ func run() error {
 		if *baseline {
 			modeTag = "baseline"
 		}
-		userID := fmt.Sprintf("user:bench-locomo-%s-%s", modeTag, conv.id)
+		userID := fmt.Sprintf("user:bench-%s-%s-%s", *benchmark, modeTag, conv.id)
 		if err := authStore.CreateUser(ctx, userID, ""); err != nil {
 			return fmt.Errorf("bench: provision scope for %s: %w", conv.id, err)
 		}
@@ -124,39 +143,84 @@ func run() error {
 				return err
 			}
 		}
-
-		// Output shape matches LoCoMo's own annotation file exactly --
-		// [{"sample_id": ..., "qa": [<original qa object> + hupi_prediction]}]
-		// -- plus one added field per question, rather than a harness-invented
-		// shape. This is what lets bench/score_locomo.py call LoCoMo's own,
-		// completely unmodified task_eval.evaluation_stats.analyze_aggr_acc
-		// directly: that function reads fields (e.g. evidence) straight off
-		// each qa entry, so anything less than the real entry, verbatim,
-		// would break under their own scoring code, not just a hand-rolled one.
-		qaOut := make([]map[string]any, len(conv.qa))
-		for i, qa := range conv.qa {
-			var entry map[string]any
-			if err := json.Unmarshal(qa.raw, &entry); err != nil {
-				return fmt.Errorf("bench: re-parse qa entry %d for output: %w", i, err)
-			}
-			entry[predictionKey] = answers[i]
-			qaOut[i] = entry
-		}
-		convOuts[ci] = map[string]any{
-			"sample_id": conv.id,
-			"qa":        qaOut,
-		}
+		results[ci] = conversationResult{conv: conv, answers: answers}
 	}
 
-	out, err := json.MarshalIndent(convOuts, "", "  ")
+	var out []byte
+	if *benchmark == "longmemeval" {
+		out, err = marshalLongMemEvalHypotheses(results)
+	} else {
+		out, err = marshalLoCoMoPredictions(results)
+	}
 	if err != nil {
-		return fmt.Errorf("bench: marshal predictions: %w", err)
+		return err
 	}
 	if *outFile == "" {
 		fmt.Println(string(out))
 		return nil
 	}
 	return os.WriteFile(*outFile, out, 0o644)
+}
+
+func loadAll(benchmark, dataFile string) ([]benchConversation, error) {
+	if benchmark == "longmemeval" {
+		return loadLongMemEvalAll(dataFile)
+	}
+	return loadLoCoMoAll(dataFile)
+}
+
+// marshalLoCoMoPredictions writes LoCoMo's own annotation-file shape --
+// [{"sample_id": ..., "qa": [<original qa object> + hupi_prediction]}]
+// -- plus one added field per question, rather than a harness-invented
+// shape. This is what lets bench/score_locomo.py call LoCoMo's own,
+// completely unmodified task_eval.evaluation_stats.analyze_aggr_acc
+// directly: that function reads fields (e.g. evidence) straight off each
+// qa entry, so anything less than the real entry, verbatim, would break
+// under their own scoring code, not just a hand-rolled one.
+func marshalLoCoMoPredictions(results []conversationResult) ([]byte, error) {
+	convOuts := make([]map[string]any, len(results))
+	for ci, r := range results {
+		qaOut := make([]map[string]any, len(r.conv.qa))
+		for i, qa := range r.conv.qa {
+			var entry map[string]any
+			if err := json.Unmarshal(qa.raw, &entry); err != nil {
+				return nil, fmt.Errorf("bench: re-parse qa entry %d for output: %w", i, err)
+			}
+			entry[predictionKey] = r.answers[i]
+			qaOut[i] = entry
+		}
+		convOuts[ci] = map[string]any{
+			"sample_id": r.conv.id,
+			"qa":        qaOut,
+		}
+	}
+	out, err := json.MarshalIndent(convOuts, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("bench: marshal predictions: %w", err)
+	}
+	return out, nil
+}
+
+// marshalLongMemEvalHypotheses writes their own hypothesis-file shape --
+// one JSON object per line, {"question_id": ..., "hypothesis": ...} --
+// exactly what src/evaluation/evaluate_qa.py expects as its hyp_file
+// argument, unmodified.
+func marshalLongMemEvalHypotheses(results []conversationResult) ([]byte, error) {
+	var buf bytes.Buffer
+	for _, r := range results {
+		for i, qa := range r.conv.qa {
+			line, err := json.Marshal(map[string]any{
+				"question_id": qa.id,
+				"hypothesis":  r.answers[i],
+			})
+			if err != nil {
+				return nil, fmt.Errorf("bench: marshal hypothesis line for %s: %w", qa.id, err)
+			}
+			buf.Write(line)
+			buf.WriteByte('\n')
+		}
+	}
+	return buf.Bytes(), nil
 }
 
 // runHUPIConversation is the real-memory path: replay every session
@@ -219,6 +283,11 @@ func runHUPIConversation(handler *gateway.Handler, userID, model string, conv be
 		queryTime = conv.sessions[len(conv.sessions)-1].date.AddDate(0, 0, 1)
 	}
 
-	slog.Info("answering questions", "id", conv.id, "count", len(conv.qa), "query_time", queryTime)
+	// Logged as "default" because it's only the fallback: LongMemEval's
+	// own qa[i].queryTime (its real question_date) takes priority per
+	// question inside answerQuestions — this line ran before that
+	// per-question override applies, so it would otherwise misleadingly
+	// suggest every question in this conversation used the same instant.
+	slog.Info("answering questions", "id", conv.id, "count", len(conv.qa), "default_query_time", queryTime)
 	return answerQuestions(handler, userID, model, conv, queryTime)
 }
