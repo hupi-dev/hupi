@@ -2,13 +2,16 @@ package consolidation
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"hupi/internal/audit"
 	"hupi/internal/dbscope"
@@ -163,6 +166,14 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 
 		if err := r.upsertEntities(ctx, tx, in.scope, entities, in.replaceEntityAttrs); err != nil {
 			return fmt.Errorf("upsert entities for summary %s: %w", id, err)
+		}
+
+		// Runs after upsertEntities, not before: entity_relationships'
+		// subject_id/object_id foreign keys require the referenced entity
+		// rows to already exist, and upsertEntities is what just created
+		// or updated them in this same transaction.
+		if err := r.upsertRelationships(ctx, tx, in.scope, in.output.Relationships, id); err != nil {
+			return fmt.Errorf("upsert relationships for summary %s: %w", id, err)
 		}
 
 		eventType := audit.EventCapture
@@ -370,6 +381,168 @@ func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.
 		`, e.ID, e.Kind, e.Name, attrsCT, scope.Kind, scope.Owner, keyVersion)
 		if err != nil {
 			return fmt.Errorf("upsert entity %s: %w", e.ID, err)
+		}
+	}
+	return nil
+}
+
+// relationshipPredicateMaxLen bounds how long a predicate string can be
+// — generous for a real short verb phrase ("works_at", "married_to"),
+// tight enough to reject a model dumping a whole sentence into this
+// field instead of a predicate.
+const relationshipPredicateMaxLen = 64
+
+// sanitizePredicate lightly normalizes a predicate rather than
+// validating it against an enum — see
+// schema/0015_entity_relationships.sql's own comment for why a predicate
+// enum would very likely repeat the entity-kind-enum problem fixed this
+// session, at a larger scale (many more plausible relationship-type
+// strings than the 7-value entity kind enum). Returns "" — skip this
+// relationship, same treatment as an invalid entity kind — for anything
+// empty or implausibly long.
+func sanitizePredicate(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" || len(s) > relationshipPredicateMaxLen {
+		return ""
+	}
+	return s
+}
+
+// parseOptionalDate returns the date string unchanged if it parses as a
+// real YYYY-MM-DD date, or nil (a real SQL NULL, "unknown/unstated") for
+// anything empty or unparseable — the consolidation LLM's own
+// valid_from/valid_until citations are just as prone to the same
+// malformed-output edge cases entity attributes needed hardening for
+// (see EntityUpdate's own UnmarshalJSON doc comment), and one
+// relationship's unusable date shouldn't fail the whole day's
+// consolidation any more than one entity's malformed attribute does.
+func parseOptionalDate(s string) any {
+	if s == "" {
+		return nil
+	}
+	if _, err := time.Parse("2006-01-02", s); err != nil {
+		return nil
+	}
+	return s
+}
+
+// newRelationshipID is a random opaque id, unlike entities' own
+// canonicalEntityID scheme — a relationship has no natural stable name
+// to canonicalize against the way an entity's kind+name does (the same
+// subject+predicate+object can legitimately recur across separate,
+// distinct time periods, e.g. two different employments at the same
+// company), so identity here is arbitrary, and dedup (see
+// upsertRelationships) is handled by an explicit existence check instead
+// of relying on primary-key collision the way entities' upsert does.
+func newRelationshipID() (string, error) {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate relationship id: %w", err)
+	}
+	return "rel_" + hex.EncodeToString(buf), nil
+}
+
+// upsertRelationships writes the connections a consolidation run says
+// this period touched — docs/ENTITY_RELATIONSHIPS_PLAN.md §§3-5 for the
+// full design and the specific reasoning below. Must run after
+// upsertEntities in the same transaction: subject_id/object_id are
+// foreign keys into entities, which upsertEntities is what just
+// created/updated.
+func (r *Runner) upsertRelationships(ctx context.Context, tx *sql.Tx, scope identity.Scope, updates []RelationshipUpdate, sourceSummaryID string) error {
+	for _, u := range updates {
+		if !validEntityKinds[u.SubjectKind] || !validEntityKinds[u.ObjectKind] {
+			slog.Warn("consolidation: skipping relationship with invalid subject/object kind",
+				"subject_kind", u.SubjectKind, "object_kind", u.ObjectKind,
+				"scope_kind", scope.Kind, "scope_owner", scope.Owner)
+			continue
+		}
+		predicate := sanitizePredicate(u.Predicate)
+		if predicate == "" {
+			slog.Warn("consolidation: skipping relationship with empty or too-long predicate",
+				"raw_predicate", u.Predicate, "scope_kind", scope.Kind, "scope_owner", scope.Owner)
+			continue
+		}
+		subjectID := canonicalEntityID(u.SubjectKind, u.SubjectName, "")
+		objectID := canonicalEntityID(u.ObjectKind, u.ObjectName, "")
+		if subjectID == "" || objectID == "" {
+			slog.Warn("consolidation: skipping relationship with unresolvable subject/object name",
+				"subject_name", u.SubjectName, "object_name", u.ObjectName,
+				"scope_kind", scope.Kind, "scope_owner", scope.Owner)
+			continue
+		}
+
+		validFrom := parseOptionalDate(u.ValidFrom)
+		validUntil := parseOptionalDate(u.ValidUntil)
+
+		// Idempotent re-consolidation: an exact repeat of an
+		// already-stored edge (same subject/predicate/object/validity) is
+		// skipped rather than inserted again — RunDaily re-consolidating
+		// an already-drafted day is expected to re-extract the same
+		// relationship from the same source text every time, and
+		// relationships have no natural primary key the way an entity's
+		// canonicalized id gives it, so this existence check is what
+		// upsertEntities gets for free from `on conflict` and this
+		// doesn't.
+		var exists bool
+		err := tx.QueryRowContext(ctx, `
+			select exists(
+				select 1 from entity_relationships
+				where scope_kind = $1 and scope_owner = $2
+				  and subject_id = $3 and predicate = $4 and object_id = $5
+				  and valid_from is not distinct from $6::date
+				  and valid_until is not distinct from $7::date
+			)
+		`, scope.Kind, scope.Owner, subjectID, predicate, objectID, validFrom, validUntil).Scan(&exists)
+		if err != nil {
+			return fmt.Errorf("check existing relationship %s %s %s: %w", subjectID, predicate, objectID, err)
+		}
+		if exists {
+			continue
+		}
+
+		// Conservative supersession, deliberately narrower than "same
+		// subject+predicate always supersedes the old object": that rule
+		// is wrong for a genuinely one-to-many predicate (e.g.
+		// friends_with — a person can have many, concurrently), and
+		// there's no way to tell a one-to-one predicate apart from a
+		// one-to-many one from the predicate string alone. Only closes an
+		// existing open-ended edge (valid_until is null) for the same
+		// (subject, predicate) but a *different* object when the *new*
+		// edge gives an explicit valid_from — requiring a stated
+		// transition date is the direction that risks leaving some stale
+		// one-to-one edges open rather than the direction that risks
+		// wrongly closing a valid one-to-many edge. See
+		// docs/ENTITY_RELATIONSHIPS_PLAN.md §5 for the two approaches this
+		// was weighed against.
+		if validFrom != nil {
+			if _, err := tx.ExecContext(ctx, `
+				update entity_relationships
+				set valid_until = $1::date
+				where scope_kind = $2 and scope_owner = $3
+				  and subject_id = $4 and predicate = $5
+				  and object_id != $6
+				  and valid_until is null
+			`, validFrom, scope.Kind, scope.Owner, subjectID, predicate, objectID); err != nil {
+				return fmt.Errorf("close superseded relationship edges for %s %s: %w", subjectID, predicate, err)
+			}
+		}
+
+		relID, err := newRelationshipID()
+		if err != nil {
+			return err
+		}
+		// pgfmt.Nullable(sourceSummaryID), not the raw string: an empty
+		// string isn't a valid summaries(id) reference (a real error this
+		// package's own tests caught, calling upsertRelationships in
+		// isolation, without a real summary row yet — the exact same
+		// reason summaries.supersedes uses this helper for its own
+		// optional self-reference).
+		if _, err := tx.ExecContext(ctx, `
+			insert into entity_relationships
+				(id, scope_kind, scope_owner, subject_id, predicate, object_id, valid_from, valid_until, source_summary_id)
+			values ($1, $2, $3, $4, $5, $6, $7::date, $8::date, $9)
+		`, relID, scope.Kind, scope.Owner, subjectID, predicate, objectID, validFrom, validUntil, pgfmt.Nullable(sourceSummaryID)); err != nil {
+			return fmt.Errorf("insert relationship %s %s %s: %w", subjectID, predicate, objectID, err)
 		}
 	}
 	return nil
