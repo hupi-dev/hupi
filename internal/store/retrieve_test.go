@@ -95,6 +95,70 @@ func TestRetrieve_UsesCorrectedSummaryNotSupersededOne(t *testing.T) {
 	}
 }
 
+// insertKeyFact seeds a summary_key_facts row directly, the same
+// technique insertSummary uses for its own parent row.
+func insertKeyFact(t *testing.T, s *Store, scope identity.Scope, summaryID, fact string, grounded bool) {
+	t.Helper()
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	factCT, err := enc.Encrypt(fact)
+	if err != nil {
+		t.Fatalf("encrypt test key fact: %v", err)
+	}
+	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into summary_key_facts (summary_id, fact, grounded, key_version)
+			values ($1, $2, $3, $4)
+		`, summaryID, factCT, grounded, keyVersion)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test key fact for %s: %v", summaryID, err)
+	}
+}
+
+// TestRetrieve_SurfacesGroundedKeyFactsAlongsideSummary is a regression
+// test for a real gap found tracing cmd/hupi-bench QA misses against a
+// real cloud model at scale: a daily/weekly summary's own prose is
+// inherently lossy (a narrative paragraph, not every source detail), and
+// consolidation already extracts and grounds specific, checkable facts
+// per summary into summary_key_facts (schema/0001_init.sql) -- but
+// nothing at retrieval time ever read that table back before this fix.
+// A question whose answer was a specific fact the summary's prose had
+// paraphrased away (e.g. "family camping trips" instead of the actual
+// locations) would fail even though the correct summary was retrieved.
+// Only a *grounded* fact should be surfaced -- an ungrounded one already
+// failed groundingCheck's own re-verification and shouldn't be presented
+// as reliable.
+func TestRetrieve_SurfacesGroundedKeyFactsAlongsideSummary(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-retrieve-keyfacts"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	period := "2026-01-01"
+	summaryID := "sum_test-retrieve-keyfacts_2026-01-01_daily_v1"
+	insertSummary(t, s, scope, summaryID, period,
+		"Alex went on a family camping trip and found it relaxing.", "")
+	insertKeyFact(t, s, scope, summaryID, "Alex camped at the beach, in the mountains, and in the forest.", true)
+	insertKeyFact(t, s, scope, summaryID, "Alex camped on the moon.", false)
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "do you remember where Alex went camping?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if !strings.Contains(result.ContextMessage, "Alex camped at the beach, in the mountains, and in the forest.") {
+		t.Errorf("context message missing the grounded key fact, got: %q", result.ContextMessage)
+	}
+	if strings.Contains(result.ContextMessage, "Alex camped on the moon.") {
+		t.Errorf("context message includes an ungrounded key fact — it should have been filtered out, got: %q", result.ContextMessage)
+	}
+}
+
 // insertEntityWithEmbedding seeds an entity row with an embedding set —
 // scope_isolation_test.go's insertEntity doesn't, since none of its own
 // tests need vector search. Real encryption, like insertSummary.
