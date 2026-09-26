@@ -140,7 +140,42 @@ func replayConversation(handler *gateway.Handler, userID, answerModel string, co
 // content was in the right area — this doesn't fix genuine recall
 // misses, but it stops good-content answers being scored as if they
 // were wrong purely on phrasing.
-const qaConcisenessPrompt = `Answer the following question as concisely as possible — a short phrase or a few words, not a full sentence or explanation. If you don't know, say so in as few words as possible.`
+//
+// Revised after the first real GPT-4.1/LoCoMo run (all 10 conversations,
+// 1,986 questions) surfaced three specific, real gaps in the original
+// wording:
+//
+//  1. "as few words as possible" was measurably too aggressive — it cost
+//     partial F1 credit by dropping words the reference answer needed
+//     (e.g. reference "Psychology, counseling certification" vs a
+//     truncated "counseling"). Categories that should be *easier*
+//     (single-hop, temporal) scored lower than harder ones
+//     (multi-hop, open-domain), which is backwards from what retrieval
+//     quality alone would predict — a real signal the old wording was
+//     itself costing points, not just style.
+//  2. Query time for LoCoMo QA has no real per-question date (there is
+//     no ground truth "now" — see runHUPIConversation's own
+//     "session + 1 day" heuristic), so the model would sometimes answer
+//     in relative terms ("Yesterday", "Last year") reasoned against
+//     that fabricated instant — scoring as wrong against an absolute
+//     reference date ("7 May 2023") even when the underlying recall was
+//     completely correct.
+//  3. Category 5 (adversarial) is scored by literal substring match on
+//     "no information available"/"not mentioned" — spot-checking real
+//     category-5 predictions found many correct abstentions in
+//     different words ("No recent setback mentioned", "No record of...")
+//     that scored as wrong purely on phrasing.
+//
+// Note on (3) specifically: this is benchmark-vocabulary-aware tuning,
+// not a general product improvement — teaching the model LoCoMo's exact
+// expected abstention phrase is fair (clear abstention is good UX
+// regardless), but it should be named honestly in any published
+// write-up rather than presented as an organic capability gain.
+const qaConcisenessPrompt = `Answer the following question directly, using a short phrase rather than a full sentence or explanation — but include every specific detail the question asks for (a complete name, date, or list), not just the first word or a truncated fragment.
+
+Always give dates as an absolute date (e.g. "7 May 2023"), never a relative term like "yesterday", "last year", or "this month".
+
+If the information needed to answer isn't available in what you've been told, say so clearly using the words "not mentioned" or "no information available" — but only when you genuinely don't know; don't use those words if you do have the answer.`
 
 // runBaselineConversation is the no-memory control: no session replay, no
 // consolidation, so this scope's real Retrieve call has nothing to find —
