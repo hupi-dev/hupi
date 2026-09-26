@@ -84,24 +84,44 @@ type locomoQA struct {
 
 var sessionKeyRe = regexp.MustCompile(`^session_(\d+)$`)
 
-// loadLoCoMo parses locomo10.json into the common benchConversation shape.
+// loadLoCoMo parses locomo10.json and returns a single conversation.
 // convIndex selects which of the 10 conversations to load (0-based) —
-// Step 2 only needs one at a time to prove the harness mechanics; Step 4
-// scales this up to all 10.
+// Step 2 only needed one at a time to prove the harness mechanics; Step 5
+// scales this up to all 10 via loadLoCoMoAll below.
 func loadLoCoMo(path string, convIndex int) (benchConversation, error) {
+	all, err := loadLoCoMoAll(path)
+	if err != nil {
+		return benchConversation{}, err
+	}
+	if convIndex < 0 || convIndex >= len(all) {
+		return benchConversation{}, fmt.Errorf("conversation index %d out of range (0-%d)", convIndex, len(all)-1)
+	}
+	return all[convIndex], nil
+}
+
+// loadLoCoMoAll parses every conversation in locomo10.json — Step 5 loops
+// over all of them rather than a single -conv-index.
+func loadLoCoMoAll(path string) ([]benchConversation, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return benchConversation{}, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var raw []locomoRaw
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return benchConversation{}, fmt.Errorf("parse locomo json: %w", err)
+		return nil, fmt.Errorf("parse locomo json: %w", err)
 	}
-	if convIndex < 0 || convIndex >= len(raw) {
-		return benchConversation{}, fmt.Errorf("conversation index %d out of range (0-%d)", convIndex, len(raw)-1)
+	convs := make([]benchConversation, len(raw))
+	for i, c := range raw {
+		conv, err := parseLoCoMoConversation(c)
+		if err != nil {
+			return nil, fmt.Errorf("conversation %d: %w", i, err)
+		}
+		convs[i] = conv
 	}
-	c := raw[convIndex]
+	return convs, nil
+}
 
+func parseLoCoMoConversation(c locomoRaw) (benchConversation, error) {
 	var convMap map[string]json.RawMessage
 	if err := json.Unmarshal(c.Conversation, &convMap); err != nil {
 		return benchConversation{}, fmt.Errorf("parse conversation object: %w", err)

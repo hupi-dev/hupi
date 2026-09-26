@@ -142,6 +142,43 @@ func replayConversation(handler *gateway.Handler, userID, answerModel string, co
 // were wrong purely on phrasing.
 const qaConcisenessPrompt = `Answer the following question as concisely as possible — a short phrase or a few words, not a full sentence or explanation. If you don't know, say so in as few words as possible.`
 
+// runBaselineConversation is the no-memory control: no session replay, no
+// consolidation, so this scope's real Retrieve call has nothing to find —
+// instead every session's raw transcript is concatenated and sent as
+// context alongside each question, in the same single request. This
+// answers "how well does the underlying answer model do with the whole
+// conversation dumped in its context window," which is the real baseline
+// HUPI's own memory needs to beat, not just a number in isolation (see
+// the plan's own "no-memory baseline" design note).
+//
+// This reuses sendChatTurn/handler exactly like the real-memory path, so
+// the only difference between the two is what's actually in scope's
+// memory when the question is asked — not a different code path to the
+// answer model.
+func runBaselineConversation(handler *gateway.Handler, userID, answerModel string, conv benchConversation) ([]string, error) {
+	var transcript strings.Builder
+	for _, sess := range conv.sessions {
+		content := formatSession(sess)
+		if content == "" {
+			continue
+		}
+		fmt.Fprintf(&transcript, "=== Session on %s ===\n%s\n\n", sess.date.Format("2 January, 2006"), content)
+	}
+	fullTranscript := strings.TrimSpace(transcript.String())
+
+	handler.Now = func() time.Time { return time.Now() }
+	answers := make([]string, len(conv.qa))
+	for i, qa := range conv.qa {
+		content := fmt.Sprintf("%s\n\nQuestion: %s", fullTranscript, qa.question)
+		answer, err := sendChatTurn(handler, userID, answerModel, qaConcisenessPrompt, content)
+		if err != nil {
+			return nil, fmt.Errorf("bench: baseline answer question %d of %s: %w", i, conv.id, err)
+		}
+		answers[i] = answer
+	}
+	return answers, nil
+}
+
 // answerQuestions sends every QA question in conv through handler as a
 // new chat turn, at queryTime (should be after every session's own
 // date, and after consolidation has run for all of them) — this

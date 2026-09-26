@@ -44,7 +44,9 @@ const predictionKey = "hupi_prediction"
 
 func run() error {
 	dataFile := flag.String("data-file", "", "path to locomo10.json")
-	convIndex := flag.Int("conv-index", 0, "which conversation to replay (0-based)")
+	convIndex := flag.Int("conv-index", 0, "which conversation to replay (0-based); ignored if -all-conversations is set")
+	allConversations := flag.Bool("all-conversations", false, "process every conversation in the data file, not just -conv-index")
+	baseline := flag.Bool("baseline", false, "no-memory baseline: skip HUPI replay/consolidation, stuff raw session transcripts directly into the answer-model's context instead")
 	answerModel := flag.String("answer-model", "", "providers.yaml profile name to answer with (defaults to active_chat_provider)")
 	outFile := flag.String("out-file", "", "where to write predictions JSON (default: stdout)")
 	consolidateBin := flag.String("consolidate-bin", "./hupi-consolidate", "path to the real hupi-consolidate binary")
@@ -64,35 +66,109 @@ func run() error {
 		return err
 	}
 
-	conv, err := loadLoCoMo(*dataFile, *convIndex)
-	if err != nil {
-		return fmt.Errorf("bench: load conversation: %w", err)
+	var convs []benchConversation
+	if *allConversations {
+		convs, err = loadLoCoMoAll(*dataFile)
+		if err != nil {
+			return fmt.Errorf("bench: load conversations: %w", err)
+		}
+	} else {
+		conv, err := loadLoCoMo(*dataFile, *convIndex)
+		if err != nil {
+			return fmt.Errorf("bench: load conversation: %w", err)
+		}
+		convs = []benchConversation{conv}
 	}
-	slog.Info("loaded conversation", "id", conv.id, "sessions", len(conv.sessions), "questions", len(conv.qa))
+	slog.Info("loaded conversations", "count", len(convs), "baseline", *baseline)
 
 	authStore := auth.New(deps.DB, deps.Keys)
-	userID := fmt.Sprintf("user:bench-locomo-%s", conv.id)
-	if err := authStore.CreateUser(ctx, userID, ""); err != nil {
-		return fmt.Errorf("bench: provision scope: %w", err)
-	}
-
 	st := store.New(deps.DB, deps.Keys, deps.Registry.Embedding())
-	handler := &gateway.Handler{
-		Registry:  deps.Registry,
-		Retriever: st,
-		Capturer:  st,
-		Auth:      staticAuth{},
-	}
 
 	model := *answerModel
-	if model == "" {
-		model = "" // empty model string resolves to active_chat_provider — see gateway's resolveProvider
+
+	convOuts := make([]map[string]any, len(convs))
+	for ci, conv := range convs {
+		slog.Info("processing conversation", "index", ci, "id", conv.id, "sessions", len(conv.sessions), "questions", len(conv.qa))
+
+		// Baseline runs use a distinct scope from the HUPI-memory runs
+		// (a "-baseline" suffix) even for the same conversation ID:
+		// auth.Store.CreateUser is idempotent (insert ... on conflict do
+		// nothing), so reusing the same scope across modes would let a
+		// prior HUPI run's already-consolidated episodes leak into what's
+		// supposed to be a memory-free control.
+		modeTag := "hupi"
+		if *baseline {
+			modeTag = "baseline"
+		}
+		userID := fmt.Sprintf("user:bench-locomo-%s-%s", modeTag, conv.id)
+		if err := authStore.CreateUser(ctx, userID, ""); err != nil {
+			return fmt.Errorf("bench: provision scope for %s: %w", conv.id, err)
+		}
+
+		handler := &gateway.Handler{
+			Registry:  deps.Registry,
+			Retriever: st,
+			Capturer:  st,
+			Auth:      staticAuth{},
+		}
+
+		var answers []string
+		if *baseline {
+			answers, err = runBaselineConversation(handler, userID, model, conv)
+			if err != nil {
+				return err
+			}
+		} else {
+			answers, err = runHUPIConversation(handler, userID, model, conv, *consolidateBin)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Output shape matches LoCoMo's own annotation file exactly --
+		// [{"sample_id": ..., "qa": [<original qa object> + hupi_prediction]}]
+		// -- plus one added field per question, rather than a harness-invented
+		// shape. This is what lets bench/score_locomo.py call LoCoMo's own,
+		// completely unmodified task_eval.evaluation_stats.analyze_aggr_acc
+		// directly: that function reads fields (e.g. evidence) straight off
+		// each qa entry, so anything less than the real entry, verbatim,
+		// would break under their own scoring code, not just a hand-rolled one.
+		qaOut := make([]map[string]any, len(conv.qa))
+		for i, qa := range conv.qa {
+			var entry map[string]any
+			if err := json.Unmarshal(qa.raw, &entry); err != nil {
+				return fmt.Errorf("bench: re-parse qa entry %d for output: %w", i, err)
+			}
+			entry[predictionKey] = answers[i]
+			qaOut[i] = entry
+		}
+		convOuts[ci] = map[string]any{
+			"sample_id": conv.id,
+			"qa":        qaOut,
+		}
 	}
 
-	slog.Info("replaying sessions")
+	out, err := json.MarshalIndent(convOuts, "", "  ")
+	if err != nil {
+		return fmt.Errorf("bench: marshal predictions: %w", err)
+	}
+	if *outFile == "" {
+		fmt.Println(string(out))
+		return nil
+	}
+	return os.WriteFile(*outFile, out, 0o644)
+}
+
+// runHUPIConversation is the real-memory path: replay every session
+// through the real gateway.Handler with backdated timestamps, run the
+// real hupi-consolidate binary once per fabricated date, then answer the
+// conversation's questions through the same real retrieval+generation
+// path.
+func runHUPIConversation(handler *gateway.Handler, userID, model string, conv benchConversation, consolidateBin string) ([]string, error) {
+	slog.Info("replaying sessions", "id", conv.id)
 	dates, err := replayConversation(handler, userID, model, conv)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var sortedDates []string
@@ -101,7 +177,7 @@ func run() error {
 	}
 	sort.Strings(sortedDates)
 
-	slog.Info("running real consolidation per fabricated date", "dates", sortedDates)
+	slog.Info("running real consolidation per fabricated date", "id", conv.id, "dates", sortedDates)
 	var consolidationFailures int
 	for _, d := range sortedDates {
 		// Shelling out to the real, unmodified hupi-consolidate binary
@@ -115,7 +191,7 @@ func run() error {
 		// real thing this harness is supposed to be measuring. This
 		// also means every fabricated date gets exactly the same rollup
 		// behavior a real nightly cron run would produce.
-		cmd := exec.Command(*consolidateBin, "-date", d)
+		cmd := exec.Command(consolidateBin, "-date", d)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		// Log and continue on a single bad date, exactly like a real
@@ -127,12 +203,12 @@ func run() error {
 		// real but separate from whether replay/consolidation/rollup
 		// scheduling themselves are wired correctly.
 		if err := cmd.Run(); err != nil {
-			slog.Error("consolidation failed for a date, continuing", "date", d, "error", err)
+			slog.Error("consolidation failed for a date, continuing", "id", conv.id, "date", d, "error", err)
 			consolidationFailures++
 		}
 	}
 	if consolidationFailures > 0 {
-		slog.Warn("some dates failed to consolidate — answers may be missing memory from those days", "failed_dates", consolidationFailures, "total_dates", len(sortedDates))
+		slog.Warn("some dates failed to consolidate — answers may be missing memory from those days", "id", conv.id, "failed_dates", consolidationFailures, "total_dates", len(sortedDates))
 	}
 
 	// Query time: one day after the last session, so retrieval reflects
@@ -143,41 +219,6 @@ func run() error {
 		queryTime = conv.sessions[len(conv.sessions)-1].date.AddDate(0, 0, 1)
 	}
 
-	slog.Info("answering questions", "count", len(conv.qa), "query_time", queryTime)
-	answers, err := answerQuestions(handler, userID, model, conv, queryTime)
-	if err != nil {
-		return err
-	}
-
-	// Output shape matches LoCoMo's own annotation file exactly --
-	// [{"sample_id": ..., "qa": [<original qa object> + hupi_prediction]}]
-	// -- plus one added field per question, rather than a harness-invented
-	// shape. This is what lets bench/score_locomo.py call LoCoMo's own,
-	// completely unmodified task_eval.evaluation_stats.analyze_aggr_acc
-	// directly: that function reads fields (e.g. evidence) straight off
-	// each qa entry, so anything less than the real entry, verbatim,
-	// would break under their own scoring code, not just a hand-rolled one.
-	qaOut := make([]map[string]any, len(conv.qa))
-	for i, qa := range conv.qa {
-		var entry map[string]any
-		if err := json.Unmarshal(qa.raw, &entry); err != nil {
-			return fmt.Errorf("bench: re-parse qa entry %d for output: %w", i, err)
-		}
-		entry[predictionKey] = answers[i]
-		qaOut[i] = entry
-	}
-	convOut := map[string]any{
-		"sample_id": conv.id,
-		"qa":        qaOut,
-	}
-
-	out, err := json.MarshalIndent([]map[string]any{convOut}, "", "  ")
-	if err != nil {
-		return fmt.Errorf("bench: marshal predictions: %w", err)
-	}
-	if *outFile == "" {
-		fmt.Println(string(out))
-		return nil
-	}
-	return os.WriteFile(*outFile, out, 0o644)
+	slog.Info("answering questions", "id", conv.id, "count", len(conv.qa), "query_time", queryTime)
+	return answerQuestions(handler, userID, model, conv, queryTime)
 }
