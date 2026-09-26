@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"hupi/internal/audit"
@@ -125,11 +126,15 @@ const (
 	// Re-measure if the embedding model changes.
 	episodeVectorSimilarityThreshold = 0.55
 	maxVectorResults                 = 5
-	// contextCharBudget is a crude stand-in for a real token budget
-	// (ARCHITECTURE.md mentions ~20% of the model's context window) — a
-	// production build should count tokens against the target model's
-	// tokenizer, not characters.
-	contextCharBudget = 2000
+	// defaultContextCharBudget is contextCharBudget()'s fallback — a crude
+	// stand-in for a real token budget (ARCHITECTURE.md mentions ~20% of
+	// the model's context window) — a production build should count
+	// tokens against the target model's tokenizer, not characters. Left
+	// unchanged as the default (small, safe for a modest local model) so
+	// no existing deployment's cost/latency profile shifts silently; see
+	// contextCharBudget's own doc comment for why a larger-context model
+	// needs to raise this explicitly instead.
+	defaultContextCharBudget = 2000
 )
 
 // stage1SignalKeywords is the cheap, local, no-LLM-call pre-check from
@@ -339,7 +344,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 
 	return gateway.RetrievalResult{
 		Gate:           gate,
-		ContextMessage: truncateToBudget(sb.String(), contextCharBudget),
+		ContextMessage: truncateToBudget(sb.String(), contextCharBudget()),
 		Refs:           refs,
 	}, nil
 }
@@ -813,6 +818,27 @@ func keywordSearchEnabled() bool {
 // reasoning already covers.
 func graphWalkEnabled() bool {
 	return os.Getenv("HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK") != "false"
+}
+
+// contextCharBudget is the same "crude character stand-in for a real
+// token budget" defaultContextCharBudget's own doc comment describes,
+// made overridable rather than a flat constant. Found via a real cloud
+// benchmark run that 2000 characters (~500 tokens) — fine for a modest
+// local model — was hard-truncating the retrieved context well before a
+// large-context model like GPT-4.1 needed to stop: adding a summary's
+// grounded key_facts (see appendKeyFacts) made each surfaced summary
+// bigger, which meant *fewer* summaries fit before hitting this cap,
+// silently dropping ones a smaller per-summary size would have kept.
+// Left as a small default for the same reason keywordSearchEnabled and
+// graphWalkEnabled default the way they do — this is the "informed
+// minority" override, not a new default for every deployment.
+func contextCharBudget() int {
+	if v := os.Getenv("HUPI_CONTEXT_CHAR_BUDGET"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultContextCharBudget
 }
 
 // graphWalkMaxHops/graphWalkMaxResults are the "own hop-limit and token
