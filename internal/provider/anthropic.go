@@ -123,37 +123,39 @@ func (p *Anthropic) toAnthropicRequest(req ChatRequest, stream bool) anthropicRe
 	}
 }
 
-func (p *Anthropic) newRequest(ctx context.Context, body any) (*http.Request, error) {
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("provider %s: encode request: %w", p.name, err)
+// buildRequest builds a fresh *http.Request for body — a func, not a
+// pre-built *http.Request, since a retry needs a brand new request each
+// attempt (an http.Request's body is a single-read io.Reader).
+func (p *Anthropic) buildRequest(ctx context.Context, body any, stream bool) func() (*http.Request, error) {
+	return func() (*http.Request, error) {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: encode request: %w", p.name, err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/messages", bytes.NewReader(buf))
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: build request: %w", p.name, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", p.apiKey)
+		req.Header.Set("anthropic-version", p.apiVersion)
+		if stream {
+			req.Header.Set("Accept", "text/event-stream")
+		}
+		return req, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/messages", bytes.NewReader(buf))
-	if err != nil {
-		return nil, fmt.Errorf("provider %s: build request: %w", p.name, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", p.apiKey)
-	req.Header.Set("anthropic-version", p.apiVersion)
-	return req, nil
 }
 
 func (p *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
-	httpReq, err := p.newRequest(ctx, p.toAnthropicRequest(req, false))
+	status, respBody, err := sendWithRetry(ctx, p.client, p.name, p.buildRequest(ctx, p.toAnthropicRequest(req, false), false))
 	if err != nil {
 		return ChatResponse{}, err
 	}
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return ChatResponse{}, fmt.Errorf("provider %s: request failed: %w", p.name, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		return ChatResponse{}, fmt.Errorf("provider %s: /messages returned %d: %s", p.name, resp.StatusCode, string(b))
+	if status >= 400 {
+		return ChatResponse{}, fmt.Errorf("provider %s: /messages returned %d: %s", p.name, status, string(respBody))
 	}
 	var raw anthropicResponse
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := json.Unmarshal(respBody, &raw); err != nil {
 		return ChatResponse{}, fmt.Errorf("provider %s: decode response: %w", p.name, err)
 	}
 	var text strings.Builder
@@ -179,14 +181,9 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 // final usage arrives on message_delta and is attached to the closing
 // chunk.
 func (p *Anthropic) StreamChatCompletion(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
-	httpReq, err := p.newRequest(ctx, p.toAnthropicRequest(req, true))
+	resp, err := connectWithRetry(ctx, p.client, p.name, p.buildRequest(ctx, p.toAnthropicRequest(req, true), true))
 	if err != nil {
 		return nil, err
-	}
-	httpReq.Header.Set("Accept", "text/event-stream")
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("provider %s: request failed: %w", p.name, err)
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()

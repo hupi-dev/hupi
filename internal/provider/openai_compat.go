@@ -83,33 +83,37 @@ type openAIChatResponse struct {
 }
 
 func (p *OpenAICompat) do(ctx context.Context, method, path string, body, out any) error {
-	var reader io.Reader
+	var buf []byte
 	if body != nil {
-		buf, err := json.Marshal(body)
+		b, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("provider %s: encode request: %w", p.name, err)
 		}
-		reader = bytes.NewReader(buf)
+		buf = b
 	}
-	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+path, reader)
+	status, respBody, err := sendWithRetry(ctx, p.client, p.name, func() (*http.Request, error) {
+		var reader io.Reader
+		if buf != nil {
+			reader = bytes.NewReader(buf)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, p.baseURL+path, reader)
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: build request: %w", p.name, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if p.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+p.apiKey)
+		}
+		return req, nil
+	})
 	if err != nil {
-		return fmt.Errorf("provider %s: build request: %w", p.name, err)
+		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("provider %s: request failed: %w", p.name, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("provider %s: %s returned %d: %s", p.name, path, resp.StatusCode, string(b))
+	if status >= 400 {
+		return fmt.Errorf("provider %s: %s returned %d: %s", p.name, path, status, string(respBody))
 	}
 	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		if err := json.Unmarshal(respBody, out); err != nil {
 			return fmt.Errorf("provider %s: decode response: %w", p.name, err)
 		}
 	}
@@ -149,18 +153,20 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 	if err != nil {
 		return nil, fmt.Errorf("provider %s: encode request: %w", p.name, err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(buf))
+	resp, err := connectWithRetry(ctx, p.client, p.name, func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(buf))
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: build request: %w", p.name, err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+		if p.apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+		}
+		return httpReq, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("provider %s: build request: %w", p.name, err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if p.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("provider %s: request failed: %w", p.name, err)
+		return nil, err
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
