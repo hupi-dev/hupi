@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"hupi/internal/audit"
+	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
@@ -555,9 +556,19 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var refs []identity.Ref
+	// Collected into a slice and the outer cursor drained/closed before
+	// any follow-up query (appendKeyFacts) runs below — q is often a
+	// single-connection *sql.Tx (dbscope.Run's scoped transaction), which
+	// can't have a second query in flight while this one's Rows is still
+	// open. Interleaving them (issuing appendKeyFacts inside this loop)
+	// produced a real "driver: bad connection" failure caught by this
+	// package's own existing tests, not just a theoretical concern.
+	type hit struct {
+		id   string
+		text string
+		enc  *crypto.Encryptor
+	}
+	var hits []hit
 	for rows.Next() {
 		var id string
 		var summaryCT []byte
@@ -580,11 +591,64 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 		if err != nil {
 			return nil, err
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s): %s", id, text))
-		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: id})
+		hits = append(hits, hit{id: id, text: text, enc: enc})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+
+	var refs []identity.Ref
+	for _, h := range hits {
+		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s): %s", h.id, h.text))
+		if err := appendKeyFacts(ctx, q, h.id, h.enc, sb); err != nil {
+			return nil, err
+		}
+		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: h.id})
 		*strongHit = true
 	}
 	return refs, rows.Err()
+}
+
+// appendKeyFacts writes a summary's grounded key_facts (see
+// schema/0001_init.sql's summary_key_facts table) after its prose in sb,
+// one per line — found necessary by tracing real cmd/hupi-bench QA
+// misses against a real cloud model: consolidation already extracts and
+// grounds specific, checkable facts per summary (a daily/weekly prose
+// summary is inherently lossy, dropping concrete details like an exact
+// location or date in favor of a thematic narrative), and stores them in
+// summary_key_facts — but until this fix, nothing at retrieval time ever
+// read that table back. A question whose answer was a specific fact
+// (e.g. "where has Melanie camped?" -> "beach, mountains, forest")
+// consistently failed even when the *correct* summary was retrieved,
+// because the summary's own prose paraphrased the underlying facts away
+// ("family camping trips") without the specifics the question asked for.
+// Only grounded facts are surfaced — an ungrounded one already failed
+// groundingCheck's own re-verification against the source text and
+// shouldn't be presented as reliable.
+func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, sb *strings.Builder) error {
+	rows, err := q.QueryContext(ctx, `
+		select fact from summary_key_facts
+		where summary_id = $1 and grounded = true
+		order by id
+	`, summaryID)
+	if err != nil {
+		return fmt.Errorf("load key facts for summary %s: %w", summaryID, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var factCT []byte
+		if err := rows.Scan(&factCT); err != nil {
+			return err
+		}
+		fact, err := enc.Decrypt(factCT)
+		if err != nil {
+			return fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
+		}
+		sb.WriteString(fmt.Sprintf("\n  - %s", fact))
+	}
+	return rows.Err()
 }
 
 // vectorSearchEntities is vectorSearchSummaries' sibling over `entities`
@@ -935,6 +999,7 @@ func (s *Store) keywordSearchSummaries(ctx context.Context, q dbscope.Querier, s
 	defer rows.Close()
 
 	textByID := make(map[string]string)
+	encByID := make(map[string]*crypto.Encryptor)
 	var docs []bm25Document
 	for rows.Next() {
 		var id string
@@ -952,6 +1017,7 @@ func (s *Store) keywordSearchSummaries(ctx context.Context, q dbscope.Querier, s
 			return nil, err
 		}
 		textByID[id] = text
+		encByID[id] = enc
 		docs = append(docs, newBM25Document(id, text))
 	}
 	if err := rows.Err(); err != nil {
@@ -963,6 +1029,9 @@ func (s *Store) keywordSearchSummaries(ctx context.Context, q dbscope.Querier, s
 	var refs []identity.Ref
 	for _, m := range matches {
 		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s, keyword match): %s", m, textByID[m]))
+		if err := appendKeyFacts(ctx, q, m, encByID[m], sb); err != nil {
+			return nil, err
+		}
 		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: m})
 		*strongHit = true
 	}
