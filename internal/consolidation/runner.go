@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"hupi/internal/crypto"
@@ -21,6 +22,16 @@ import (
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
+
+// consolidationParseRetries is how many times generateSummary re-asks
+// the LLM after a genuinely malformed (not just wrapped-in-prose —
+// extractJSON already handles that) JSON response, before giving up. A
+// real, reproduced failure: one LLM call, out of many otherwise-valid
+// ones from the same model, returned a raw JSON syntax error
+// (invalid character '"' after object key:value pair) — non-
+// deterministic enough that a second attempt is a real, cheap fix, not
+// a way of hiding a systematic problem.
+const consolidationParseRetries = 2
 
 // Runner performs consolidation runs against Postgres.
 type Runner struct {
@@ -750,21 +761,28 @@ func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, leve
 		}
 	}
 
-	resp, err := r.consolidation.ChatCompletion(ctx, provider.ChatRequest{
+	req := provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: systemPrompt},
 			{Role: provider.RoleUser, Content: buildSummaryPrompt(level, period, sources, establishedRecord)},
 		},
-	})
-	if err != nil {
-		return ConsolidationOutput{}, fmt.Errorf("consolidation LLM call: %w", err)
 	}
 
-	var out ConsolidationOutput
-	if err := json.Unmarshal([]byte(extractJSON(resp.Message.Content)), &out); err != nil {
-		return ConsolidationOutput{}, fmt.Errorf("parse consolidation output: %w", err)
+	var lastErr error
+	for attempt := 1; attempt <= consolidationParseRetries; attempt++ {
+		resp, err := r.consolidation.ChatCompletion(ctx, req)
+		if err != nil {
+			return ConsolidationOutput{}, fmt.Errorf("consolidation LLM call: %w", err)
+		}
+		var out ConsolidationOutput
+		if err := json.Unmarshal([]byte(extractJSON(resp.Message.Content)), &out); err != nil {
+			lastErr = fmt.Errorf("parse consolidation output: %w", err)
+			slog.Warn("consolidation: malformed JSON from consolidation LLM, retrying", "attempt", attempt, "error", err)
+			continue
+		}
+		return out, nil
 	}
-	return out, nil
+	return ConsolidationOutput{}, lastErr
 }
 
 func joinSources(sources []textSource) string {

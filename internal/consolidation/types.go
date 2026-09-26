@@ -1,5 +1,7 @@
 package consolidation
 
+import "encoding/json"
+
 // textSource is a labeled block of text to summarize — an episode's
 // USER/ASSISTANT transcript for a daily rollup, or a lower-level summary's
 // text for a weekly/monthly/yearly rollup. Both cases feed the same
@@ -40,6 +42,50 @@ type EntityUpdate struct {
 	Kind       string            `json:"kind"`
 	Name       string            `json:"name"`
 	Attributes map[string]string `json:"attributes"`
+}
+
+// entityUpdateWire mirrors EntityUpdate field-for-field except
+// Attributes, which is deliberately json.RawMessage-valued rather than
+// string-valued — see UnmarshalJSON below for why.
+type entityUpdateWire struct {
+	ID         string                     `json:"id"`
+	Kind       string                     `json:"kind"`
+	Name       string                     `json:"name"`
+	Attributes map[string]json.RawMessage `json:"attributes"`
+}
+
+// UnmarshalJSON accepts any JSON value for an attribute, not only a
+// plain string — a real, reproduced failure mode: the consolidation
+// prompt asks for `"attributes": {"key": "value"}` (string values), but
+// a model asked for a naturally boolean/list-shaped attribute (e.g.
+// "is_vegetarian" or "hobbies") sometimes emits a native JSON bool or
+// array there instead of a stringified one. Rejecting the whole day's
+// consolidation over one attribute's shape (the original behavior —
+// json.Unmarshal into map[string]string fails outright on a non-string
+// value) is worse than losslessly falling back to that value's own
+// compact JSON text form when it isn't already a plain string.
+func (e *EntityUpdate) UnmarshalJSON(data []byte) error {
+	var wire entityUpdateWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	e.ID = wire.ID
+	e.Kind = wire.Kind
+	e.Name = wire.Name
+	if len(wire.Attributes) == 0 {
+		e.Attributes = nil
+		return nil
+	}
+	e.Attributes = make(map[string]string, len(wire.Attributes))
+	for k, v := range wire.Attributes {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			e.Attributes[k] = s
+			continue
+		}
+		e.Attributes[k] = string(v)
+	}
+	return nil
 }
 
 // ConsolidationOutput is the consolidation LLM's structured response

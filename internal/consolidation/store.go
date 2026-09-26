@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -15,6 +16,19 @@ import (
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
+
+// validEntityKinds mirrors schema/0001_init.sql's entities_kind_check
+// constraint exactly — Go can't read a Postgres CHECK constraint at
+// compile time, so this needs to be kept in sync by hand if that
+// constraint's allowed values ever change. self_model deliberately isn't
+// here even though it's in the DB constraint: it's a specially curated
+// entity read directly by internal/store/retrieve.go's anchor logic, not
+// something the consolidation LLM is ever prompted to invent on its own
+// (see summarySystemPrompt's own kind enumeration, which omits it too).
+var validEntityKinds = map[string]bool{
+	"person": true, "project": true, "preference": true, "skill": true,
+	"place": true, "organization": true,
+}
 
 type storeSummaryInput struct {
 	scope                identity.Scope
@@ -62,13 +76,30 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 	// fresh slice, not an in-place edit of in.output.EntitiesTouched:
 	// Correct's caller passed that ConsolidationOutput in and shouldn't
 	// see its own value silently mutated.
-	entities := make([]EntityUpdate, len(in.output.EntitiesTouched))
-	copy(entities, in.output.EntitiesTouched)
-	for i := range entities {
-		if entities[i].ID == "" {
-			continue
+	entities := make([]EntityUpdate, 0, len(in.output.EntitiesTouched))
+	for _, e := range in.output.EntitiesTouched {
+		if e.ID != "" {
+			// A real, reproduced failure mode: the consolidation LLM
+			// invents a plausible-sounding but unsupported kind (e.g.
+			// "conversation", "family") outside the enum the prompt
+			// actually asked for. Left unchecked, this reaches
+			// upsertEntities' INSERT and fails with a raw Postgres
+			// check-constraint violation — which (before this check)
+			// aborted the whole day's consolidation over one bad entity,
+			// discarding an otherwise-valid summary and every other
+			// touched entity along with it. Skipping just this one entity
+			// and logging it is the same "one bad thing shouldn't block
+			// the rest" philosophy groundingCheck's degrade-not-fail
+			// design and cmd/hupi-consolidate's per-scope loop already
+			// follow.
+			if !validEntityKinds[e.Kind] {
+				slog.Warn("consolidation: skipping entity with invalid kind",
+					"kind", e.Kind, "name", e.Name, "scope_kind", in.scope.Kind, "scope_owner", in.scope.Owner)
+				continue
+			}
+			e.ID = canonicalEntityID(e.Kind, e.Name, e.ID)
 		}
-		entities[i].ID = canonicalEntityID(entities[i].Kind, entities[i].Name, entities[i].ID)
+		entities = append(entities, e)
 	}
 
 	entityIDs := make([]string, 0, len(entities))
