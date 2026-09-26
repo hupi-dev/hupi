@@ -1,0 +1,144 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import FinalCta from '../components/FinalCta.astro';
+import { GITHUB_URL, docFileURL } from '../lib/links.js';
+
+// Kept in sync with docs/BENCHMARKS.md by hand, same convention as
+// downloads.astro's platform-status table — this is presentation copy
+// for the marketing site, not generated from the raw results; check
+// that doc (and bench/results/) before trusting a specific number here
+// if it's been a while.
+const categories = [
+  { label: 'Multi-hop', n: 282, accuracy: '39.6%' },
+  { label: 'Single-hop', n: 321, accuracy: '38.0%' },
+  { label: 'Temporal', n: 96, accuracy: '23.1%' },
+  { label: 'Open-domain', n: 841, accuracy: '52.3%' },
+  { label: 'Adversarial (abstention)', n: 446, accuracy: '67.7%' },
+];
+---
+
+<Layout
+  title="HUPI — LoCoMo benchmark results"
+  description="A real, reproducible LoCoMo memory-recall score for HUPI, scored with LoCoMo's own unmodified code — full methodology, per-category breakdown, and honest caveats."
+>
+  <Nav />
+  <main>
+    <section class="relative overflow-hidden border-b border-white/5">
+      <div
+        class="pointer-events-none absolute left-1/2 top-[-8rem] h-[24rem] w-[24rem] -translate-x-1/2 rounded-full bg-ember-600/15 blur-[120px]"
+        aria-hidden="true"
+      >
+      </div>
+      <div class="relative mx-auto max-w-4xl px-6 pb-16 pt-20 text-center sm:pt-28">
+        <p
+          class="font-mono-tight mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-navy-800/60 px-4 py-1.5 text-xs uppercase tracking-widest text-fog-300"
+        >
+          Benchmarks
+        </p>
+        <h1 class="text-balance text-4xl font-extrabold tracking-tight text-fog-100 sm:text-5xl">
+          A real, reproducible number —
+          <span class="text-ember-500">not a marketing claim.</span>
+        </h1>
+        <p class="text-balance mx-auto mt-6 max-w-2xl text-lg text-fog-300">
+          Public memory-system benchmarks have a credibility problem: competing products have
+          published wildly different scores on the same LoCoMo benchmark without disclosing
+          matching methodology — one vendor claimed 84%, another "corrected" that to 58.44%, a
+          third countered with 75.14%. Neither side fully agreed on what the other actually
+          measured. So instead of a headline percentage, here's the full method, exactly what
+          was found along the way, and what this does and doesn't prove.
+        </p>
+      </div>
+    </section>
+
+    <section class="border-b border-white/5 bg-navy-950/40">
+      <div class="mx-auto max-w-4xl px-6 py-16 sm:py-20">
+        <div class="grid gap-6 sm:grid-cols-2">
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
+            <p class="font-mono-tight text-5xl font-extrabold text-ember-500">50.2%</p>
+            <p class="mt-2 text-sm text-fog-300">
+              Overall accuracy — all 10 LoCoMo conversations, 1,986 questions, real GPT-4.1,
+              scored with LoCoMo's own unmodified scoring code.
+            </p>
+          </div>
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
+            <p class="font-mono-tight text-5xl font-extrabold text-fog-100">LongMemEval</p>
+            <p class="mt-2 text-sm text-fog-300">
+              A second, independent benchmark — real run in progress. Results land here once
+              scoring is complete, on the same honest terms as the LoCoMo number above.
+            </p>
+          </div>
+        </div>
+
+        <div class="mt-12 overflow-x-auto rounded-xl border border-white/10">
+          <table class="w-full min-w-[500px] border-collapse text-left text-sm">
+            <thead>
+              <tr class="bg-navy-900">
+                <th class="p-4 font-semibold text-fog-100">Category</th>
+                <th class="p-4 font-semibold text-fog-100">Questions</th>
+                <th class="p-4 font-semibold text-fog-100">Accuracy</th>
+              </tr>
+            </thead>
+            <tbody>
+              {
+                categories.map((c) => (
+                  <tr class="odd:bg-white/[0.02]">
+                    <td class="p-4 text-fog-300">{c.label}</td>
+                    <td class="p-4 text-fog-500">{c.n}</td>
+                    <td class="p-4 font-mono-tight text-fog-100">{c.accuracy}</td>
+                  </tr>
+                ))
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="border-b border-white/5">
+      <div class="mx-auto max-w-3xl px-6 py-16 sm:py-20">
+        <h2 class="text-2xl font-bold text-fog-100">Method</h2>
+        <p class="mt-4 text-fog-300">
+          <span class="font-mono-tight text-fog-100">cmd/hupi-bench</span>, a real benchmark harness
+          in this same repo — real <span class="font-mono-tight">gateway.Handler</span>, real
+          nightly consolidation, real retrieval, against LoCoMo's own published data
+          (<span class="font-mono-tight">snap-research/locomo</span>, pinned commit). Scored with
+          LoCoMo's own, completely unmodified F1/EM scoring code — no reimplemented metric logic
+          anywhere in this repo. Answer/consolidation model: GPT-4.1. Embedding model:
+          text-embedding-3-small.
+        </p>
+
+        <h2 class="mt-12 text-2xl font-bold text-fog-100">Is this comparable to other products' published numbers?</h2>
+        <p class="mt-4 text-fog-300">
+          Not directly, and that's an honest "no," not a hedge. Competing vendors' publicly
+          claimed figures were never confirmed to use the same category inclusion, the same
+          scoring code, or even the same metric — an LLM-as-judge tends to score far more
+          generously than literal word-overlap F1/EM, which is what this number uses. This score
+          is real and reproducible <em>on its own terms</em>: same input data, same unmodified
+          scoring code, full method disclosed above. Anyone can re-run the scoring script against
+          the raw predictions and get the same number back.
+        </p>
+
+        <h2 class="mt-12 text-2xl font-bold text-fog-100">What we found along the way</h2>
+        <p class="mt-4 text-fog-300">
+          Getting from a first real run (24.9%) to the final number (50.2%) surfaced five real
+          product bugs — not benchmark-only tuning — all fixed on the main branch: a consolidation
+          bug that could fail an entire day's memory processing over one malformed relationship,
+          a missing retry/backoff that let a single rate limit fail an entire run, a soft prompt
+          instruction the model routinely ignored, a database table of specific extracted facts
+          that was being written but never read back at retrieval time, and a hardcoded context
+          budget many times smaller than this codebase's own documented target. Full write-up,
+          including a no-memory baseline comparison and every caveat, is in the repo.
+        </p>
+
+        <a
+          href={docFileURL('BENCHMARKS.md')}
+          class="mt-8 inline-flex items-center gap-2 text-ember-500 underline decoration-dotted hover:text-ember-400"
+        >
+          Read the full write-up on GitHub →
+        </a>
+      </div>
+    </section>
+  </main>
+  <FinalCta />
+</Layout>

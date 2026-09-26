@@ -1,0 +1,47 @@
+---
+// Static proof points, deliberately not a rotating carousel: a carousel
+// in this position would mean whichever slide happens to be showing
+// when someone lands might not be the one that matters to them (a
+// technical evaluator cares about the benchmark number; an enterprise/
+// IT buyer cares about SSO), with no guarantee they wait for the
+// rotation. Keeping both visible at once costs nothing and gambles on
+// nothing. Room for a third entry (LongMemEval) once that benchmark run
+// is complete — see docs/BENCHMARKS.md.
+const points = [
+  {
+    stat: '50.2%',
+    label: 'LoCoMo accuracy',
+    body: 'Real, reproducible score — scored with the benchmark’s own unmodified code, full method disclosed.',
+    href: '/benchmarks',
+  },
+  {
+    stat: 'OIDC',
+    label: 'SSO ready',
+    body: 'Azure AD/Entra ID, Okta, Auth0, Google Workspace — any standards-compliant provider, no code change.',
+    href: '/docs#full-reference',
+  },
+];
+---
+
+<section class="border-b border-white/5 bg-navy-950/40">
+  <div class="mx-auto max-w-4xl px-6 py-10">
+    <div class="grid gap-4 sm:grid-cols-2">
+      {
+        points.map((p) => (
+          <a
+            href={p.href}
+            class="group flex items-center gap-4 rounded-xl border border-white/10 bg-navy-900/60 p-5 transition-colors hover:border-ember-500/40 hover:bg-navy-900"
+          >
+            <span class="font-mono-tight shrink-0 text-2xl font-extrabold text-ember-500">
+              {p.stat}
+            </span>
+            <span class="text-left">
+              <span class="block text-sm font-semibold text-fog-100">{p.label}</span>
+              <span class="block text-xs text-fog-400">{p.body}</span>
+            </span>
+          </a>
+        ))
+      }
+    </div>
+  </div>
+</section>
