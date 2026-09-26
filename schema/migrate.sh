@@ -37,6 +37,7 @@ probe() {
     0012_entity_embeddings.sql)           echo "select exists(select 1 from information_schema.columns where table_name='entities' and column_name='embedding')" ;;
     0013_embedding_model_tracking.sql)     echo "select exists(select 1 from information_schema.columns where table_name='summaries' and column_name='embedding_model')" ;;
     0014_demo_sessions.sql)               echo "select (to_regclass('public.demo_sessions') is not null)" ;;
+    0015_entity_relationships.sql)        echo "select (to_regclass('public.entity_relationships') is not null)" ;;
     *) echo "no idempotency probe defined for $1" >&2; exit 1 ;;
   esac
 }
@@ -45,7 +46,7 @@ for f in 0001_init.sql 0002_tier3_phase1_identity.sql 0003_tier3_phase2_retrieve
          0004_hardening_phase1_app_role.sql 0005_hardening_phase3_rls.sql 0006_hardening_phase4_scope_keys.sql \
          0007_audit_log.sql 0008_admin_operators.sql 0009_export_import_audit_events.sql \
          0010_key_rotation.sql 0011_key_rotation_audit_event.sql 0012_entity_embeddings.sql 0013_embedding_model_tracking.sql \
-         0014_demo_sessions.sql; do
+         0014_demo_sessions.sql 0015_entity_relationships.sql; do
   already="$(psql "$HUPI_ADMIN_DATABASE_URL" -tAc "$(probe "$f")" 2>/dev/null | tr -d '[:space:]')"
   if [ "$already" = "t" ]; then
     echo "schema/$f already applied, skipping"
