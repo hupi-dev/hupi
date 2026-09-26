@@ -175,7 +175,9 @@ const qaConcisenessPrompt = `Answer the following question directly, using a sho
 
 Always give dates as an absolute date (e.g. "7 May 2023"), never a relative term like "yesterday", "last year", or "this month".
 
-Make your best specific attempt using anything relevant you've been told, even if you're not fully certain or the exact wording isn't stated verbatim — a specific, plausible answer inferred from related information is better than declining to answer. Only say "not mentioned" or "no information available" if there is truly nothing relevant to work with at all — not merely because the precise fact isn't stated in so many words.`
+Make your best specific attempt using anything relevant you've been told, even if you're not fully certain or the exact wording isn't stated verbatim — a specific, plausible answer inferred from related information is better than declining to answer. Only say "not mentioned" or "no information available" if there is truly nothing relevant to work with at all — not merely because the precise fact isn't stated in so many words.
+
+Before answering, double-check WHO the retrieved information is actually about. A conversation between two people often has facts that apply to only one of them — if the question asks about person A but the fact you found belongs to person B, say so explicitly (e.g. "That's B's necklace, not A's — A's own necklace isn't mentioned") rather than answering as if it were A's.`
 
 // runBaselineConversation is the no-memory control: no session replay, no
 // consolidation, so this scope's real Retrieve call has nothing to find —
