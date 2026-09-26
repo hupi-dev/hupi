@@ -60,6 +60,7 @@ func run() error {
 	convIndex := flag.Int("conv-index", 0, "which conversation/instance to replay (0-based); ignored if -all-conversations is set")
 	allConversations := flag.Bool("all-conversations", false, "process every conversation/instance in the data file, not just -conv-index")
 	baseline := flag.Bool("baseline", false, "no-memory baseline: skip HUPI replay/consolidation, stuff raw session transcripts directly into the answer-model's context instead")
+	answerOnly := flag.Bool("answer-only", false, "skip session replay and consolidation, re-answer questions against an already-consolidated scope from a prior run (e.g. to test a QA-prompt change without re-paying for replay/consolidation); ignored with -baseline, which never touches HUPI's memory anyway")
 	answerModel := flag.String("answer-model", "", "providers.yaml profile name to answer with (defaults to active_chat_provider)")
 	outFile := flag.String("out-file", "", "where to write predictions (default: stdout)")
 	consolidateBin := flag.String("consolidate-bin", "./hupi-consolidate", "path to the real hupi-consolidate binary")
@@ -132,16 +133,16 @@ func run() error {
 		}
 
 		var answers []string
-		if *baseline {
+		switch {
+		case *baseline:
 			answers, err = runBaselineConversation(handler, userID, model, conv)
-			if err != nil {
-				return err
-			}
-		} else {
+		case *answerOnly:
+			answers, err = answerConversation(handler, userID, model, conv)
+		default:
 			answers, err = runHUPIConversation(handler, userID, model, conv, *consolidateBin)
-			if err != nil {
-				return err
-			}
+		}
+		if err != nil {
+			return err
 		}
 		results[ci] = conversationResult{conv: conv, answers: answers}
 	}
@@ -229,10 +230,24 @@ func marshalLongMemEvalHypotheses(results []conversationResult) ([]byte, error) 
 // conversation's questions through the same real retrieval+generation
 // path.
 func runHUPIConversation(handler *gateway.Handler, userID, model string, conv benchConversation, consolidateBin string) ([]string, error) {
+	if err := replayAndConsolidate(handler, userID, model, conv, consolidateBin); err != nil {
+		return nil, err
+	}
+	return answerConversation(handler, userID, model, conv)
+}
+
+// replayAndConsolidate does everything runHUPIConversation does except
+// answer the questions — split out so -answer-only (see run()) can skip
+// straight to answerConversation and reuse an already-consolidated scope
+// from a prior run, without re-paying for replay/consolidation just to
+// test a QA-prompt change. The memory state a QA-prompt edit needs to be
+// tested against doesn't change; only how the answer gets extracted from
+// it does.
+func replayAndConsolidate(handler *gateway.Handler, userID, model string, conv benchConversation, consolidateBin string) error {
 	slog.Info("replaying sessions", "id", conv.id)
 	dates, err := replayConversation(handler, userID, model, conv)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var sortedDates []string
@@ -274,7 +289,15 @@ func runHUPIConversation(handler *gateway.Handler, userID, model string, conv be
 	if consolidationFailures > 0 {
 		slog.Warn("some dates failed to consolidate — answers may be missing memory from those days", "id", conv.id, "failed_dates", consolidationFailures, "total_dates", len(sortedDates))
 	}
+	return nil
+}
 
+// answerConversation is runHUPIConversation's tail: assumes conv's scope
+// is already fully replayed and consolidated (either by
+// replayAndConsolidate just now, or by a prior run when called via
+// -answer-only), and just answers the questions against whatever memory
+// state already exists for userID.
+func answerConversation(handler *gateway.Handler, userID, model string, conv benchConversation) ([]string, error) {
 	// Query time: one day after the last session, so retrieval reflects
 	// the full, already-consolidated history — LoCoMo's QA has no
 	// per-question date of its own (see bench/FORMAT.md).
