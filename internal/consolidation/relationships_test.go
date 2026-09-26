@@ -107,6 +107,76 @@ func TestRunDaily_WritesRelationship(t *testing.T) {
 	}
 }
 
+// TestRunDaily_SkipsRelationshipReferencingUnextractedEntity reproduces a
+// real failure found running cmd/hupi-bench at scale (Step 5 of the
+// benchmark harness plan): the consolidation LLM's relationships[] list
+// and its entities_touched[] list are two independent parts of the same
+// JSON output, and nothing stops the model naming a relationship endpoint
+// that entities_touched never declared (or declared under a different
+// kind/name that canonicalizes to a different id) — subject_id/object_id
+// are hard foreign keys into entities, so that used to fail the entire
+// day's consolidation with a raw FK-violation error instead of just
+// dropping the one malformed relationship, exactly like an invalid entity
+// kind or an unresolvable name already does.
+func TestRunDaily_SkipsRelationshipReferencingUnextractedEntity(t *testing.T) {
+	consolidationJSON := `{
+		"summary": "Caroline mentioned a charity race.",
+		"key_facts": [{"fact": "Caroline mentioned a charity race", "source_episode_ids": ["ep_rel_2"]}],
+		"entities_touched": [
+			{"id": "person:caroline", "kind": "person", "name": "Caroline", "attributes": {}}
+		],
+		"relationships": [
+			{"subject_kind": "person", "subject_name": "Caroline", "predicate": "took_part_in", "object_kind": "project", "object_name": "Charity Race", "valid_from": "", "valid_until": ""}
+		]
+	}`
+	groundingJSON := `{"grounded": [true]}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-relationships-unextracted"}
+	ctx := context.Background()
+	cleanupRelationshipScope(t, db, scope)
+
+	date := time.Date(2026, 1, 20, 12, 0, 0, 0, time.UTC)
+	seedEpisode(t, ctx, db, runner, scope, "ep_rel_2", date)
+
+	// The real bug: this used to return an error (FK violation), failing
+	// the whole day. It must now succeed, having simply skipped the one
+	// relationship whose object was never extracted as an entity.
+	if err := runner.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("RunDaily: %v (relationship referencing an unextracted entity should be skipped, not fail the whole day)", err)
+	}
+
+	var count int
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from entity_relationships
+			where scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&count)
+	})
+	if err != nil {
+		t.Fatalf("count relationships: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("relationship count = %d, want 0 (the only relationship references project:charity-race, which was never in entities_touched)", count)
+	}
+
+	// The summary itself must still have been written — one bad
+	// relationship shouldn't take the rest of the day's consolidation
+	// down with it.
+	var summaryCount int
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries where scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&summaryCount)
+	})
+	if err != nil {
+		t.Fatalf("count summaries: %v", err)
+	}
+	if summaryCount != 1 {
+		t.Errorf("summary count = %d, want 1", summaryCount)
+	}
+}
+
 // TestUpsertRelationships_SupersedesOpenEndedEdgeOnExplicitValidFrom
 // covers the conservative supersession rule from
 // docs/ENTITY_RELATIONSHIPS_PLAN.md §5: an existing open-ended edge for

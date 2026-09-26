@@ -442,6 +442,21 @@ func newRelationshipID() (string, error) {
 	return "rel_" + hex.EncodeToString(buf), nil
 }
 
+// entityExists reports whether id already exists in entities for scope —
+// entities' real primary key is the composite (scope_kind, scope_owner,
+// id), not just id (two scopes can each have their own "project:hupi"),
+// so this checks all three.
+func entityExists(ctx context.Context, tx *sql.Tx, scope identity.Scope, id string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+		select exists(
+			select 1 from entities
+			where scope_kind = $1 and scope_owner = $2 and id = $3
+		)
+	`, scope.Kind, scope.Owner, id).Scan(&exists)
+	return exists, err
+}
+
 // upsertRelationships writes the connections a consolidation run says
 // this period touched — docs/ENTITY_RELATIONSHIPS_PLAN.md §§3-5 for the
 // full design and the specific reasoning below. Must run after
@@ -471,6 +486,37 @@ func (r *Runner) upsertRelationships(ctx context.Context, tx *sql.Tx, scope iden
 			continue
 		}
 
+		// subject_id/object_id are hard foreign keys into entities (see
+		// schema/0015_entity_relationships.sql) — but the consolidation
+		// LLM's relationships[] list and its entities[] list are two
+		// separate parts of the same JSON output, and nothing stops the
+		// model from naming a relationship endpoint (e.g. a kind+name
+		// pair) that its own entities[] list never actually declared, or
+		// declared under a slightly different kind/name that canonicalizes
+		// to a different id. upsertEntities has already run by this point
+		// (this function's own doc comment), so any entity the model
+		// meant to reference genuinely exists now if it's ever going to —
+		// checking existence here and skipping (not failing the whole
+		// day) is the same treatment already given to an invalid kind or
+		// an unresolvable name above, for the same reason: one
+		// malformed/inconsistent relationship shouldn't take down
+		// everything else this run extracted.
+		subjectExists, err := entityExists(ctx, tx, scope, subjectID)
+		if err != nil {
+			return fmt.Errorf("check subject entity exists %s: %w", subjectID, err)
+		}
+		objectExists, err := entityExists(ctx, tx, scope, objectID)
+		if err != nil {
+			return fmt.Errorf("check object entity exists %s: %w", objectID, err)
+		}
+		if !subjectExists || !objectExists {
+			slog.Warn("consolidation: skipping relationship referencing an entity that was never extracted",
+				"subject_id", subjectID, "subject_exists", subjectExists,
+				"object_id", objectID, "object_exists", objectExists,
+				"scope_kind", scope.Kind, "scope_owner", scope.Owner)
+			continue
+		}
+
 		validFrom := parseOptionalDate(u.ValidFrom)
 		validUntil := parseOptionalDate(u.ValidUntil)
 
@@ -484,7 +530,7 @@ func (r *Runner) upsertRelationships(ctx context.Context, tx *sql.Tx, scope iden
 		// upsertEntities gets for free from `on conflict` and this
 		// doesn't.
 		var exists bool
-		err := tx.QueryRowContext(ctx, `
+		err = tx.QueryRowContext(ctx, `
 			select exists(
 				select 1 from entity_relationships
 				where scope_kind = $1 and scope_owner = $2
