@@ -314,6 +314,17 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 			}
 			refs = append(refs, entityKeywordRefs...)
 		}
+
+		// Graph walk runs last, seeded from every entity found by every
+		// mechanism above (stage 1 exact match, vector search, keyword
+		// search combined) — a relationship connects two entities
+		// regardless of *how* one of them was found, so this needs the
+		// full set, not just one search's own results.
+		graphRefs, err := s.graphWalkRelationships(ctx, tx, workspace, refIDsOfKind(refs, identity.RefKindEntity), &sb, &strongHit)
+		if err != nil {
+			return fmt.Errorf("graph walk relationships: %w", err)
+		}
+		refs = append(refs, graphRefs...)
 		return nil
 	})
 	if err != nil {
@@ -726,6 +737,106 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 // effect on the next request rather than requiring a restart.
 func keywordSearchEnabled() bool {
 	return os.Getenv("HUPI_ENABLE_KEYWORD_SEARCH") != "false"
+}
+
+// graphWalkEnabled is the same kind of admin escape hatch
+// keywordSearchEnabled is, for the same reason: docs/ENTITY_RELATIONSHIPS_PLAN.md
+// §6 calls for this to have "its own hop-limit and token budget," and an
+// off switch is the other half of that — defaults to enabled since
+// graphWalkMaxHops/graphWalkMaxResults already bound the cost tightly,
+// but a deployment with an unusually dense relationship graph is exactly
+// the kind of "informed minority" case keywordSearchEnabled's own
+// reasoning already covers.
+func graphWalkEnabled() bool {
+	return os.Getenv("HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK") != "false"
+}
+
+// graphWalkMaxHops/graphWalkMaxResults are the "own hop-limit and token
+// budget" docs/ENTITY_RELATIONSHIPS_PLAN.md §6 called for before this was
+// written — an ungated walk on a densely-connected scope could pull in
+// far more context than any one query needs. 2 hops is enough to answer
+// a genuine two-step connection (LoCoMo's own "multi-hop" category is
+// exactly this shape) without approaching an unbounded graph traversal;
+// 10 total connected entities caps the worst case (a hub entity with
+// many edges) from dominating the context budget on its own.
+const (
+	graphWalkMaxHops    = 2
+	graphWalkMaxResults = 10
+)
+
+// graphWalkRelationships surfaces entities connected to seedEntityIDs
+// (whatever stage 1 exact matches, vector search, and keyword search
+// already found) by walking outward along entity_relationships edges —
+// see docs/ENTITY_RELATIONSHIPS_PLAN.md §6. This is what lets a query
+// that never names the connected entity still surface it (e.g. "who did
+// Caroline meet through Melanie" when only "Melanie" was matched
+// directly), rather than depending on the connection happening to be
+// restated in the same retrieved summary's prose.
+//
+// Only walks currently-valid edges (valid_until is null) — a
+// superseded/historical relationship (schema/0015's whole bi-temporal
+// point) isn't a *current* connection between the two entities, so
+// including it here would surface a stale connection as if it still
+// held. A future "what was true as of date X" retrieval mode would need
+// to relax this, but nothing today asks that question.
+func (s *Store) graphWalkRelationships(ctx context.Context, q dbscope.Querier, scope identity.Scope, seedEntityIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+	if len(seedEntityIDs) == 0 || !graphWalkEnabled() {
+		return nil, nil
+	}
+
+	visited := make(map[string]bool, len(seedEntityIDs))
+	for _, id := range seedEntityIDs {
+		visited[id] = true
+	}
+	frontier := append([]string{}, seedEntityIDs...)
+	var discovered []string
+
+	for hop := 0; hop < graphWalkMaxHops && len(frontier) > 0 && len(discovered) < graphWalkMaxResults; hop++ {
+		rows, err := q.QueryContext(ctx, `
+			select subject_id, object_id from entity_relationships
+			where scope_kind = $1 and scope_owner = $2
+			  and (subject_id = any($3::text[]) or object_id = any($3::text[]))
+			  and valid_until is null
+		`, scope.Kind, scope.Owner, pgfmt.TextArray(frontier))
+		if err != nil {
+			return nil, fmt.Errorf("graph walk hop %d: %w", hop, err)
+		}
+
+		var nextFrontier []string
+		for rows.Next() {
+			var subjectID, objectID string
+			if err := rows.Scan(&subjectID, &objectID); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan graph walk row: %w", err)
+			}
+			for _, candidate := range []string{subjectID, objectID} {
+				if visited[candidate] || len(discovered) >= graphWalkMaxResults {
+					continue
+				}
+				visited[candidate] = true
+				discovered = append(discovered, candidate)
+				nextFrontier = append(nextFrontier, candidate)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("iterate graph walk rows: %w", err)
+		}
+		rows.Close()
+		frontier = nextFrontier
+	}
+
+	refs := make([]identity.Ref, 0, len(discovered))
+	for _, id := range discovered {
+		line, err := s.formatEntity(ctx, q, scope, id)
+		if err != nil {
+			return nil, fmt.Errorf("load graph-walked entity %s: %w", id, err)
+		}
+		sb.WriteString("\n" + line)
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
+		*strongHit = true // a graph-connected entity is as strong a signal as a directly-matched one
+	}
+	return refs, nil
 }
 
 // refIDsOfKind extracts the IDs of every already-collected ref of the
