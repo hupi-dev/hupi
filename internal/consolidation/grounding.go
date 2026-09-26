@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"hupi/internal/metrics"
@@ -52,10 +53,31 @@ func (r *Runner) groundingCheck(ctx context.Context, sourceText string, facts []
 		Grounded []bool `json:"grounded"`
 	}
 	if err := json.Unmarshal([]byte(extractJSON(resp.Message.Content)), &result); err != nil {
-		return nil, fmt.Errorf("parse grounding result: %w", err)
+		// Same safe-degrade direction as the count-mismatch case just
+		// below, for the same reason: a grounding verdict this package
+		// can't trust is informationally no different from "couldn't
+		// determine groundedness" either way, and defaulting to
+		// ungrounded costs nothing but a later manual review — unlike
+		// failing outright, which would discard the whole day's
+		// otherwise-good summary along with it.
+		slog.Warn("consolidation: could not parse grounding result, treating all facts as ungrounded", "error", err)
+		result.Grounded = make([]bool, len(facts))
 	}
 	if len(result.Grounded) != len(facts) {
-		return nil, fmt.Errorf("grounding check returned %d results for %d facts", len(result.Grounded), len(facts))
+		// A real, reproduced failure mode: the grounding model doesn't
+		// always return exactly one boolean per fact (e.g. it can split
+		// an ambiguous fact into sub-judgments). Failing outright here —
+		// the original behavior — discarded an otherwise-good summary
+		// and every other correctly-grounded fact in it over one
+		// miscounted response. Since an ungrounded fact is still stored,
+		// just excluded from retrieval until reviewed (this function's
+		// own doc comment), defaulting every fact to ungrounded when the
+		// count can't be trusted is the same safe direction this package
+		// already treats a genuine "no" as — never destroys information,
+		// only degrades to "not yet verified."
+		slog.Warn("consolidation: grounding check returned a mismatched result count, treating all facts as ungrounded",
+			"got", len(result.Grounded), "want", len(facts))
+		result.Grounded = make([]bool, len(facts))
 	}
 	for _, g := range result.Grounded {
 		if g {
