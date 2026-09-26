@@ -53,10 +53,19 @@ type wireChatResponse struct {
 // handler, just without an actual listening socket (httptest.NewRecorder
 // instead of a real network round trip). handler.Now must already be set
 // to the desired fabricated timestamp by the caller before this runs.
-func sendChatTurn(handler *gateway.Handler, userID, model, content string) (string, error) {
+// systemPrompt is optional (pass "" for none) — the handler prepends its
+// own retrieved-memory system message in front of whatever's sent here
+// (internal/gateway/handler.go's own "step 3: context injection"), so
+// this one just rides along after it, not in place of it.
+func sendChatTurn(handler *gateway.Handler, userID, model, systemPrompt, content string) (string, error) {
+	msgs := []wireMessage{}
+	if systemPrompt != "" {
+		msgs = append(msgs, wireMessage{Role: "system", Content: systemPrompt})
+	}
+	msgs = append(msgs, wireMessage{Role: "user", Content: content})
 	reqBody, err := json.Marshal(wireChatRequest{
 		Model:    model,
-		Messages: []wireMessage{{Role: "user", Content: content}},
+		Messages: msgs,
 	})
 	if err != nil {
 		return "", fmt.Errorf("bench: marshal request: %w", err)
@@ -112,7 +121,7 @@ func replayConversation(handler *gateway.Handler, userID, answerModel string, co
 		if content == "" {
 			continue
 		}
-		if _, err := sendChatTurn(handler, userID, answerModel, content); err != nil {
+		if _, err := sendChatTurn(handler, userID, answerModel, "", content); err != nil {
 			return nil, fmt.Errorf("bench: replay session %d of %s: %w", i+1, conv.id, err)
 		}
 		day := sess.date.Truncate(24 * time.Hour)
@@ -120,6 +129,18 @@ func replayConversation(handler *gateway.Handler, userID, answerModel string, co
 	}
 	return dates, nil
 }
+
+// qaConcisenessPrompt is sent only during the QA phase, never during
+// session replay: LoCoMo/LongMemEval's own expected answers are short
+// phrases ("7 May 2023", "2022"), and their official scoring is literal
+// word-overlap F1, not an LLM judge. A real, measured effect: HUPI's
+// default hedging, multi-sentence answer style ("Unfortunately, the
+// provided text snippet does not specify...") scores near-zero F1
+// against a two-word expected answer even when the underlying retrieved
+// content was in the right area — this doesn't fix genuine recall
+// misses, but it stops good-content answers being scored as if they
+// were wrong purely on phrasing.
+const qaConcisenessPrompt = `Answer the following question as concisely as possible — a short phrase or a few words, not a full sentence or explanation. If you don't know, say so in as few words as possible.`
 
 // answerQuestions sends every QA question in conv through handler as a
 // new chat turn, at queryTime (should be after every session's own
@@ -131,7 +152,7 @@ func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv 
 	handler.Now = func() time.Time { return queryTime }
 	answers := make([]string, len(conv.qa))
 	for i, qa := range conv.qa {
-		answer, err := sendChatTurn(handler, userID, answerModel, qa.question)
+		answer, err := sendChatTurn(handler, userID, answerModel, qaConcisenessPrompt, qa.question)
 		if err != nil {
 			return nil, fmt.Errorf("bench: answer question %d of %s: %w", i, conv.id, err)
 		}

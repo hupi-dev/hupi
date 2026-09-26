@@ -39,6 +39,15 @@ type qaItem struct {
 	// single-session-preference, single-session-assistant) — unused by
 	// the LoCoMo adapter.
 	questionType string
+	// raw is this question's exact original JSON object, byte for byte —
+	// kept so the harness's output can be the real annotation file's own
+	// qa entries plus one added field (hupi_prediction), which is what
+	// LoCoMo's own scoring code (task_eval.evaluation_stats.analyze_aggr_acc)
+	// actually requires: it reads fields like `evidence` directly off
+	// each qa entry, so a reconstructed-from-scratch object that dropped
+	// anything LoCoMo's own file has would break under their own
+	// unmodified scoring code, not just under a hand-rolled one.
+	raw json.RawMessage
 }
 
 // benchConversation is the common shape both adapters (locomo.go,
@@ -55,9 +64,9 @@ type benchConversation struct {
 // a raw map pass rather than named fields, since N ranges up to 35 and
 // isn't fixed per conversation.
 type locomoRaw struct {
-	SampleID     string          `json:"sample_id"`
-	Conversation json.RawMessage `json:"conversation"`
-	QA           []locomoQA      `json:"qa"`
+	SampleID     string            `json:"sample_id"`
+	Conversation json.RawMessage   `json:"conversation"`
+	QA           []json.RawMessage `json:"qa"`
 }
 
 type locomoTurn struct {
@@ -140,11 +149,16 @@ func loadLoCoMo(path string, convIndex int) (benchConversation, error) {
 		conv.sessions = append(conv.sessions, sess)
 	}
 
-	for _, qa := range c.QA {
+	for _, rawQA := range c.QA {
+		var qa locomoQA
+		if err := json.Unmarshal(rawQA, &qa); err != nil {
+			return benchConversation{}, fmt.Errorf("parse qa entry: %w", err)
+		}
 		conv.qa = append(conv.qa, qaItem{
 			question: qa.Question,
 			answer:   fmt.Sprintf("%v", qa.Answer), // defensive stringify — answer is sometimes a JSON number
 			category: qa.Category,
+			raw:      rawQA,
 		})
 	}
 

@@ -6,9 +6,10 @@
 // the reviewed plan (docs/BENCHMARKS.md, once Step 6 lands) for the
 // full design and why each piece works the way it does.
 //
-// Step 2 scope: one LoCoMo conversation, replayed and consolidated for
-// real, predictions written to stdout/a JSON file — no official scoring
-// integration yet (that's bench/score_locomo.py, Step 3).
+// Writes predictions in LoCoMo's own annotation-file shape (see the
+// predictionKey doc comment below) so bench/score_locomo.py can score
+// them with LoCoMo's real, unmodified scoring code — no reimplemented
+// metric logic in this repo at all.
 package main
 
 import (
@@ -35,12 +36,11 @@ func main() {
 	}
 }
 
-type prediction struct {
-	Question   string `json:"question"`
-	Expected   string `json:"expected"`
-	Category   int    `json:"category,omitempty"`
-	HupiAnswer string `json:"hupi_answer"`
-}
+// predictionKey is the field name LoCoMo's own scoring code is told to
+// read the model's answer from (task_eval.evaluation.eval_question_answering's
+// eval_key parameter) — bench/score_locomo.py passes this same literal
+// string, so it must match exactly.
+const predictionKey = "hupi_prediction"
 
 func run() error {
 	dataFile := flag.String("data-file", "", "path to locomo10.json")
@@ -149,17 +149,29 @@ func run() error {
 		return err
 	}
 
-	preds := make([]prediction, len(conv.qa))
+	// Output shape matches LoCoMo's own annotation file exactly --
+	// [{"sample_id": ..., "qa": [<original qa object> + hupi_prediction]}]
+	// -- plus one added field per question, rather than a harness-invented
+	// shape. This is what lets bench/score_locomo.py call LoCoMo's own,
+	// completely unmodified task_eval.evaluation_stats.analyze_aggr_acc
+	// directly: that function reads fields (e.g. evidence) straight off
+	// each qa entry, so anything less than the real entry, verbatim,
+	// would break under their own scoring code, not just a hand-rolled one.
+	qaOut := make([]map[string]any, len(conv.qa))
 	for i, qa := range conv.qa {
-		preds[i] = prediction{
-			Question:   qa.question,
-			Expected:   qa.answer,
-			Category:   qa.category,
-			HupiAnswer: answers[i],
+		var entry map[string]any
+		if err := json.Unmarshal(qa.raw, &entry); err != nil {
+			return fmt.Errorf("bench: re-parse qa entry %d for output: %w", i, err)
 		}
+		entry[predictionKey] = answers[i]
+		qaOut[i] = entry
+	}
+	convOut := map[string]any{
+		"sample_id": conv.id,
+		"qa":        qaOut,
 	}
 
-	out, err := json.MarshalIndent(preds, "", "  ")
+	out, err := json.MarshalIndent([]map[string]any{convOut}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("bench: marshal predictions: %w", err)
 	}
