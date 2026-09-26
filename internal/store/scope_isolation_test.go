@@ -281,6 +281,15 @@ func cleanupScope(t *testing.T, s *Store, scope identity.Scope) {
 	t.Helper()
 	_ = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
 		_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+		// entity_relationships first, not after: its subject_id/object_id
+		// are foreign keys into entities, so deleting entities first would
+		// hit a constraint violation — silently, since every statement
+		// here already discards its own error, a real bug this file's own
+		// history caught the hard way (a graph-walk test failed with
+		// "duplicate key" on its *second* run, because the entities
+		// delete below had been failing on every run all along and no
+		// one noticed until a table existed whose rows referenced them).
+		_, _ = tx.Exec(`delete from entity_relationships where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		return nil

@@ -19,10 +19,15 @@ const summarySystemPrompt = `You are HUPI's consolidation engine (see MEMORY_FOR
   ],
   "entities_touched": [
     {"id": "kind:slug", "kind": "person|project|preference|skill|place|organization", "name": "...", "attributes": {"key": "value"}}
+  ],
+  "relationships": [
+    {"subject_kind": "person|project|preference|skill|place|organization", "subject_name": "...", "predicate": "a short verb phrase, e.g. works_at, married_to, friends_with, manages", "object_kind": "person|project|preference|skill|place|organization", "object_name": "...", "valid_from": "YYYY-MM-DD or empty string if unknown", "valid_until": "YYYY-MM-DD or empty string if still current"}
   ]
 }
 
-Only include a key_fact if it is directly and specifically supported by the source texts you were given. Cite the exact source ids it came from. Do not include anything you are inferring, generalizing, or guessing beyond what the source text states.`
+Only include a key_fact if it is directly and specifically supported by the source texts you were given. Cite the exact source ids it came from. Do not include anything you are inferring, generalizing, or guessing beyond what the source text states.
+
+Only include a relationship if the source texts directly and specifically state a connection between two entities — the same evidentiary bar as a key_fact. subject_kind/subject_name and object_kind/object_name identify the two entities exactly the way entities_touched does (same kind values, same name spelling) — every entity named in a relationship should also appear in entities_touched. Leave valid_from/valid_until as empty strings rather than guessing a date the source text doesn't state.`
 
 // buildSummaryPrompt assembles the consolidation LLM's user message.
 // establishedRecord, when non-empty, is the prose of the day's *current*
