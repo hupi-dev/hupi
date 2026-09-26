@@ -30,3 +30,9 @@ cmd/hupi-admin-ui/web/.astro/
 # scratch dirs used for local manual verification, never meant to persist
 .scratch-verify*/
 .scratch-smoketest/
+
+# LoCoMo/LongMemEval benchmark data — fetched fresh by bench/fetch-data.sh
+# from their real upstream sources (pinned commits/URLs in that script),
+# not vendored, same "clone fresh, don't vendor" convention hupi-code's
+# build.sh uses for microsoft/vscode.
+bench/data/
