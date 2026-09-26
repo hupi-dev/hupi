@@ -88,11 +88,40 @@ func (e *EntityUpdate) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// RelationshipUpdate is one connection between two entities a
+// consolidation run says this period established or touched — see
+// docs/ENTITY_RELATIONSHIPS_PLAN.md for the full design. Subject/object
+// are given as kind+name, the same fields EntityUpdate already uses, not
+// a pre-formatted "kind:slug" id string: the referenced entities are
+// canonicalized the identical way (canonicalEntityID) storeSummary
+// already canonicalizes entities_touched, so the model only ever has to
+// get kind+name right, never a specific id-string format, for either
+// entities or relationships.
+//
+// ValidFrom/ValidUntil are "YYYY-MM-DD" strings, not time.Time: the
+// consolidation LLM's own citations are equally prone to the same
+// malformed-output edge cases entity attributes needed hardening for
+// (see EntityUpdate's own UnmarshalJSON) — an empty string or an
+// unparseable date is treated as "unknown," not fatal, by
+// upsertRelationships, so this stays a plain string all the way to that
+// point rather than failing the whole day's consolidation on a date
+// parse error for a single relationship.
+type RelationshipUpdate struct {
+	SubjectKind string `json:"subject_kind"`
+	SubjectName string `json:"subject_name"`
+	Predicate   string `json:"predicate"`
+	ObjectKind  string `json:"object_kind"`
+	ObjectName  string `json:"object_name"`
+	ValidFrom   string `json:"valid_from"`
+	ValidUntil  string `json:"valid_until"`
+}
+
 // ConsolidationOutput is the consolidation LLM's structured response
 // shape, and also what a human-authored correction (Runner.Correct)
 // supplies directly instead of an LLM generating it.
 type ConsolidationOutput struct {
-	Summary         string          `json:"summary"`
-	KeyFacts        []KeyFactOutput `json:"key_facts"`
-	EntitiesTouched []EntityUpdate  `json:"entities_touched"`
+	Summary         string                `json:"summary"`
+	KeyFacts        []KeyFactOutput       `json:"key_facts"`
+	EntitiesTouched []EntityUpdate        `json:"entities_touched"`
+	Relationships   []RelationshipUpdate  `json:"relationships"`
 }
