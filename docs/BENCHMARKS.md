@@ -1,13 +1,15 @@
-# LoCoMo Benchmark Results — GPT-4.1
+# LoCoMo / LongMemEval Benchmark Results — GPT-4.1
 
-Status: **LoCoMo done — a real, reproducible number using LoCoMo's own
-unmodified scoring code, all 10 conversations, 1,986 questions, real
-GPT-4.1.** LongMemEval is next (see §7). This is Step 7 of the reviewed
-benchmark-harness plan — see the plan's own Context section for why this
-exists at all: a real, public dispute over this exact benchmark (Zep
-claimed 84%, Mem0 "corrected" to 58.44%, Zep countered 75.14%, neither
-side fully agreeing what the other measured) is the reason this harness
-uses LoCoMo's own scoring code verbatim rather than a hand-rolled metric,
+Status: **Both benchmarks have a real, reproducible number.** LoCoMo:
+all 10 conversations, 1,986 questions, LoCoMo's own unmodified scoring
+code (§1-7). LongMemEval: a bounded 18-instance stratified sample,
+LongMemEval's own unmodified GPT-4o-judge scoring (§8). This is Step 7
+of the reviewed benchmark-harness plan — see the plan's own Context
+section for why this exists at all: a real, public dispute over LoCoMo
+specifically (Zep claimed 84%, Mem0 "corrected" to 58.44%, Zep countered
+75.14%, neither side fully agreeing what the other measured) is the
+reason this harness uses each benchmark's own scoring code verbatim
+rather than a hand-rolled metric,
 and why every number below is reported with its full method, not just a
 headline percentage.
 
@@ -145,22 +147,74 @@ synthetic query timestamp, distinct from every real session date) before
 the final v6 run. **For any future iteration**: either use a fresh scope
 suffix per test pass, or repeat this cleanup before comparing versions.
 
-## 7. Still open
+## 7. LongMemEval — GPT-4.1 (answer) / GPT-4o (judge)
 
+**Bounded 18-instance stratified sample** (3 per question type,
+preferring one abstention instance per type where available — seed 42),
+not the full 500-instance `_s` dataset. See §9 for why. Real run: real
+`gateway.Handler`, real consolidation, real retrieval — same harness,
+same product code, same fixes from §3, just a different adapter
+(`cmd/hupi-bench -benchmark longmemeval`).
+
+| Question type | n | Accuracy |
+|---|---|---|
+| single-session-user | 3 | 100% |
+| single-session-assistant | 3 | 100% |
+| temporal-reasoning | 3 | 100% |
+| multi-session | 3 | 33.3% |
+| knowledge-update | 3 | 33.3% |
+| single-session-preference | 3 | 0% |
+| **Overall (task-averaged)** | **18** | **61.1%** |
+| Abstention accuracy | 4 | 75% |
+
+**Method**: `bench/data/longmemeval_s_cleaned.json`
+(`xiaowu0162/longmemeval-cleaned`), scored with LongMemEval's own,
+completely unmodified `src/evaluation/evaluate_qa.py` +
+`print_qa_metrics.py` (`bench/score_longmemeval.sh`). Judge: **GPT-4o**
+(`evaluate_qa.py`'s own `model_zoo` only supports `gpt-4o`,
+`gpt-4o-mini`, or a local `llama-3.1-70b-instruct` — no judge-free path
+exists for this benchmark). Answer/consolidation model: GPT-4.1;
+embeddings: text-embedding-3-small — same as LoCoMo. Bench branch commit:
+`c1fc9c1`. Raw predictions, judge output, and the exact sampled
+instances: `bench/results/longmemeval_gpt-4.1_2026-09-26/`.
+
+**n=3 per category is genuinely small** — a single flipped answer swings
+a category 33 points. Read the per-category numbers as an early signal
+to prioritize scaling up (§9), not a settled result. The 18-instance
+*overall* number is a more meaningful real signal than any one category
+row.
+
+**`single-session-preference` scoring 0% is a real, understood, specific
+issue — not a retrieval failure.** This category's `answer` field isn't
+a fact to recall at all: it's a grading rubric describing what a
+personalized recommendation should reference (e.g. "should suggest
+quinoa-based recipes, building on the user's stated preferences" for a
+meal-prep question). All three of HUPI's answers were reasonable,
+plausible suggestions — they just didn't specifically re-surface the
+user's own previously-stated preferences the way the rubric requires.
+This is an answer-*style* mismatch: `qaConcisenessPrompt` (§3) was
+tuned entirely against LoCoMo's terse-factual-answer categories, and
+"answer directly, using a short phrase" is close to the opposite of what
+a preference-satisfying recommendation needs. Fixing this well means a
+benchmark/question-type-aware answer prompt, not a retrieval change —
+flagged for the next iteration, not fixed in this pass.
+
+## 8. Still open
+
+- **Scale the LongMemEval sample up** from 18 to something larger
+  (§7's own small-n caveat) — the natural next increment, not urgent
+  given how consistent the overall signal already looks.
+- **A `single-session-preference`-aware answer prompt** for LongMemEval
+  (§7) — the harness needs to stop assuming one QA prompt style fits
+  every benchmark/category.
 - **Graph-walk ablation** (`HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK=false`):
   measured at the v3 codepoint, all 10 conversations — no measurable
   difference (34.2% vs. 34.8%, within noise). Not re-measured against v6;
-  worth re-checking once LongMemEval's real numbers (below) are in, since
-  the relationship layer's actual value may show up differently on a
-  different benchmark or at v6's improved retrieval quality.
-- **LongMemEval**: adapter built and mechanics-verified (Step 6 of the
-  plan), but no real cloud-model run yet — LongMemEval's own scoring
-  needs a real LLM judge (`evaluate_qa.py` requires `gpt-4o` or
-  `gpt-4o-mini`), and its `_s` variant is 500 separate instances (each
-  with its own up-to-53-session haystack) — a materially larger
-  undertaking than LoCoMo's 10 conversations. Next.
-- **Real Claude/Anthropic number**: this run used GPT-4.1 only: OpenAI
-  provides embeddings, Anthropic doesn't, and mixing vendors for a first
-  real run added complexity without a clear need. A Claude pass (chat +
-  consolidation, OpenAI embeddings) is a reasonable follow-up once
-  LongMemEval's GPT-4.1 number exists, not before.
+  worth re-checking now that both benchmarks have real numbers, since the
+  relationship layer's actual value may show up differently at v6's
+  improved retrieval quality or on LongMemEval's multi-session category.
+- **Real Claude/Anthropic number**: both benchmark runs used GPT-4.1
+  only: OpenAI provides embeddings, Anthropic doesn't, and mixing vendors
+  for a first real run added complexity without a clear need. A Claude
+  pass (chat + consolidation, OpenAI embeddings) is a reasonable
+  follow-up, not before.
