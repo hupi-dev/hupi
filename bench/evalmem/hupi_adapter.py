@@ -17,12 +17,13 @@ bench/score_locomo.py lives here and imports LoCoMo's own scoring code
 from a separately-fetched clone at runtime — EvalMem is a separate,
 external dependency, not something we vendor or fork. To actually use
 this adapter against a real EvalMem checkout, no edit to that checkout's
-own registry.py is required: EvalMem's scripts/run_eval_pipeline.py
-loads an adapter directly from a module path via
---adapter-module bench/evalmem/hupi_adapter.py --adapter-class
-HupiMemoryAdapter (verified against its actual _load_adapter()) — see
-this directory's README.md for the exact invocation. Any real evaluation
-run is still deliberately not done here — see
+own registry.py is required: EvalMem's scripts/run_eval_pipeline.py can
+load an adapter directly via --adapter-module/--adapter-class. Use the
+module-name form (--adapter-module hupi_adapter, with this directory on
+PYTHONPATH), not the raw .py file-path form — the latter hits a real bug
+in EvalMem 0.6.6's own loader for any dataclass-using module (see this
+directory's README.md for the exact invocation and why). Any real
+evaluation run is still deliberately not done here — see
 docs/EVALMEM_INTEGRATION_PLAN.md's own step 6/7 gate.
 """
 
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -69,6 +71,17 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
         self.config = config or HupiMemoryAdapterConfig()
         self.family = self.config.family
         self.flavor = self.config.flavor
+        # retrieve_original and generate_online_answer are called
+        # independently by EvalMem's Retrieval and Generation probes
+        # (which run concurrently -- ParallelThreeProbeEvaluator's own
+        # thread pool) for the exact same real native-mode call. Without
+        # this cache each one separately shells out to
+        # hupi-answer-question, silently doubling real retrieval+
+        # generation cost per question. Keyed by (scope, query), not
+        # top_k -- HUPI's native answer/context don't depend on top_k
+        # (see retrieve_original's own doc comment).
+        self._native_cache: Dict[str, Dict[str, Any]] = {}
+        self._native_cache_lock = threading.Lock()
 
     def capabilities(self) -> Dict[str, Any]:
         out = super().capabilities()
@@ -255,8 +268,25 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
         scored.sort(key=lambda item: item[0], reverse=True)
         return [record for _, record in scored[:100]]
 
+    def _native_answer(self, run_ctx: Any, query: str) -> Dict[str, Any]:
+        """The one real native-mode hupi-answer-question call for a given
+        (scope, query), shared by retrieve_original and
+        generate_online_answer -- see this adapter's own __init__ doc
+        comment for why this cache exists. The lock is held across the
+        real subprocess call (not just the dict access) so that if both
+        probes race for the same query, the loser actually waits for the
+        winner's result instead of also shelling out."""
+        key = f"{run_ctx.get('scope_owner', '')}:{query}"
+        with self._native_cache_lock:
+            cached = self._native_cache.get(key)
+            if cached is not None:
+                return cached
+            result = self._answer(run_ctx, query)
+            self._native_cache[key] = result
+            return result
+
     def retrieve_original(self, run_ctx: Any, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        result = self._answer(run_ctx, query)
+        result = self._native_answer(run_ctx, query)
         context = result.get("retrieved_context") or ""
         if not context:
             return []
@@ -270,7 +300,7 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
         ]
 
     def generate_online_answer(self, run_ctx: Any, query: str, top_k: int = 5) -> str:
-        result = self._answer(run_ctx, query)
+        result = self._native_answer(run_ctx, query)
         return result.get("answer") or "I don't know"
 
     def generate_oracle_answer(self, run_ctx: Any, query: str, oracle_context: str) -> str:
