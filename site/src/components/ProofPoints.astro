@@ -2,16 +2,21 @@
 // Static proof points, deliberately not a rotating carousel: a carousel
 // in this position would mean whichever slide happens to be showing
 // when someone lands might not be the one that matters to them (a
-// technical evaluator cares about the benchmark number; an enterprise/
+// technical evaluator cares about the benchmark numbers; an enterprise/
 // IT buyer cares about SSO), with no guarantee they wait for the
-// rotation. Keeping both visible at once costs nothing and gambles on
-// nothing. Room for a third entry (LongMemEval) once that benchmark run
-// is complete — see docs/BENCHMARKS.md.
+// rotation. Keeping all three visible at once costs nothing and gambles
+// on nothing.
 const points = [
   {
     stat: '50.2%',
     label: 'LoCoMo accuracy',
     body: 'Real, reproducible score — scored with the benchmark’s own unmodified code, full method disclosed.',
+    href: '/benchmarks',
+  },
+  {
+    stat: '52.1%',
+    label: 'LongMemEval accuracy',
+    body: 'A second, independent long-context memory benchmark — same honest methodology, real GPT-4o judge.',
     href: '/benchmarks',
   },
   {
@@ -24,8 +29,8 @@ const points = [
 ---
 
 <section class="border-b border-white/5 bg-navy-950/40">
-  <div class="mx-auto max-w-4xl px-6 py-10">
-    <div class="grid gap-4 sm:grid-cols-2">
+  <div class="mx-auto max-w-6xl px-6 py-10">
+    <div class="grid gap-4 sm:grid-cols-3">
       {
         points.map((p) => (
           <a
