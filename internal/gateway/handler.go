@@ -143,6 +143,16 @@ type Handler struct {
 	Now       func() time.Time // seam for tests; nil uses time.Now
 	NewID     func() string    // seam for tests; nil uses newEpisodeID
 	Logger    *slog.Logger     // nil uses slog.Default()
+	// OnRetrieve, if set, is called with the exact RetrievalResult this
+	// request's own retrieval step computed (including ContextMessage —
+	// what step 3 below actually injects), right before that context gets
+	// used. A seam for external diagnostic tooling (see
+	// docs/EVALMEM_INTEGRATION_PLAN.md's C_original/retrieve_original
+	// requirement) that needs the real, exact context a request used,
+	// not a second, separately-computed Retrieve() call that risks
+	// silently drifting from what the request actually saw. nil by
+	// default: zero behavior change for every real deployment.
+	OnRetrieve func(RetrievalResult)
 }
 
 func (h *Handler) now() time.Time {
@@ -210,6 +220,9 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 		}
 	}
 	metrics.RetrievalGateTotal.WithLabelValues(string(result.Gate)).Inc()
+	if h.OnRetrieve != nil {
+		h.OnRetrieve(result)
+	}
 
 	// Separate, orthogonal opt-out from retrieval above: skips writing this
 	// turn to memory at all. Added for clients whose turns are never worth
