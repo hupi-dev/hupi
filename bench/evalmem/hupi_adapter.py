@@ -16,11 +16,13 @@ This file lives in this repo (not EvalMem's own), the same way
 bench/score_locomo.py lives here and imports LoCoMo's own scoring code
 from a separately-fetched clone at runtime — EvalMem is a separate,
 external dependency, not something we vendor or fork. To actually use
-this adapter, place (or symlink) it into a real EvalMem checkout's
-src/memory_eval/adapters/ directory and register it in that checkout's
-registry.py the same way o_mem_adapter.py etc. are registered — see this
-directory's README.md for the exact steps. That registration step, and
-any real evaluation run, are still deliberately not done here — see
+this adapter against a real EvalMem checkout, no edit to that checkout's
+own registry.py is required: EvalMem's scripts/run_eval_pipeline.py
+loads an adapter directly from a module path via
+--adapter-module bench/evalmem/hupi_adapter.py --adapter-class
+HupiMemoryAdapter (verified against its actual _load_adapter()) — see
+this directory's README.md for the exact invocation. Any real evaluation
+run is still deliberately not done here — see
 docs/EVALMEM_INTEGRATION_PLAN.md's own step 6/7 gate.
 """
 
@@ -33,10 +35,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from memory_eval.adapters.base import BaseMemoryAdapter  # type: ignore[import-not-found]
+from memory_eval.eval_core.models import AdapterTrace, RetrievedItem  # type: ignore[import-not-found]
 
 
 @dataclass(frozen=True)
-class HupiAdapterConfig:
+class HupiMemoryAdapterConfig:
     family: str = "hupi"
     flavor: str = "hupi_native"
     # Directory containing the three built Go binaries below — build
@@ -61,9 +64,9 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
     family = "hupi"
     flavor = "hupi_native"
 
-    def __init__(self, config: Optional[HupiAdapterConfig] = None):
+    def __init__(self, config: Optional[HupiMemoryAdapterConfig] = None):
         super().__init__()
-        self.config = config or HupiAdapterConfig()
+        self.config = config or HupiMemoryAdapterConfig()
         self.family = self.config.family
         self.flavor = self.config.flavor
 
@@ -76,6 +79,11 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
                 "supports_real_native_runtime": True,
                 "supports_lightweight_fallback": False,
                 "native_runtime_status": "real_gateway_and_consolidation",
+                # We don't implement hybrid_retrieve_candidates -- the
+                # base class default of True here would misrepresent
+                # what this adapter actually does (find_memory_records'
+                # plain token-overlap match is the only candidate path).
+                "supports_high_recall_candidates": False,
             }
         )
         return out
@@ -98,6 +106,50 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
     def _model_args(self) -> List[str]:
         return ["-answer-model", self.config.answer_model] if self.config.answer_model else []
 
+    @staticmethod
+    def _to_hupi_turns(conversation: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Translate a turn list into cmd/hupi-ingest-turns's expected
+        shape (dia_id, session_index, session_datetime per turn).
+
+        The real end-to-end pipeline (memory_eval.pipeline.runner's
+        _conversation_to_turns, verified against actual source, not
+        assumed) hands adapters a simpler shape than EvalMem's own
+        LoCoMo sample builder uses internally: flat
+        {turn_index, speaker, text, timestamp} dicts, where timestamp is
+        that turn's *session's* raw LoCoMo date string, repeated for
+        every turn in the same session, with no explicit session index.
+        A new session is exactly where that timestamp value changes --
+        _conversation_to_turns already emits turns in session order, so
+        this is a safe, order-preserving re-derivation, not a guess.
+
+        Tolerates turns that already carry session_index/session_datetime
+        (e.g. EvalMem's own locomo_builder-shaped flattening) by passing
+        those straight through instead of re-deriving them.
+        """
+        out: List[Dict[str, Any]] = []
+        session_index = -1
+        last_ts: Any = object()  # sentinel, never equals a real timestamp string
+        for turn in conversation:
+            if "session_index" in turn:
+                out.append(dict(turn))
+                continue
+            ts = str(turn.get("timestamp") or turn.get("session_datetime") or "")
+            if ts != last_ts:
+                session_index += 1
+                last_ts = ts
+            turn_index = int(turn.get("turn_index", len(out)))
+            out.append(
+                {
+                    "dia_id": turn.get("dia_id") or f"D{session_index}:{turn_index}",
+                    "speaker": turn.get("speaker", ""),
+                    "text": turn.get("text", ""),
+                    "turn_index": turn_index,
+                    "session_index": session_index,
+                    "session_datetime": ts,
+                }
+            )
+        return out
+
     def ingest_conversation(self, sample_id: str, conversation: List[Dict[str, Any]]) -> Dict[str, Any]:
         args = [self._bin("hupi-ingest-turns"), "-sample-id", sample_id]
         args += self._model_args()
@@ -105,7 +157,7 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
             args += ["-consolidate-bin", self.config.consolidate_bin]
         if self.config.skip_consolidate:
             args += ["-skip-consolidate"]
-        run_ctx = self._run_json(args, stdin_payload=conversation)
+        run_ctx = self._run_json(args, stdin_payload=self._to_hupi_turns(conversation))
         run_ctx["sample_id"] = sample_id
         return run_ctx
 
@@ -225,6 +277,32 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
         result = self._answer(run_ctx, query, oracle_context=oracle_context)
         return result.get("answer") or "I don't know"
 
+    def build_trace_for_query(self, run_ctx: Any, query: str, oracle_context: str, top_k: int) -> AdapterTrace:
+        # Not called by EvalMem's own primary pipeline
+        # (memory_eval.pipeline.runner.ThreeProbeEvaluationPipeline uses
+        # the granular methods above directly, verified against its
+        # actual FullEvalAdapterProtocol) -- implemented anyway since
+        # every other adapter in this repo implements it, for the same
+        # alternate EvalAdapterProtocol callers that might use it.
+        memory_view = self.export_full_memory(run_ctx)
+        raw_items = self.retrieve_original(run_ctx, query, top_k=top_k)
+        retrieved = [
+            RetrievedItem(
+                id=str(item.get("id", "")),
+                text=str(item.get("text", "")),
+                score=float(item.get("score", 0.0) or 0.0),
+                meta=dict(item.get("meta", {})) if isinstance(item.get("meta", {}), dict) else {},
+            )
+            for item in raw_items
+        ]
+        return AdapterTrace(
+            memory_view=memory_view,
+            retrieved_items=retrieved,
+            answer_online=self.generate_online_answer(run_ctx, query, top_k=top_k),
+            answer_oracle=self.generate_oracle_answer(run_ctx, query, oracle_context),
+            raw_trace={"memory_system": self.family, "mode": self.flavor},
+        )
+
     def _answer(self, run_ctx: Any, query: str, oracle_context: Optional[str] = None) -> Dict[str, Any]:
         args = [
             self._bin("hupi-answer-question"),
@@ -241,4 +319,4 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
         return self._run_json(args)
 
 
-__all__ = ["HupiAdapterConfig", "HupiMemoryAdapter"]
+__all__ = ["HupiMemoryAdapterConfig", "HupiMemoryAdapter"]

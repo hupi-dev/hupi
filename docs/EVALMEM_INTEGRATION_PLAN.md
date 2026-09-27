@@ -176,12 +176,54 @@ with EvalMem's task-type (`τ`) requirement with no remapping needed.
    `answer_session_ids`/`has_answer` for either — writing one would be a
    new builder (mirroring `locomo_builder.py`), not a small addition;
    moved to §7 as a non-goal for this branch.
-6. **Register the adapter**, confirm `gpt-5-mini`/embedding-model
-   dependencies, do a tiny (single-conversation, `--limit 1`-style) smoke
-   test — still not a real scored run, just confirming the pipeline
-   executes end to end without error. `bench/evalmem/hupi_adapter.py`
-   itself has not yet been smoke-tested against a real EvalMem Python
-   install/import — next.
+6. ✅ **Register the adapter, smoke test.** Registration needs no edit to
+   EvalMem's own `registry.py`: its `scripts/run_eval_pipeline.py` loads
+   an adapter directly via `--adapter-module hupi_adapter --adapter-class
+   HupiMemoryAdapter` (module-name form, not the raw-file-path form —
+   see `bench/evalmem/README.md` for a real bug in EvalMem `0.6.6`'s
+   file-path loader this sidesteps). Ran the real pipeline
+   (`--limit 1 --no-llm-assist --allow-rule-fallback`, zero cloud LLM
+   spend — EvalMem's own rule-based judge only) against a real EvalMem
+   checkout, real Postgres, real local Ollama, a trimmed 3-session LoCoMo
+   conversation: completed with `"errors": 0`, a structurally valid
+   diagnostic report (`EM`/`GRF` defect codes, consistent with HUPI's
+   paraphrased-summary retrieval missing an exact-phrase rule-based
+   match, and the same relative-date benchmark quirk `docs/BENCHMARKS.md`
+   already documents for LoCoMo). Full detail in
+   `bench/evalmem/README.md`.
+
+   Two real bugs found and fixed along the way, not caught until this
+   test actually ran against the real end-to-end pipeline rather than
+   the Go tools directly:
+   - `ingest_conversation`'s input shape was wrong. The real pipeline
+     (`memory_eval.pipeline.runner._conversation_to_turns`, verified
+     against actual source) hands adapters flat
+     `{turn_index, speaker, text, timestamp}` turns — a different,
+     simpler shape than `locomo_builder._flatten_conversation`'s
+     `dia_id`/`session_index`/`session_datetime` shape this adapter had
+     assumed applied uniformly (it's actually only used internally by
+     EvalMem's own F_key/oracle-context resolution, a separate code
+     path — see §4). Fixed by adding `HupiMemoryAdapter._to_hupi_turns`,
+     which re-derives session boundaries from timestamp changes before
+     calling `cmd/hupi-ingest-turns`.
+   - The adapter's config dataclass was named `HupiAdapterConfig`, but
+     EvalMem's generic adapter-loading convention
+     (`scripts/run_eval_pipeline.py`'s `_load_adapter`) requires it be
+     named exactly `f"{adapter_class}Config"` — every other adapter in
+     the repo follows this (`OMemAdapterConfig` for `OMemAdapter`, etc).
+     Renamed to `HupiMemoryAdapterConfig` to match.
+
+   Also added `build_trace_for_query` (unused by the primary pipeline,
+   confirmed by reading `FullEvalAdapterProtocol`'s actual definition —
+   but every other adapter implements it, for the separate
+   `EvalAdapterProtocol` some other tooling may use) and corrected
+   `capabilities()`'s `supports_high_recall_candidates` to `False` (this
+   adapter doesn't implement `hybrid_retrieve_candidates`).
+
+   Real timing data point for future runs: a 3-session/58-turn
+   conversation's real ingest+consolidation (local Ollama) took ~12
+   minutes end to end — budget accordingly; this is why the smoke test
+   used a trimmed single conversation rather than the full dataset.
 7. **Real evaluation run** — explicitly out of scope until this plan is
    reviewed and steps 2-6 are actually built and smoke-tested. No cloud
    judge spend happens before this step is separately approved.

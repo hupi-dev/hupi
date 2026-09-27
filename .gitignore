@@ -36,3 +36,8 @@ cmd/hupi-admin-ui/web/.astro/
 # not vendored, same "clone fresh, don't vendor" convention hupi-code's
 # build.sh uses for microsoft/vscode.
 bench/data/
+
+# Python bytecode cache from running bench/evalmem/hupi_adapter.py
+# against a real EvalMem checkout.
+__pycache__/
+*.pyc
