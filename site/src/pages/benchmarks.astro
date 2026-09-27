@@ -16,6 +16,15 @@ const categories = [
   { label: 'Open-domain', n: 841, accuracy: '52.3%' },
   { label: 'Adversarial (abstention)', n: 446, accuracy: '67.7%' },
 ];
+
+const longMemEvalCategories = [
+  { label: 'Single-session (user)', n: 8, accuracy: '100%' },
+  { label: 'Single-session (assistant)', n: 8, accuracy: '100%' },
+  { label: 'Temporal reasoning', n: 8, accuracy: '50%' },
+  { label: 'Multi-session', n: 8, accuracy: '37.5%' },
+  { label: 'Knowledge update', n: 8, accuracy: '25%' },
+  { label: 'Single-session (preference)', n: 8, accuracy: '0%' },
+];
 ---
 
 <Layout
@@ -62,15 +71,16 @@ const categories = [
             </p>
           </div>
           <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
-            <p class="font-mono-tight text-5xl font-extrabold text-fog-100">LongMemEval</p>
+            <p class="font-mono-tight text-5xl font-extrabold text-ember-500">52.1%</p>
             <p class="mt-2 text-sm text-fog-300">
-              A second, independent benchmark — real run in progress. Results land here once
-              scoring is complete, on the same honest terms as the LoCoMo number above.
+              LongMemEval overall accuracy — a 48-instance stratified sample, real GPT-4.1
+              answering, real GPT-4o judge, scored with LongMemEval's own unmodified code.
             </p>
           </div>
         </div>
 
-        <div class="mt-12 overflow-x-auto rounded-xl border border-white/10">
+        <h3 class="mt-12 text-sm font-semibold uppercase tracking-widest text-fog-500">LoCoMo — by category</h3>
+        <div class="mt-4 overflow-x-auto rounded-xl border border-white/10">
           <table class="w-full min-w-[500px] border-collapse text-left text-sm">
             <thead>
               <tr class="bg-navy-900">
@@ -92,6 +102,36 @@ const categories = [
             </tbody>
           </table>
         </div>
+
+        <h3 class="mt-12 text-sm font-semibold uppercase tracking-widest text-fog-500">LongMemEval — by question type</h3>
+        <div class="mt-4 overflow-x-auto rounded-xl border border-white/10">
+          <table class="w-full min-w-[500px] border-collapse text-left text-sm">
+            <thead>
+              <tr class="bg-navy-900">
+                <th class="p-4 font-semibold text-fog-100">Question type</th>
+                <th class="p-4 font-semibold text-fog-100">Questions</th>
+                <th class="p-4 font-semibold text-fog-100">Accuracy</th>
+              </tr>
+            </thead>
+            <tbody>
+              {
+                longMemEvalCategories.map((c) => (
+                  <tr class="odd:bg-white/[0.02]">
+                    <td class="p-4 text-fog-300">{c.label}</td>
+                    <td class="p-4 text-fog-500">{c.n}</td>
+                    <td class="p-4 font-mono-tight text-fog-100">{c.accuracy}</td>
+                  </tr>
+                ))
+              }
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-4 text-sm text-fog-500">
+          <span class="font-mono-tight text-fog-300">single-session-preference</span> scores low
+          because that category's expected "answer" is a personalized-recommendation rubric, not a
+          fact to recall — an answer-style gap, not a memory-recall failure. Full explanation in
+          the write-up below.
+        </p>
       </div>
     </section>
 

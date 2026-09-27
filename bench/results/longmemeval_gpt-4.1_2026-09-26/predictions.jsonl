@@ -1,18 +1,48 @@
-{"hypothesis":"No information available.","question_id":"f4f1d8a4_abs"}
-{"hypothesis":"10% discount","question_id":"726462e0"}
-{"hypothesis":"The Glass Menagerie","question_id":"58bf7951"}
-{"hypothesis":"From Narita Airport to Tokyo, bus fare: ¥2,000–3,000; taxi fare: ¥15,000–20,000; savings: ¥12,000–18,000 (approx. $110–$165 USD).  \nFrom Haneda Airport to Tokyo, bus fare: ¥1,000–2,000; taxi fare: ¥6,000–10,000; savings: ¥5,000–9,000 (approx. $45–$80 USD).","question_id":"09ba9854_abs"}
-{"hypothesis":"5 days (purchased on 15 January 2023, arrived on 20 January 2023)","question_id":"60bf93ed"}
-{"hypothesis":"No information available. (You mentioned ordering the new remote shutter release online on 5 February 2023 and later said it had arrived and was working well, but did not specify the exact delivery date.)","question_id":"b3c15d39"}
-{"hypothesis":"Purge unused items, clean as you cook, wipe counters daily, wash dishes immediately, keep a clear sink, use drawer and cabinet organizers, assign a place for everything, empty trash regularly, and do a weekly deep clean (appliances, floors, and fridge).","question_id":"afdc33df"}
-{"hypothesis":"No information available (your current location is not specified).","question_id":"35a27287"}
-{"hypothesis":"Lentil bolognese with quinoa, roasted sweet potatoes with fresh rosemary, homemade granola with your choice of nuts, seeds, and dried fruit","question_id":"b6025781"}
-{"hypothesis":"Purchasing three cows from Peter is not mentioned; only fixing the fence is mentioned (completed three weeks before your farm open house planning).","question_id":"gpt4_70e84552_abs"}
-{"hypothesis":"The training pads for Luna (purchased about a month ago) were purchased before the dog bed for Max (purchased about three weeks ago).","question_id":"gpt4_6ed717ea"}
-{"hypothesis":"3 June 2023","question_id":"gpt4_4edbafa2"}
-{"hypothesis":"No information available.","question_id":"0ddfec37_abs"}
-{"hypothesis":"Four short stories.","question_id":"a1eacc2a"}
-{"hypothesis":"37","question_id":"69fee5aa"}
-{"hypothesis":"Blue","question_id":"89527b6b"}
-{"hypothesis":"Miss Bee Providore","question_id":"c4f10528"}
-{"hypothesis":"Atmospheric distillation, fluid catalytic cracking (FCC), alkylation, hydrotreating","question_id":"6ae235be"}
+{"hypothesis": "No information available.", "question_id": "f4f1d8a4_abs"}
+{"hypothesis": "10% discount", "question_id": "726462e0"}
+{"hypothesis": "The Glass Menagerie", "question_id": "58bf7951"}
+{"hypothesis": "From Narita Airport to Tokyo, bus fare: \u00a52,000\u20133,000; taxi fare: \u00a515,000\u201320,000; savings: \u00a512,000\u201318,000 (approx. $110\u2013$165 USD).  \nFrom Haneda Airport to Tokyo, bus fare: \u00a51,000\u20132,000; taxi fare: \u00a56,000\u201310,000; savings: \u00a55,000\u20139,000 (approx. $45\u2013$80 USD).", "question_id": "09ba9854_abs"}
+{"hypothesis": "5 days (purchased on 15 January 2023, arrived on 20 January 2023)", "question_id": "60bf93ed"}
+{"hypothesis": "No information available. (You mentioned ordering the new remote shutter release online on 5 February 2023 and later said it had arrived and was working well, but did not specify the exact delivery date.)", "question_id": "b3c15d39"}
+{"hypothesis": "Purge unused items, clean as you cook, wipe counters daily, wash dishes immediately, keep a clear sink, use drawer and cabinet organizers, assign a place for everything, empty trash regularly, and do a weekly deep clean (appliances, floors, and fridge).", "question_id": "afdc33df"}
+{"hypothesis": "No information available (your current location is not specified).", "question_id": "35a27287"}
+{"hypothesis": "Lentil bolognese with quinoa, roasted sweet potatoes with fresh rosemary, homemade granola with your choice of nuts, seeds, and dried fruit", "question_id": "b6025781"}
+{"hypothesis": "Purchasing three cows from Peter is not mentioned; only fixing the fence is mentioned (completed three weeks before your farm open house planning).", "question_id": "gpt4_70e84552_abs"}
+{"hypothesis": "The training pads for Luna (purchased about a month ago) were purchased before the dog bed for Max (purchased about three weeks ago).", "question_id": "gpt4_6ed717ea"}
+{"hypothesis": "3 June 2023", "question_id": "gpt4_4edbafa2"}
+{"hypothesis": "No information available.", "question_id": "0ddfec37_abs"}
+{"hypothesis": "Four short stories.", "question_id": "a1eacc2a"}
+{"hypothesis": "37", "question_id": "69fee5aa"}
+{"hypothesis": "Blue", "question_id": "89527b6b"}
+{"hypothesis": "Miss Bee Providore", "question_id": "c4f10528"}
+{"hypothesis": "Atmospheric distillation, fluid catalytic cracking (FCC), alkylation, hydrotreating", "question_id": "6ae235be"}
+{"hypothesis": "No information available.", "question_id": "0862e8bf_abs"}
+{"hypothesis": "45 minutes each way", "question_id": "118b2229"}
+{"hypothesis": "Philips LED bulb", "question_id": "8a137a7f"}
+{"hypothesis": "Staunch atheist", "question_id": "dccbc061"}
+{"hypothesis": "500 Mbps", "question_id": "ad7109d1"}
+{"hypothesis": "No information available.", "question_id": "60bf93ed_abs"}
+{"hypothesis": "Six babies: Charlotte (Mike & Emma\u2019s daughter), Max (Rachel\u2019s son), Jasper (David & his wife\u2019s son), Ava and Lily (your aunt\u2019s twin girls), and Aaliyah (Sarah\u2019s adopted daughter).", "question_id": "2e6d26dc"}
+{"hypothesis": "$300 saved (original retail price $500, purchased for $200 at the outlet mall)", "question_id": "bb7c3b45"}
+{"hypothesis": "Two tanks: your 20-gallon community tank (\"Amazonia\") and a small 1-gallon tank set up for your friend's kid.", "question_id": "46a3abf7"}
+{"hypothesis": "Not mentioned.", "question_id": "a96c20ee"}
+{"hypothesis": "Possible reasons: group drafting reduces wind resistance, riding with others can increase motivation and adrenaline, Sunday rides may be longer or more structured, and better-maintained bike due to recent regular use.", "question_id": "1d4e3b97"}
+{"hypothesis": "Possible causes in your living room: dust, cat hair/dander (since you have a shedding cat), poor air quality, or allergens from indoor plants\u2014especially if cleaning routines have lapsed or air filters need changing.", "question_id": "75f70248"}
+{"hypothesis": "NeurIPS (Conference on Neural Information Processing Systems) 2023, CVPR (Conference on Computer Vision and Pattern Recognition) 2023, ICML (International Conference on Machine Learning) 2023, ICLR (International Conference on Learning Representations) 2023, ICCV (International Conference on Computer Vision) 2023, recent research by Dr. Stefano V Aldrich at the University of Edinburgh.", "question_id": "75832dbd"}
+{"hypothesis": "No information available (no details about your specific high school reunion or your current feelings about attending it are mentioned).", "question_id": "d6233ab6"}
+{"hypothesis": "Savory scones, focaccia bread, mini quiches, vegan brownies, lemon bars, chocolate chip cookies, or fruit tartlets.", "question_id": "d24813b1"}
+{"hypothesis": "No information available.", "question_id": "gpt4_93159ced_abs"}
+{"hypothesis": "No information available.", "question_id": "b46e15ed"}
+{"hypothesis": "No information available.", "question_id": "gpt4_e072b769"}
+{"hypothesis": "1. NBA game: Los Angeles Lakers vs. Chicago Bulls at Staples Center  \n2. College Football National Championship: Georgia vs. Alabama", "question_id": "gpt4_45189cb4"}
+{"hypothesis": "no information available", "question_id": "gpt4_e061b84f"}
+{"hypothesis": "Every other week.", "question_id": "f685340e_abs"}
+{"hypothesis": "$350,000", "question_id": "852ce960"}
+{"hypothesis": "50 episodes", "question_id": "72e3ee87"}
+{"hypothesis": "Your old sneakers are currently taking up space (not yet stored) and you are planning to store them in a shoe rack in your closet.", "question_id": "07741c45"}
+{"hypothesis": "One free night\u2019s stay at any Hilton property.", "question_id": "7401057b"}
+{"hypothesis": "1. Identify molecular subtypes of endometrial cancer using genomic and transcriptomic approaches  \n2. Investigate the clinical and biological significance of the identified molecular subtypes, including their association with patient outcomes and response to therapy  \n3. Develop biomarkers for the early detection and prognosis of endometrial cancer based on the identified molecular subtypes", "question_id": "8cf51dda"}
+{"hypothesis": "Dr. Arati Prabhakar", "question_id": "e3fc4d6e"}
+{"hypothesis": "2014", "question_id": "5809eb10"}
+{"hypothesis": "Mod Podge or another sealant to make it water-resistant", "question_id": "8aef76bc"}
+{"hypothesis": "1:10 ratio (1 part tea tree oil to 10 parts carrier oil, such as coconut, jojoba, or almond oil)", "question_id": "65240037"}

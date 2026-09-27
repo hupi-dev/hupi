@@ -2,8 +2,8 @@
 
 Status: **Both benchmarks have a real, reproducible number.** LoCoMo:
 all 10 conversations, 1,986 questions, LoCoMo's own unmodified scoring
-code (§1-7). LongMemEval: a bounded 18-instance stratified sample,
-LongMemEval's own unmodified GPT-4o-judge scoring (§8). This is Step 7
+code (§1-6). LongMemEval: a bounded 48-instance stratified sample,
+LongMemEval's own unmodified GPT-4o-judge scoring (§7). This is Step 7
 of the reviewed benchmark-harness plan — see the plan's own Context
 section for why this exists at all: a real, public dispute over LoCoMo
 specifically (Zep claimed 84%, Mem0 "corrected" to 58.44%, Zep countered
@@ -149,23 +149,29 @@ suffix per test pass, or repeat this cleanup before comparing versions.
 
 ## 7. LongMemEval — GPT-4.1 (answer) / GPT-4o (judge)
 
-**Bounded 18-instance stratified sample** (3 per question type,
-preferring one abstention instance per type where available — seed 42),
-not the full 500-instance `_s` dataset. See §9 for why. Real run: real
-`gateway.Handler`, real consolidation, real retrieval — same harness,
-same product code, same fixes from §3, just a different adapter
-(`cmd/hupi-bench -benchmark longmemeval`).
+**Bounded 48-instance stratified sample** (8 per question type — an
+initial 18-instance/3-per-type pilot, scaled up to 48 once mechanics
+were confirmed sound), not the full 500-instance `_s` dataset. See §8 for
+why. Real run: real `gateway.Handler`, real consolidation, real
+retrieval — same harness, same product code, same fixes from §3, just a
+different adapter (`cmd/hupi-bench -benchmark longmemeval`).
 
-| Question type | n | Accuracy |
-|---|---|---|
-| single-session-user | 3 | 100% |
-| single-session-assistant | 3 | 100% |
-| temporal-reasoning | 3 | 100% |
-| multi-session | 3 | 33.3% |
-| knowledge-update | 3 | 33.3% |
-| single-session-preference | 3 | 0% |
-| **Overall (task-averaged)** | **18** | **61.1%** |
-| Abstention accuracy | 4 | 75% |
+| Question type | n | Accuracy (n=3 pilot) | **Accuracy (n=8, final)** |
+|---|---|---|---|
+| single-session-user | 8 | 100% | **100%** |
+| single-session-assistant | 8 | 100% | **100%** |
+| temporal-reasoning | 8 | 100% | **50%** |
+| multi-session | 8 | 33.3% | **37.5%** |
+| knowledge-update | 8 | 33.3% | **25%** |
+| single-session-preference | 8 | 0% | **0%** |
+| **Overall (task-averaged)** | **48** | 61.1% | **52.1%** |
+| Abstention accuracy | 8 | 75% | **75%** |
+
+The pilot's temporal-reasoning 100% didn't hold up — exactly the kind of
+small-n artifact the pilot's own caveat predicted (a single flipped
+answer swings n=3 by 33 points). `single-session-preference` staying at
+0% across both the n=3 and n=8 samples is the opposite case: a real,
+persistent finding, not noise.
 
 **Method**: `bench/data/longmemeval_s_cleaned.json`
 (`xiaowu0162/longmemeval-cleaned`), scored with LongMemEval's own,
@@ -175,21 +181,22 @@ completely unmodified `src/evaluation/evaluate_qa.py` +
 `gpt-4o-mini`, or a local `llama-3.1-70b-instruct` — no judge-free path
 exists for this benchmark). Answer/consolidation model: GPT-4.1;
 embeddings: text-embedding-3-small — same as LoCoMo. Bench branch commit:
-`c1fc9c1`. Raw predictions, judge output, and the exact sampled
+`dd1a78f`. Raw predictions, judge output, and the exact sampled
 instances: `bench/results/longmemeval_gpt-4.1_2026-09-26/`.
 
-**n=3 per category is genuinely small** — a single flipped answer swings
-a category 33 points. Read the per-category numbers as an early signal
-to prioritize scaling up (§9), not a settled result. The 18-instance
-*overall* number is a more meaningful real signal than any one category
-row.
+**n=8 per category is still a modest sample** — better than n=3, but a
+single flipped answer still swings a category 12.5 points. Read the
+per-category numbers as a meaningfully more reliable signal than the
+pilot, not a fully settled result. Scaling further (§8) would mostly
+sharpen the weaker categories (multi-session, knowledge-update,
+temporal-reasoning), not the strong or the persistently-weak ones.
 
 **`single-session-preference` scoring 0% is a real, understood, specific
-issue — not a retrieval failure.** This category's `answer` field isn't
-a fact to recall at all: it's a grading rubric describing what a
-personalized recommendation should reference (e.g. "should suggest
-quinoa-based recipes, building on the user's stated preferences" for a
-meal-prep question). All three of HUPI's answers were reasonable,
+issue — confirmed at both sample sizes — not a retrieval failure.** This
+category's `answer` field isn't a fact to recall at all: it's a grading
+rubric describing what a personalized recommendation should reference
+(e.g. "should suggest quinoa-based recipes, building on the user's stated
+preferences" for a meal-prep question). HUPI's answers were reasonable,
 plausible suggestions — they just didn't specifically re-surface the
 user's own previously-stated preferences the way the rubric requires.
 This is an answer-*style* mismatch: `qaConcisenessPrompt` (§3) was
@@ -201,9 +208,12 @@ flagged for the next iteration, not fixed in this pass.
 
 ## 8. Still open
 
-- **Scale the LongMemEval sample up** from 18 to something larger
-  (§7's own small-n caveat) — the natural next increment, not urgent
-  given how consistent the overall signal already looks.
+- **Scale the LongMemEval sample up** from 48 to something larger
+  (§7's own small-n caveat) — mainly to sharpen `multi-session`,
+  `knowledge-update`, and `temporal-reasoning`, the three categories that
+  moved most between the n=3 and n=8 samples. Not urgent; the overall
+  52.1% is already a meaningfully more reliable number than the pilot's
+  61.1%.
 - **A `single-session-preference`-aware answer prompt** for LongMemEval
   (§7) — the harness needs to stop assuming one QA prompt style fits
   every benchmark/category.
