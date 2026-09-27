@@ -96,15 +96,29 @@ This is the encouraging part: nothing here needs inventing from scratch.
 ## 4. Annotation requirements — already satisfied by data we already load
 
 EvalMem needs each question annotated with key facts (`F_key`) and oracle
-context (`C_oracle`). We don't need to build new annotations:
+context (`C_oracle`). We don't need to build new annotations, and — a
+finding confirmed by actually reading EvalMem's own source
+(`src/memory_eval/dataset/locomo_builder.py`), not just the paper's
+prose — **we don't need to resolve them ourselves either, for LoCoMo**:
 
-- **LoCoMo**: the `evidence` field (e.g. `["D1:3"]`) is exactly this —
-  turn IDs pointing at oracle source dialogue. `cmd/hupi-bench/locomo.go`
-  already parses per-turn structure; resolving evidence IDs to their
-  actual turn text is a small addition, not new data collection.
+- **LoCoMo**: the `evidence` field (e.g. `["D1:3"]`) is turn IDs pointing
+  at oracle source dialogue, exactly as expected. But EvalMem's own
+  `build_locomo_eval_samples()` already reads LoCoMo's raw JSON directly
+  — its own `_flatten_conversation`/`_build_from_evidence` resolve every
+  question's `evidence` IDs into `f_key`/`oracle_context` *before* ever
+  calling into our adapter. `find_memory_records`/`generate_oracle_answer`
+  receive `f_key`/`oracle_context` as ready-made arguments; there is no
+  evidence-resolution code for the HUPI side to write. See §6 step 5 for
+  what this means for the sequencing below.
 - **LongMemEval**: `answer_session_ids` plus each turn's own `has_answer`
   boolean (confirmed in `bench/FORMAT.md`, Step 1 of the original
-  benchmark plan) is the same thing in their own shape.
+  benchmark plan) is the analogous annotation data — but EvalMem's own
+  repository ships a LoCoMo sample builder only, no LongMemEval one, so
+  there is currently no EvalMem-side consumer for it. Writing one would
+  mean building a new `build_longmemeval_eval_samples()`-equivalent
+  ourselves, mirroring `locomo_builder.py`'s own resolution logic — a new
+  builder, not "small parsing addition." Treated as a real non-goal for
+  this branch (§7) unless separately scoped.
 
 EvalMem's own reported LoCoMo POS/NEG split (1,540/446) matches our own
 category-5-as-NEG breakdown exactly — real, independent confirmation that
@@ -131,20 +145,43 @@ with EvalMem's task-type (`τ`) requirement with no remapping needed.
 
 1. ✅ Research (this doc) — real interface confirmed against actual
    adapter source, not just the paper's prose description.
-2. **Formalize a real memory-export tool** (`export_full_memory`'s
-   backing implementation) — the one piece with no existing equivalent
-   beyond this session's throwaway debugging scripts.
-3. **Add `C_original` capture** to `cmd/hupi-bench`'s QA loop so
-   `retrieve_original` has real data to return, not a re-derived guess.
-4. **Write the HUPI adapter** (`hupi_adapter.py`), wiring 2-3 plus the
-   already-existing `generate_online_answer`/`generate_oracle_answer`
-   equivalents into EvalMem's `BaseMemoryAdapter` contract.
-5. **Resolve LoCoMo/LongMemEval evidence fields into `F_key`/`C_oracle`**
-   per question — small parsing addition to the existing adapters.
+2. ✅ **Formalize a real memory-export tool** — `Store.ExportMemory` +
+   `cmd/hupi-export-memory` (`60d6c8f`). Verified against real Postgres
+   and a real scope from this session's own LoCoMo benchmark data.
+3. ✅ **Add `C_original` capture** — `Handler.OnRetrieve`, a nil-by-default
+   seam (`48821b9`), same pattern as the existing `Now`/`NewID` test
+   seams. `cmd/hupi-bench` captures it via a new, deliberately separate
+   `-retrieved-context-out-file` output. Verified end to end against
+   real Postgres + real local Ollama.
+4. ✅ **Write the HUPI adapter** — `cmd/hupi-ingest-turns`,
+   `cmd/hupi-answer-question`, and `bench/evalmem/hupi_adapter.py`
+   (`4b69d52`). Verified end to end against a real ingested scope
+   (`user:evalmem-conv30`, real Postgres + real local Ollama): ingest +
+   consolidation, oracle-mode answer, and native-mode answer all
+   confirmed correct. Along the way, found and fixed a real bug —
+   `cmd/hupi-answer-question` skipped `bootstrap.VerifyEmbedding`, so
+   query-time embedding used the raw (unpadded) provider dimension while
+   consolidation's stored vectors were the verified/zero-padded one,
+   causing every native-mode retrieval to fail with a Postgres
+   vector-dimension mismatch.
+5. ✅ **Resolve LoCoMo/LongMemEval evidence fields into `F_key`/`C_oracle`**
+   — re-verified against EvalMem's actual source
+   (`src/memory_eval/dataset/locomo_builder.py`): for LoCoMo this step is
+   a no-op on the HUPI side. EvalMem's own `build_locomo_eval_samples()`
+   resolves every question's raw `evidence` IDs into `f_key`/
+   `oracle_context` itself, reading LoCoMo's raw JSON directly — before
+   ever calling into our adapter (see §4, updated). There is no evidence-
+   resolution code to write here. For LongMemEval, EvalMem ships no
+   sample builder at all yet, so there's no consumer to resolve
+   `answer_session_ids`/`has_answer` for either — writing one would be a
+   new builder (mirroring `locomo_builder.py`), not a small addition;
+   moved to §7 as a non-goal for this branch.
 6. **Register the adapter**, confirm `gpt-5-mini`/embedding-model
    dependencies, do a tiny (single-conversation, `--limit 1`-style) smoke
    test — still not a real scored run, just confirming the pipeline
-   executes end to end without error.
+   executes end to end without error. `bench/evalmem/hupi_adapter.py`
+   itself has not yet been smoke-tested against a real EvalMem Python
+   install/import — next.
 7. **Real evaluation run** — explicitly out of scope until this plan is
    reviewed and steps 2-6 are actually built and smoke-tested. No cloud
    judge spend happens before this step is separately approved.
@@ -159,3 +196,7 @@ with EvalMem's task-type (`τ`) requirement with no remapping needed.
 - Not building DynaMem-Bench support — LoCoMo and LongMemEval-S are
   already what this repo's own harness targets; DynaMem-Bench is a third,
   separate dataset EvalMem's authors built for their own paper.
+- Not writing a LongMemEval sample builder for EvalMem — EvalMem's own
+  repository only ships a LoCoMo builder (§4, §6 step 5); adding
+  LongMemEval support to EvalMem itself is a new component, not covered
+  by this plan's current scope.
