@@ -224,6 +224,21 @@ with EvalMem's task-type (`τ`) requirement with no remapping needed.
    conversation's real ingest+consolidation (local Ollama) took ~12
    minutes end to end — budget accordingly; this is why the smoke test
    used a trimmed single conversation rather than the full dataset.
+
+   **Follow-up fix (`ebb9b96`)**: while estimating step 7's real cost,
+   found that `retrieve_original` and `generate_online_answer` — called
+   independently by EvalMem's Retrieval and Generation probes, which run
+   concurrently via `ParallelThreeProbeEvaluator`'s own thread pool —
+   each independently shelled out to `hupi-answer-question` in native
+   mode for the *same* `(run_ctx, query)`, silently doubling real
+   HUPI-side retrieval+generation cost per question. Fixed with a
+   lock-guarded per-adapter cache (`_native_answer`), keyed on
+   scope+query. Verified both in isolation (mocked `_answer`, including a
+   two-thread race on the same query — exactly 1 real call either way)
+   and against real infra (reusing the already-ingested
+   `user:evalmem-conv-26` scope: `retrieve_original` took a real 16.0s,
+   the immediately following `generate_online_answer` for the same query
+   returned in 0.0s from cache).
 7. **Real evaluation run** — explicitly out of scope until this plan is
    reviewed and steps 2-6 are actually built and smoke-tested. No cloud
    judge spend happens before this step is separately approved.
