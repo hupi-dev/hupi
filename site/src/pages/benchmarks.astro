@@ -137,6 +137,61 @@ const longMemEvalCategories = [
 
     <section class="border-b border-white/5">
       <div class="mx-auto max-w-3xl px-6 py-16 sm:py-20">
+        <h2 class="text-2xl font-bold text-fog-100">Diagnostic evaluation — EvalMem</h2>
+        <p class="mt-4 text-fog-300">
+          <a
+            href="https://github.com/ZeyuuLiu/EvalMem"
+            class="text-ember-500 underline decoration-dotted hover:text-ember-400"
+          >
+            EvalMem
+          </a>
+          is a different kind of evaluation: instead of one opaque accuracy score, it decomposes a
+          wrong answer into <em>where</em> it actually failed — encoding (was the fact ever stored?),
+          retrieval (was it surfaced?), or generation (could the model use it once given?). Ran
+          EvalMem's real three-probe pipeline against one full LoCoMo conversation (19 sessions, 199
+          questions), real GPT-4.1 answering, real GPT-4o-mini judge —
+          <strong class="text-fog-100">199/199 questions, 0 errors</strong>.
+        </p>
+
+        <div class="mt-8 grid gap-6 sm:grid-cols-2">
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
+            <p class="font-mono-tight text-4xl font-extrabold text-ember-500">82.2%</p>
+            <p class="mt-2 text-sm text-fog-300">
+              Abstention accuracy — correctly declines to answer when nothing relevant is in memory.
+            </p>
+          </div>
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
+            <p class="font-mono-tight text-4xl font-extrabold text-fog-100">29.1%</p>
+            <p class="mt-2 text-sm text-fog-300">
+              EvalMem's own strict, LLM-judged <span class="font-mono-tight">final_accuracy</span> —
+              <strong class="text-fog-100">not comparable</strong> to the F1/EM accuracy numbers
+              above (a different, harsher rubric, on one conversation rather than the full published
+              set).
+            </p>
+          </div>
+        </div>
+
+        <p class="mt-8 text-fog-300">
+          The genuinely useful signal from a diagnostic run is <em>where</em> the misses trace to,
+          not the raw score: retrieval and generation defects dominated over encoding defects,
+          meaning most facts asked about were actually stored in memory — the gap is more often in
+          surfacing or using them well, not losing them outright. Two real bugs were found and fixed
+          while running this: one in EvalMem's own strict-mode judging logic, and one in HUPI's own
+          answer tool, which was missing the same answer-style tuning the LoCoMo/LongMemEval harness
+          already uses (fixing it nearly tripled the score above, from 9.5% to 29.1%).
+        </p>
+
+        <a
+          href={docFileURL('EVALMEM_INTEGRATION_PLAN.md')}
+          class="mt-8 inline-flex items-center gap-2 text-ember-500 underline decoration-dotted hover:text-ember-400"
+        >
+          Read the full EvalMem integration write-up on GitHub →
+        </a>
+      </div>
+    </section>
+
+    <section class="border-b border-white/5">
+      <div class="mx-auto max-w-3xl px-6 py-16 sm:py-20">
         <h2 class="text-2xl font-bold text-fog-100">Method</h2>
         <p class="mt-4 text-fog-300">
           <span class="font-mono-tight text-fog-100">cmd/hupi-bench</span>, a real benchmark harness

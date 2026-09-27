@@ -4,8 +4,18 @@
 // when someone lands might not be the one that matters to them (a
 // technical evaluator cares about the benchmark numbers; an enterprise/
 // IT buyer cares about SSO), with no guarantee they wait for the
-// rotation. Keeping all three visible at once costs nothing and gambles
+// rotation. Keeping all four visible at once costs nothing and gambles
 // on nothing.
+//
+// The EvalMem point deliberately shows abstention accuracy, not
+// EvalMem's own final_accuracy (29.1%) — that number is a stricter,
+// EvalMem-specific LLM-judged correctness metric on a single
+// conversation, not comparable to the LoCoMo/LongMemEval F1/EM accuracy
+// numbers above it, and showing it in the same grid would misleadingly
+// read as "HUPI's third benchmark score is worse." Abstention accuracy
+// is the one EvalMem number that's genuinely comparable in spirit —
+// see /benchmarks for the full, honest breakdown including
+// final_accuracy and why it isn't a leaderboard number.
 const points = [
   {
     stat: '50.2%',
@@ -20,6 +30,12 @@ const points = [
     href: '/benchmarks',
   },
   {
+    stat: '82.2%',
+    label: 'EvalMem abstention accuracy',
+    body: 'Operation-level diagnostic evaluation — correctly declines to answer when nothing relevant is in memory.',
+    href: '/benchmarks',
+  },
+  {
     stat: 'OIDC',
     label: 'SSO ready',
     body: 'Azure AD/Entra ID, Okta, Auth0, Google Workspace — any standards-compliant provider, no code change.',
@@ -29,8 +45,8 @@ const points = [
 ---
 
 <section class="border-b border-white/5 bg-navy-950/40">
-  <div class="mx-auto max-w-6xl px-6 py-10">
-    <div class="grid gap-4 sm:grid-cols-3">
+  <div class="mx-auto max-w-7xl px-6 py-10">
+    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       {
         points.map((p) => (
           <a
