@@ -1,10 +1,14 @@
 # EvalMem Integration Plan — operation-level diagnostics on top of the existing harness
 
-Status: **planning/scaffolding only — no evaluation runs yet.** This
-branch (`feature/evalmem-integration`) exists to work out a concrete
-adapter design and get it reviewed before any real judge-model spend, the
-same discipline the LoCoMo/LongMemEval benchmark plan itself followed
-(see `docs/BENCHMARKS.md`'s own Step 1-7 sequencing).
+Status: **all 7 steps done, including one real evaluation run** (a single
+bounded LoCoMo conversation, `conv-26`, real GPT-4.1 + real gpt-4o-mini
+judge — see step 7 in §6 for the full result and the two real bugs it
+surfaced and fixed). This branch (`feature/evalmem-integration`) started
+as planning/scaffolding to work out a concrete adapter design and get it
+reviewed before any real judge-model spend, the same discipline the
+LoCoMo/LongMemEval benchmark plan itself followed (see
+`docs/BENCHMARKS.md`'s own Step 1-7 sequencing) — spend was only
+authorized once that design was actually built and smoke-tested.
 
 ## 1. What EvalMem actually is, verified against the real repo
 
@@ -239,9 +243,50 @@ with EvalMem's task-type (`τ`) requirement with no remapping needed.
    `user:evalmem-conv-26` scope: `retrieve_original` took a real 16.0s,
    the immediately following `generate_online_answer` for the same query
    returned in 0.0s from cache).
-7. **Real evaluation run** — explicitly out of scope until this plan is
-   reviewed and steps 2-6 are actually built and smoke-tested. No cloud
-   judge spend happens before this step is separately approved.
+7. ✅ **Real evaluation run** — explicitly approved by the user for a
+   single bounded sample conversation, with HUPI's own answer/
+   consolidation model moved to OpenAI (GPT-4.1, real
+   `text-embedding-3-small`), against real Postgres, one full real LoCoMo
+   conversation (`conv-26`: 19 sessions, 199 questions), with EvalMem's
+   own real LLM-assisted judgement enabled (`gpt-4o-mini`, not the
+   rule-only mode steps 1-6 used).
+
+   **First attempt hit a real bug in EvalMem's own strict-mode generation
+   probe** (not ours): it makes two independent LLM judge calls to assess
+   the oracle answer — one decides PASS/FAIL, the other decides the FAIL
+   *substate* (must be `GF`/`GRF`) — and when they disagree (correctness
+   judge says wrong, substate judge independently says `NONE`/correct),
+   strict mode has no valid substate and hard-raises. This hit ~70% of
+   POS questions on `conv-26` (42/60 processed at the time, real,
+   observed). Fixed by adding `--allow-rule-fallback` (a real EvalMem
+   flag, not a workaround we invented) — re-ran clean: **199/199
+   questions, 0 errors**.
+
+   That first clean run's `final_accuracy` (9.5%, `pos: 10.4%`,
+   `neg: 6.7%`) was far below the published LoCoMo score (50.2%) — traced
+   to a real, separate bug found by re-reading our own tool's code:
+   `cmd/hupi-answer-question` sent **no system prompt at all**, unlike
+   `cmd/hupi-bench`'s QA loop, which deliberately uses
+   `qaConcisenessPrompt` because HUPI's default verbose/hedging answer
+   style scores badly against literal graders even when retrieval is
+   correct (`replay.go`'s own doc comment). Added the same prompt to
+   `cmd/hupi-answer-question` (`724f633`) and re-ran clean on a freshly
+   wiped scope: **199/199, 0 errors, final_accuracy 9.5% → 29.1%**
+   (`neg_final_accuracy` 6.7% → **82.2%**, closely matching the tuned
+   harness's own 75% LongMemEval abstention number; `pos_final_accuracy`
+   10.4% → 13.6%).
+
+   Retrieval (`RF`/`NOI`) and encoding (`EM`) defect counts stayed
+   essentially flat across both runs (as expected — a system-prompt fix
+   doesn't touch retrieval/encoding), confirming the step-6 smoke test's
+   own finding still holds at full scale: this adapter's `find_memory_records`
+   (plain token-overlap) misses real, correctly-encoded facts that are
+   paraphrased rather than quoted verbatim in HUPI's summaries. The
+   remaining gap between `pos_final_accuracy` (13.6%) and the official
+   50.2% F1 score is very plausibly this matching-methodology artifact,
+   not a true HUPI capability regression — not independently verified
+   further; would need a better `find_memory_records` (e.g. BM25) to
+   isolate cleanly.
 
 ## 7. Non-goals for this branch, for now
 
