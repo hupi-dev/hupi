@@ -33,12 +33,16 @@ import (
 )
 
 // conversationResult pairs one replayed conversation/instance with its
-// answers, in conv.qa order — the shared input both output writers
-// (marshalLoCoMoPredictions, marshalLongMemEvalHypotheses) format
-// differently, per their respective benchmark's own expected shape.
+// answers and each answer's exact retrieved context, in conv.qa order —
+// the shared input both output writers (marshalLoCoMoPredictions,
+// marshalLongMemEvalHypotheses) format differently, per their respective
+// benchmark's own expected shape. retrievedContexts is the C_original
+// docs/EVALMEM_INTEGRATION_PLAN.md's retrieve_original needs — captured
+// via gateway.Handler.OnRetrieve, not a second Retrieve() call.
 type conversationResult struct {
-	conv    benchConversation
-	answers []string
+	conv              benchConversation
+	answers           []string
+	retrievedContexts []string
 }
 
 func main() {
@@ -63,6 +67,7 @@ func run() error {
 	answerOnly := flag.Bool("answer-only", false, "skip session replay and consolidation, re-answer questions against an already-consolidated scope from a prior run (e.g. to test a QA-prompt change without re-paying for replay/consolidation); ignored with -baseline, which never touches HUPI's memory anyway")
 	answerModel := flag.String("answer-model", "", "providers.yaml profile name to answer with (defaults to active_chat_provider)")
 	outFile := flag.String("out-file", "", "where to write predictions (default: stdout)")
+	retrievedContextOutFile := flag.String("retrieved-context-out-file", "", "optional: also write each answer's exact retrieved context (C_original) here, for external diagnostic tooling (see docs/EVALMEM_INTEGRATION_PLAN.md) — never fed to either benchmark's own scoring code")
 	consolidateBin := flag.String("consolidate-bin", "./hupi-consolidate", "path to the real hupi-consolidate binary")
 	flag.Parse()
 
@@ -132,19 +137,19 @@ func run() error {
 			Auth:      staticAuth{},
 		}
 
-		var answers []string
+		var answers, retrievedContexts []string
 		switch {
 		case *baseline:
-			answers, err = runBaselineConversation(handler, userID, model, conv)
+			answers, retrievedContexts, err = runBaselineConversation(handler, userID, model, conv)
 		case *answerOnly:
-			answers, err = answerConversation(handler, userID, model, conv)
+			answers, retrievedContexts, err = answerConversation(handler, userID, model, conv)
 		default:
-			answers, err = runHUPIConversation(handler, userID, model, conv, *consolidateBin)
+			answers, retrievedContexts, err = runHUPIConversation(handler, userID, model, conv, *consolidateBin)
 		}
 		if err != nil {
 			return err
 		}
-		results[ci] = conversationResult{conv: conv, answers: answers}
+		results[ci] = conversationResult{conv: conv, answers: answers, retrievedContexts: retrievedContexts}
 	}
 
 	var out []byte
@@ -156,6 +161,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if *retrievedContextOutFile != "" {
+		contextsOut, err := marshalRetrievedContexts(results)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*retrievedContextOutFile, contextsOut, 0o644); err != nil {
+			return fmt.Errorf("bench: write retrieved contexts: %w", err)
+		}
+	}
+
 	if *outFile == "" {
 		fmt.Println(string(out))
 		return nil
@@ -202,6 +217,42 @@ func marshalLoCoMoPredictions(results []conversationResult) ([]byte, error) {
 	return out, nil
 }
 
+// marshalRetrievedContexts writes each answer's exact retrieved context
+// (C_original) to its own file, deliberately separate from
+// marshalLoCoMoPredictions/marshalLongMemEvalHypotheses: those two feed
+// each benchmark's real, unmodified official scoring code verbatim, and
+// this repo's own discipline throughout (docs/BENCHMARKS.md) has been to
+// never blend harness-only additions into files fed to someone else's
+// scoring code, even ones that would likely tolerate an extra JSON key
+// harmlessly. This file exists purely for external diagnostic tooling
+// (docs/EVALMEM_INTEGRATION_PLAN.md's retrieve_original/C_original).
+func marshalRetrievedContexts(results []conversationResult) ([]byte, error) {
+	convOuts := make([]map[string]any, len(results))
+	for ci, r := range results {
+		questions := make([]map[string]any, len(r.conv.qa))
+		for i, qa := range r.conv.qa {
+			entry := map[string]any{
+				"index":             i,
+				"question":          qa.question,
+				"retrieved_context": r.retrievedContexts[i],
+			}
+			if qa.id != "" {
+				entry["question_id"] = qa.id
+			}
+			questions[i] = entry
+		}
+		convOuts[ci] = map[string]any{
+			"sample_id": r.conv.id,
+			"questions": questions,
+		}
+	}
+	out, err := json.MarshalIndent(convOuts, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("bench: marshal retrieved contexts: %w", err)
+	}
+	return out, nil
+}
+
 // marshalLongMemEvalHypotheses writes their own hypothesis-file shape --
 // one JSON object per line, {"question_id": ..., "hypothesis": ...} --
 // exactly what src/evaluation/evaluate_qa.py expects as its hyp_file
@@ -229,9 +280,9 @@ func marshalLongMemEvalHypotheses(results []conversationResult) ([]byte, error) 
 // real hupi-consolidate binary once per fabricated date, then answer the
 // conversation's questions through the same real retrieval+generation
 // path.
-func runHUPIConversation(handler *gateway.Handler, userID, model string, conv benchConversation, consolidateBin string) ([]string, error) {
+func runHUPIConversation(handler *gateway.Handler, userID, model string, conv benchConversation, consolidateBin string) ([]string, []string, error) {
 	if err := replayAndConsolidate(handler, userID, model, conv, consolidateBin); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return answerConversation(handler, userID, model, conv)
 }
@@ -297,7 +348,7 @@ func replayAndConsolidate(handler *gateway.Handler, userID, model string, conv b
 // replayAndConsolidate just now, or by a prior run when called via
 // -answer-only), and just answers the questions against whatever memory
 // state already exists for userID.
-func answerConversation(handler *gateway.Handler, userID, model string, conv benchConversation) ([]string, error) {
+func answerConversation(handler *gateway.Handler, userID, model string, conv benchConversation) ([]string, []string, error) {
 	// Query time: one day after the last session, so retrieval reflects
 	// the full, already-consolidated history — LoCoMo's QA has no
 	// per-question date of its own (see bench/FORMAT.md).

@@ -17,12 +17,16 @@ import (
 // (already-existing behavior; asserted here as a baseline alongside the
 // new capture opt-out).
 type fakeRetriever struct {
-	calls int
+	calls  int
+	result RetrievalResult // zero value (GateSkipped) unless a test sets one
 }
 
 func (f *fakeRetriever) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (RetrievalResult, error) {
 	f.calls++
-	return RetrievalResult{Gate: GateSkipped}, nil
+	if f.result.Gate == "" {
+		return RetrievalResult{Gate: GateSkipped}, nil
+	}
+	return f.result, nil
 }
 
 // fakeCapturer records every episode it's asked to capture — this is what
@@ -159,5 +163,56 @@ func TestHandleChatCompletions_BothOptOutsTogether(t *testing.T) {
 	}
 	if len(capturer.episodes) != 0 {
 		t.Errorf("len(capturer.episodes) = %d, want 0", len(capturer.episodes))
+	}
+}
+
+// TestHandleChatCompletions_OnRetrieveSeesExactResult is the seam
+// docs/EVALMEM_INTEGRATION_PLAN.md's retrieve_original/C_original
+// requirement needs: external diagnostic tooling must see the *exact*
+// RetrievalResult a request's own retrieval step computed, not a
+// separately re-run Retrieve() call that risks drifting from what the
+// request actually used.
+func TestHandleChatCompletions_OnRetrieveSeesExactResult(t *testing.T) {
+	want := RetrievalResult{
+		Gate:           GateFull,
+		ContextMessage: "the exact context this request actually used",
+		Refs:           []identity.Ref{{Kind: identity.RefKindSummary, ID: "sum_test"}},
+	}
+	retriever := &fakeRetriever{result: want}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+
+	var got *RetrievalResult
+	h.OnRetrieve = func(r RetrievalResult) {
+		got = &r
+	}
+
+	w := postChatCompletion(t, h, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if got == nil {
+		t.Fatal("OnRetrieve was never called")
+	}
+	if got.ContextMessage != want.ContextMessage {
+		t.Errorf("ContextMessage = %q, want %q", got.ContextMessage, want.ContextMessage)
+	}
+	if got.Gate != want.Gate {
+		t.Errorf("Gate = %q, want %q", got.Gate, want.Gate)
+	}
+}
+
+// TestHandleChatCompletions_OnRetrieveNilIsNoOp confirms leaving
+// OnRetrieve unset (every real deployment today) changes nothing —
+// the zero-value default a nil-checked seam must have.
+func TestHandleChatCompletions_OnRetrieveNilIsNoOp(t *testing.T) {
+	retriever := &fakeRetriever{}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+	// h.OnRetrieve left nil deliberately.
+
+	w := postChatCompletion(t, h, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 }

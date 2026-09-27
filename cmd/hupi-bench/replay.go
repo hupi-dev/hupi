@@ -192,7 +192,7 @@ Before answering, double-check WHO the retrieved information is actually about. 
 // the only difference between the two is what's actually in scope's
 // memory when the question is asked — not a different code path to the
 // answer model.
-func runBaselineConversation(handler *gateway.Handler, userID, answerModel string, conv benchConversation) ([]string, error) {
+func runBaselineConversation(handler *gateway.Handler, userID, answerModel string, conv benchConversation) (answers []string, retrievedContexts []string, err error) {
 	var transcript strings.Builder
 	for _, sess := range conv.sessions {
 		content := formatSession(sess)
@@ -204,16 +204,20 @@ func runBaselineConversation(handler *gateway.Handler, userID, answerModel strin
 	fullTranscript := strings.TrimSpace(transcript.String())
 
 	handler.Now = func() time.Time { return time.Now() }
-	answers := make([]string, len(conv.qa))
+	answers = make([]string, len(conv.qa))
+	retrievedContexts = make([]string, len(conv.qa))
 	for i, qa := range conv.qa {
 		content := fmt.Sprintf("%s\n\nQuestion: %s", fullTranscript, qa.question)
+		var context string
+		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
 		answer, err := sendChatTurn(handler, userID, answerModel, qaConcisenessPrompt, content)
 		if err != nil {
-			return nil, fmt.Errorf("bench: baseline answer question %d of %s: %w", i, conv.id, err)
+			return nil, nil, fmt.Errorf("bench: baseline answer question %d of %s: %w", i, conv.id, err)
 		}
 		answers[i] = answer
+		retrievedContexts[i] = context
 	}
-	return answers, nil
+	return answers, retrievedContexts, nil
 }
 
 // answerQuestions sends every QA question in conv through handler as a
@@ -221,20 +225,29 @@ func runBaselineConversation(handler *gateway.Handler, userID, answerModel strin
 // date, and after consolidation has run for all of them) — this
 // exercises the real retrieval+generation+capture path exactly like any
 // other request, not a special "QA mode." Returns one prediction per
-// question, in the same order as conv.qa.
-func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv benchConversation, defaultQueryTime time.Time) ([]string, error) {
-	answers := make([]string, len(conv.qa))
+// question, in the same order as conv.qa, alongside the exact retrieved
+// context (C_original in docs/EVALMEM_INTEGRATION_PLAN.md's terms) each
+// answer actually used — captured via gateway.Handler's OnRetrieve seam
+// rather than a second, separately-computed Retrieve() call, so this is
+// guaranteed to be the same context the real answer saw, not a
+// best-effort reconstruction of it.
+func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv benchConversation, defaultQueryTime time.Time) (answers []string, retrievedContexts []string, err error) {
+	answers = make([]string, len(conv.qa))
+	retrievedContexts = make([]string, len(conv.qa))
 	for i, qa := range conv.qa {
 		qt := defaultQueryTime
 		if !qa.queryTime.IsZero() {
 			qt = qa.queryTime
 		}
 		handler.Now = func() time.Time { return qt }
+		var context string
+		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
 		answer, err := sendChatTurn(handler, userID, answerModel, qaConcisenessPrompt, qa.question)
 		if err != nil {
-			return nil, fmt.Errorf("bench: answer question %d of %s: %w", i, conv.id, err)
+			return nil, nil, fmt.Errorf("bench: answer question %d of %s: %w", i, conv.id, err)
 		}
 		answers[i] = answer
+		retrievedContexts[i] = context
 	}
-	return answers, nil
+	return answers, retrievedContexts, nil
 }
