@@ -41,6 +41,26 @@ from memory_eval.adapters.base import BaseMemoryAdapter  # type: ignore[import-n
 from memory_eval.eval_core.models import AdapterTrace, RetrievedItem  # type: ignore[import-not-found]
 
 
+# Small, standard English function-word list -- just enough to keep
+# find_memory_records' BM25 ranking from treating "her"/"the"/"was"
+# overlap as a real signal. Not exhaustive by design; the goal is
+# removing the highest-frequency zero-information words, not building a
+# general-purpose NLP stopword list.
+_STOPWORDS = frozenset(
+    """
+    a an the and or but if then else for nor so yet
+    is am are was were be been being
+    have has had do does did
+    i you he she it we they me him her us them
+    my your his its our their mine yours hers ours theirs
+    this that these those
+    in on at by to from with without into onto over under
+    of as about against between during before after above below
+    not no yes
+    """.split()
+)
+
+
 def _bm25_scores(query_tokens: List[str], docs_tokens: List[List[str]], k1: float = 1.5, b: float = 0.75) -> List[float]:
     """Minimal, dependency-free Okapi BM25 over an in-memory corpus.
 
@@ -298,10 +318,23 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
         # happens (a real signal worth keeping), BM25 only ranks the rest.
         from memory_eval.eval_core.utils import split_tokens, text_match  # type: ignore[import-not-found]
 
+        # split_tokens does no stopword filtering (confirmed by reading
+        # its actual source -- just re.split(r"\W+", normalize_text(text))),
+        # so an unfiltered token list lets pure function-word overlap
+        # ("her", "the", "was") produce a spurious nonzero BM25 score.
+        # A real step-7 run caught this concretely: it introduced
+        # CORRUPT_WRONG/EW encoding states no other run showed, from
+        # genuinely wrong records being counted as "matched." Filtering
+        # stopwords out before scoring is the principled fix -- an
+        # arbitrary minimum-score cutoff would just be guessing at a
+        # magic number for the same underlying problem.
+        def _content_tokens(text: str) -> List[str]:
+            return [t for t in split_tokens(text) if t not in _STOPWORDS]
+
         signals = [query] + list(f_key or [])
         signal_tokens: List[str] = []
         for signal in signals:
-            signal_tokens.extend(split_tokens(str(signal)))
+            signal_tokens.extend(_content_tokens(str(signal)))
         if not signal_tokens:
             return []
 
@@ -314,7 +347,7 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
                 exact.append(record)
                 continue
             rest.append(record)
-            rest_tokens.append(list(split_tokens(text)))
+            rest_tokens.append(_content_tokens(text))
 
         scores = _bm25_scores(signal_tokens, rest_tokens)
         ranked = sorted(zip(scores, rest), key=lambda item: item[0], reverse=True)
