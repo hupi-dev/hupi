@@ -122,7 +122,7 @@ prose — **we don't need to resolve them ourselves either, for LoCoMo**:
   mean building a new `build_longmemeval_eval_samples()`-equivalent
   ourselves, mirroring `locomo_builder.py`'s own resolution logic — a new
   builder, not "small parsing addition." Treated as a real non-goal for
-  this branch (§7) unless separately scoped.
+  this branch (§8) unless separately scoped.
 
 EvalMem's own reported LoCoMo POS/NEG split (1,540/446) matches our own
 category-5-as-NEG breakdown exactly — real, independent confirmation that
@@ -179,7 +179,7 @@ with EvalMem's task-type (`τ`) requirement with no remapping needed.
    sample builder at all yet, so there's no consumer to resolve
    `answer_session_ids`/`has_answer` for either — writing one would be a
    new builder (mirroring `locomo_builder.py`), not a small addition;
-   moved to §7 as a non-goal for this branch.
+   moved to §8 as a non-goal for this branch.
 6. ✅ **Register the adapter, smoke test.** Registration needs no edit to
    EvalMem's own `registry.py`: its `scripts/run_eval_pipeline.py` loads
    an adapter directly via `--adapter-module hupi_adapter --adapter-class
@@ -288,7 +288,122 @@ with EvalMem's task-type (`τ`) requirement with no remapping needed.
    further; would need a better `find_memory_records` (e.g. BM25) to
    isolate cleanly.
 
-## 7. Non-goals for this branch, for now
+## 7. Post-step-7 tuning experiments — real findings, not all wins
+
+After the clean step-7 run (29.1% final_accuracy), the user asked for
+pointers on what would move the score. Rather than guess, the actual
+retrieval code was read first — this surfaced two real, concrete,
+checkable levers already in `internal/store/retrieve.go`:
+
+- `defaultContextCharBudget = 2000` — a small default explicitly
+  documented as "safe for a modest local model," overridable via
+  `HUPI_CONTEXT_CHAR_BUDGET`, never set for the step-7 run despite using
+  GPT-4.1. A `"...[truncated to fit context budget]"` marker was directly
+  observed in an earlier context dump for this same scope.
+- `maxVectorResults = 5` (hardcoded) — only the top-5 vector-similarity
+  summaries/entities/episodes are ever considered, independent of the
+  char budget.
+
+Five more full real runs followed (each: `conv-26`, 19 sessions, 199
+questions, real GPT-4.1 + real gpt-4o-mini judge, `--allow-rule-fallback`,
+a freshly wiped scope). All 199/199, 0 errors, every time.
+
+**Context-budget sweep** (isolating one variable at a time):
+
+| Budget | final_accuracy | pos | neg | correct/199 |
+|---|---|---|---|---|
+| 2,000 (default) | 29.1% | 13.6% | 82.2% | 58 |
+| 8,000 | 30.2% | 20.1% | 64.4% | 60 |
+| **20,000** | **36.2%** | **27.9%** | 64.4% | **72** |
+
+No middle sweet spot: the NEG/abstention cost hits its floor already by
+8,000 chars (64.4%, identical at 20,000), while POS accuracy keeps
+climbing all the way to 20,000 — so within this tested range, higher is
+strictly better, not a tradeoff to balance. Likely mechanism: a much
+larger budget lets in more tangentially-related content alongside the
+genuinely relevant content, which helps POS recall but costs some NEG
+precision — a real, understood cost, not unexplained noise.
+
+**`HUPI_MAX_VECTOR_RESULTS` made configurable** (`74cff19`), same
+"informed minority override" pattern as the char budget. Tested at 12
+(vs. default 5) on top of the 20,000-char budget:
+
+| Config | final_accuracy | pos | neg | correct/199 |
+|---|---|---|---|---|
+| 20k budget alone | 36.2% | 27.9% | 64.4% | 72 |
+| 20k + `mvr=12` alone (no BM25) | 35.7% | 26.0% | 68.9% | 71 |
+
+Essentially neutral — not the win it looked like it might be. Likely
+mechanism, inspected directly in a real retrieved_context dump for a
+real question: `conv-26` is a two-speaker conversation where nearly
+every summary mentions both speakers by name, so raising the candidate
+cap mostly pulls in *redundant* near-duplicate summaries rather than
+new relevant facts, and the context still hit the truncation limit
+regardless.
+
+**BM25-ranked `find_memory_records`** (`6bd17ba`) — replacing
+`generic_text_adapter.py`'s plain token-overlap-count matching with a
+small, self-contained Okapi BM25 implementation (no new dependency;
+`rank_bm25` isn't installed and EvalMem's own agentic-rag extra pulls in
+a much heavier stack deliberately not adopted here). Tested combined
+with `mvr=12` + the 20k budget:
+
+| Config | final_accuracy | pos | neg | correct/199 |
+|---|---|---|---|---|
+| `mvr=12` alone (no BM25) | 35.7% | 26.0% | 68.9% | 71 |
+| `mvr=12` + BM25 | 32.7% | 20.8% | 73.3% | 65 |
+
+A real regression, isolated cleanly against the `mvr=12`-alone run above
+(same budget, same `mvr`, only BM25 added). The BM25 run was also the
+*only* one of all six to show new `CORRUPT_WRONG`/`EW` encoding states —
+a concrete tell, not just a lower number. Root cause, found by reading
+`split_tokens`' actual source: it does **no stopword filtering** at all
+(`re.split(r"\W+", normalize_text(text))`), so pure function-word overlap
+("her", "the", "was") between a query and a genuinely unrelated record
+produced a spurious nonzero BM25 score, handing the Encoding Examiner a
+wrong record as if it were a real match. Fixed (`62402e8`) by filtering a
+small stopword list out of both the signal and document tokens before
+scoring — verified in isolation (a record whose only overlap was "her"
+is now correctly excluded) but **not re-verified with a full run** —
+would need one more real run to confirm the fix actually recovers to at
+or above the `mvr=12`-alone baseline.
+
+**Entity-relationship graph walk, re-verified against real data** — a
+still-open item from `docs/BENCHMARKS.md`, never independently checked
+before. Added a real observability marker (`", relationship graph"`,
+`0435e99`) since a graph-walked entity was previously textually
+indistinguishable from one found by direct vector match or by
+`stage1EntityMatches`' direct name-mention scan — all three go through
+the same `formatEntity` helper. Rebuilt and tested directly (not a full
+pipeline run — reused the already-ingested scope) against all 32 of
+`conv-26`'s real LoCoMo multi-hop-category questions:
+
+**The graph walk fired 0 times out of 32**, despite 84 real, active
+`entity_relationships` rows existing for this scope. Inspected one
+example directly (`"Where did Caroline move from 4 years ago?"`):
+`person:caroline-s-family`/`person:caroline-s-friends` — both real
+graph-connected entities — appear in the retrieved context, but got
+there via direct vector match, not the walk. Working hypothesis: in a
+two-speaker conversation where nearly every summary mentions both people
+by name, almost everything the graph walk could reach hop-by-hop is
+already surfaced by direct vector/keyword search first, leaving nothing
+new for a hop to add. LoCoMo's own "multi-hop" category tests
+cross-*session* narrative connections (a fact mentioned in session 3,
+combined with one from session 7), not multi-*edge* graph traversal —
+plausibly not the shape of question this feature was actually built to
+help with. Not confirmed against a denser, more graph-shaped dataset.
+
+**Net conclusion**: of everything tried, only the context-budget increase
+is a confirmed, unambiguous win (29.1% → 36.2%, real GPT-4.1 model, no
+other changes). `maxVectorResults` is neutral. BM25 needed a real fix
+before it could even match the neutral baseline, and that fix itself is
+unverified. Graph walk provably isn't contributing on this dataset's
+question shape. None of this changes step 7's underlying scored result
+(29.1%/9.5%) — these are follow-up tuning experiments run after and
+separate from the reported step-7 numbers, on `feature/evalmem-tuning`,
+not `feature/evalmem-integration`.
+
+## 8. Non-goals for this branch, for now
 
 - Not running any real EvalMem evaluation yet (per the explicit
   instruction that started this branch).
