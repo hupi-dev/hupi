@@ -30,6 +30,7 @@ docs/EVALMEM_INTEGRATION_PLAN.md's own step 6/7 gate.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -38,6 +39,67 @@ from typing import Any, Dict, List, Optional
 
 from memory_eval.adapters.base import BaseMemoryAdapter  # type: ignore[import-not-found]
 from memory_eval.eval_core.models import AdapterTrace, RetrievedItem  # type: ignore[import-not-found]
+
+
+# Small, standard English function-word list -- just enough to keep
+# find_memory_records' BM25 ranking from treating "her"/"the"/"was"
+# overlap as a real signal. Not exhaustive by design; the goal is
+# removing the highest-frequency zero-information words, not building a
+# general-purpose NLP stopword list.
+_STOPWORDS = frozenset(
+    """
+    a an the and or but if then else for nor so yet
+    is am are was were be been being
+    have has had do does did
+    i you he she it we they me him her us them
+    my your his its our their mine yours hers ours theirs
+    this that these those
+    in on at by to from with without into onto over under
+    of as about against between during before after above below
+    not no yes
+    """.split()
+)
+
+
+def _bm25_scores(query_tokens: List[str], docs_tokens: List[List[str]], k1: float = 1.5, b: float = 0.75) -> List[float]:
+    """Minimal, dependency-free Okapi BM25 over an in-memory corpus.
+
+    rank_bm25 isn't an existing dependency of this adapter or of EvalMem
+    itself (its own agentic-rag extra pulls in a much heavier stack —
+    langchain, sentence-transformers — deliberately not adopted here, see
+    this module's docstring), and this corpus (one conversation's
+    exported memory) is small enough that a compact, self-contained
+    implementation is simpler and cheaper than adding a new dependency
+    for it. Real term-frequency saturation and document-length
+    normalization, unlike find_memory_records' previous plain
+    token-overlap count.
+    """
+    n_docs = len(docs_tokens)
+    if n_docs == 0:
+        return []
+    doc_lens = [len(d) for d in docs_tokens]
+    avgdl = sum(doc_lens) / n_docs
+
+    doc_freq: Dict[str, int] = {}
+    for doc in docs_tokens:
+        for term in set(doc):
+            doc_freq[term] = doc_freq.get(term, 0) + 1
+    idf = {term: math.log(1 + (n_docs - freq + 0.5) / (freq + 0.5)) for term, freq in doc_freq.items()}
+
+    scores: List[float] = []
+    for doc, dl in zip(docs_tokens, doc_lens):
+        term_freq: Dict[str, int] = {}
+        for term in doc:
+            term_freq[term] = term_freq.get(term, 0) + 1
+        length_norm = 1 - b + b * (dl / avgdl if avgdl else 1.0)
+        score = 0.0
+        for term in query_tokens:
+            f = term_freq.get(term, 0)
+            if f == 0:
+                continue
+            score += idf.get(term, 0.0) * (f * (k1 + 1)) / (f + k1 * length_norm)
+        scores.append(score)
+    return scores
 
 
 @dataclass(frozen=True)
@@ -244,29 +306,53 @@ class HupiMemoryAdapter(BaseMemoryAdapter):
         f_key: List[str],
         memory_corpus: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        # Same simple token-overlap matching generic_text_adapter.py
-        # uses. This method's real job is "which exported records
-        # plausibly support F_key for the Encoding Examiner," not a
-        # second retrieval system -- HUPI's own real retrieval is
-        # exercised separately, by retrieve_original below.
+        # Ranks with BM25 instead of generic_text_adapter.py's plain
+        # token-overlap count -- overlap count alone scores a short,
+        # paraphrased summary lower than a long, mostly-irrelevant one
+        # that happens to repeat a few query words, and gives no credit
+        # for how rare/distinctive a matched term is. This method's real
+        # job is "which exported records plausibly support F_key for the
+        # Encoding Examiner," not a second retrieval system -- HUPI's own
+        # real retrieval is exercised separately, by retrieve_original
+        # below. An exact f_key phrase match still wins outright when it
+        # happens (a real signal worth keeping), BM25 only ranks the rest.
         from memory_eval.eval_core.utils import split_tokens, text_match  # type: ignore[import-not-found]
 
+        # split_tokens does no stopword filtering (confirmed by reading
+        # its actual source -- just re.split(r"\W+", normalize_text(text))),
+        # so an unfiltered token list lets pure function-word overlap
+        # ("her", "the", "was") produce a spurious nonzero BM25 score.
+        # A real step-7 run caught this concretely: it introduced
+        # CORRUPT_WRONG/EW encoding states no other run showed, from
+        # genuinely wrong records being counted as "matched." Filtering
+        # stopwords out before scoring is the principled fix -- an
+        # arbitrary minimum-score cutoff would just be guessing at a
+        # magic number for the same underlying problem.
+        def _content_tokens(text: str) -> List[str]:
+            return [t for t in split_tokens(text) if t not in _STOPWORDS]
+
         signals = [query] + list(f_key or [])
-        signal_tokens: set = set()
+        signal_tokens: List[str] = []
         for signal in signals:
-            signal_tokens.update(split_tokens(str(signal)))
-        scored: List[tuple] = []
+            signal_tokens.extend(_content_tokens(str(signal)))
+        if not signal_tokens:
+            return []
+
+        exact: List[Dict[str, Any]] = []
+        rest: List[Dict[str, Any]] = []
+        rest_tokens: List[List[str]] = []
         for record in memory_corpus:
             text = str(record.get("text", ""))
             if any(text_match(fact, text) for fact in f_key if str(fact).strip()):
-                scored.append((10.0, record))
+                exact.append(record)
                 continue
-            tokens = set(split_tokens(text))
-            overlap = len(tokens & signal_tokens) if tokens and signal_tokens else 0
-            if overlap > 0:
-                scored.append((float(overlap), record))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [record for _, record in scored[:100]]
+            rest.append(record)
+            rest_tokens.append(_content_tokens(text))
+
+        scores = _bm25_scores(signal_tokens, rest_tokens)
+        ranked = sorted(zip(scores, rest), key=lambda item: item[0], reverse=True)
+        matched_rest = [record for score, record in ranked if score > 0]
+        return (exact + matched_rest)[:100]
 
     def _native_answer(self, run_ctx: Any, query: str) -> Dict[str, Any]:
         """The one real native-mode hupi-answer-question call for a given

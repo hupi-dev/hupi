@@ -125,7 +125,9 @@ const (
 	// memory," which is worse than an occasional missed broad paraphrase.
 	// Re-measure if the embedding model changes.
 	episodeVectorSimilarityThreshold = 0.55
-	maxVectorResults                 = 5
+	// defaultMaxVectorResults is maxVectorResults()'s fallback — see that
+	// function's own doc comment for why it's overridable.
+	defaultMaxVectorResults = 5
 	// defaultContextCharBudget is contextCharBudget()'s fallback — a crude
 	// stand-in for a real token budget (ARCHITECTURE.md mentions ~20% of
 	// the model's context window) — a production build should count
@@ -557,7 +559,7 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxVectorResults)
+	`, queryVector, scope.Kind, scope.Owner, maxVectorResults())
 	if err != nil {
 		return nil, err
 	}
@@ -681,7 +683,7 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 		  and scope_kind = $3 and scope_owner = $4
 		order by embedding <=> $1::vector
 		limit $5
-	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxVectorResults)
+	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxVectorResults())
 	if err != nil {
 		return nil, err
 	}
@@ -734,7 +736,7 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxVectorResults)
+	`, queryVector, scope.Kind, scope.Owner, maxVectorResults())
 	if err != nil {
 		return nil, err
 	}
@@ -841,6 +843,27 @@ func contextCharBudget() int {
 	return defaultContextCharBudget
 }
 
+// maxVectorResults is the same "informed minority override" pattern
+// contextCharBudget is — a real cloud benchmark run found the fixed cap
+// of 5 was excluding genuinely relevant summaries/entities/episodes from
+// consideration entirely, before contextCharBudget even got a chance to
+// include them: for a long-running scope with many accumulated
+// summaries, "top 5 by vector similarity" can leave out a relevant-but-
+// not-quite-top-5 summary regardless of how generous the char budget is.
+// Left as a small default for the same reason contextCharBudget,
+// keywordSearchEnabled, and graphWalkEnabled default the way they do —
+// this is the override for a deployment pairing HUPI with a
+// large-context model and evaluating/tuning recall, not a new default
+// for every deployment.
+func maxVectorResults() int {
+	if v := os.Getenv("HUPI_MAX_VECTOR_RESULTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxVectorResults
+}
+
 // graphWalkMaxHops/graphWalkMaxResults are the "own hop-limit and token
 // budget" docs/ENTITY_RELATIONSHIPS_PLAN.md §6 called for before this was
 // written — an ungated walk on a densely-connected scope could pull in
@@ -922,7 +945,13 @@ func (s *Store) graphWalkRelationships(ctx context.Context, q dbscope.Querier, s
 		if err != nil {
 			return nil, fmt.Errorf("load graph-walked entity %s: %w", id, err)
 		}
-		sb.WriteString("\n" + line)
+		// ", relationship graph" mirrors the existing ", keyword match"
+		// suffix convention (keywordSearchSummaries et al.) -- without
+		// this, a graph-walked entity is textually indistinguishable
+		// from one stage1EntityMatches found by a direct name mention in
+		// the query, making it impossible to tell from ContextMessage
+		// alone whether the graph walk actually contributed anything.
+		sb.WriteString("\n" + line + ", relationship graph")
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
 		*strongHit = true // a graph-connected entity is as strong a signal as a directly-matched one
 	}
@@ -1228,8 +1257,8 @@ func rankBM25(docs []bm25Document, queryTerms []string) []string {
 		}
 	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
-	if len(matches) > maxVectorResults {
-		matches = matches[:maxVectorResults]
+	if len(matches) > maxVectorResults() {
+		matches = matches[:maxVectorResults()]
 	}
 
 	ids := make([]string, len(matches))

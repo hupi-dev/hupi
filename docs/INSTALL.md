@@ -253,6 +253,34 @@ to reach episodes consolidation never deemed important enough to embed.
 export HUPI_ENABLE_KEYWORD_SEARCH=false   # opt out; any other value (or unset) leaves it on
 ```
 
+### Recommended for cloud-model deployments: `HUPI_CONTEXT_CHAR_BUDGET`
+
+Retrieval caps the assembled context at `HUPI_CONTEXT_CHAR_BUDGET`
+characters (a crude stand-in for a real token budget — see
+`internal/store/retrieve.go`'s `contextCharBudget`). The default, 2000,
+is deliberately small and safe for a modest local model, but was
+measured — a real evaluation run, not a guess — to be hard-truncating
+retrieved content well before a large-context cloud model (GPT-4.1 and
+similar) needed to stop.
+
+**If `active_chat_provider`/`active_consolidation_provider` in
+`providers.yaml` point at a cloud model, set this explicitly:**
+
+```bash
+export HUPI_CONTEXT_CHAR_BUDGET=20000
+```
+
+Real, disclosed tradeoff, not a free win: raising this from 2000 to
+20000 on a real conversation took overall recall-backed accuracy from
+29.1% to 36.2%, but also let more tangentially-related content into the
+context alongside the genuinely relevant content, which cost some
+abstention precision (a NEG/"nothing relevant" question correctly
+declined 82.2% → 64.4% of the time). For a deployment where wrong-but-
+confident answers are worse than an occasional unnecessary hedge, staying
+closer to the default may be the better trade — this number isn't
+free to raise, it's a real dial with a cost on both ends. See
+`docs/EVALMEM_INTEGRATION_PLAN.md` §7 for the full experiment.
+
 At this point the shared setup is done. What differs per tier is what you
 do next.
 
