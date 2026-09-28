@@ -945,7 +945,13 @@ func (s *Store) graphWalkRelationships(ctx context.Context, q dbscope.Querier, s
 		if err != nil {
 			return nil, fmt.Errorf("load graph-walked entity %s: %w", id, err)
 		}
-		sb.WriteString("\n" + line)
+		// ", relationship graph" mirrors the existing ", keyword match"
+		// suffix convention (keywordSearchSummaries et al.) -- without
+		// this, a graph-walked entity is textually indistinguishable
+		// from one stage1EntityMatches found by a direct name mention in
+		// the query, making it impossible to tell from ContextMessage
+		// alone whether the graph walk actually contributed anything.
+		sb.WriteString("\n" + line + ", relationship graph")
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
 		*strongHit = true // a graph-connected entity is as strong a signal as a directly-matched one
 	}
