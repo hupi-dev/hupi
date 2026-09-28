@@ -155,18 +155,20 @@ const longMemEvalCategories = [
 
         <div class="mt-8 grid gap-6 sm:grid-cols-2">
           <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
-            <p class="font-mono-tight text-4xl font-extrabold text-ember-500">82.2%</p>
+            <p class="font-mono-tight text-4xl font-extrabold text-ember-500">36.2%</p>
             <p class="mt-2 text-sm text-fog-300">
-              Abstention accuracy — correctly declines to answer when nothing relevant is in memory.
-            </p>
-          </div>
-          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
-            <p class="font-mono-tight text-4xl font-extrabold text-fog-100">29.1%</p>
-            <p class="mt-2 text-sm text-fog-300">
-              EvalMem's own strict, LLM-judged <span class="font-mono-tight">final_accuracy</span> —
+              EvalMem's own strict, LLM-judged <span class="font-mono-tight">final_accuracy</span>,
+              recommended cloud-model config —
               <strong class="text-fog-100">not comparable</strong> to the F1/EM accuracy numbers
               above (a different, harsher rubric, on one conversation rather than the full published
               set).
+            </p>
+          </div>
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
+            <p class="font-mono-tight text-4xl font-extrabold text-fog-100">64.4%</p>
+            <p class="mt-2 text-sm text-fog-300">
+              Abstention accuracy, same config — correctly declines to answer when nothing relevant
+              is in memory.
             </p>
           </div>
         </div>
@@ -178,7 +180,26 @@ const longMemEvalCategories = [
           surfacing or using them well, not losing them outright. Two real bugs were found and fixed
           while running this: one in EvalMem's own strict-mode judging logic, and one in HUPI's own
           answer tool, which was missing the same answer-style tuning the LoCoMo/LongMemEval harness
-          already uses (fixing it nearly tripled the score above, from 9.5% to 29.1%).
+          already uses (fixing it nearly tripled the initial score, from 9.5% to 29.1%).
+        </p>
+
+        <p class="mt-4 text-fog-300">
+          A follow-up tuning pass on the same conversation found one more real, honestly-disclosed
+          lever: HUPI's default context budget (2,000 characters) is deliberately sized safe for a
+          local model, and was measured to hard-truncate retrieved content well before a
+          large-context model like GPT-4.1 needed to stop. Raising it — now the
+          <a
+            href={docFileURL('INSTALL.md')}
+            class="text-ember-500 underline decoration-dotted hover:text-ember-400"
+          >
+            recommended setting for cloud-model deployments
+          </a>
+           — took <span class="font-mono-tight">final_accuracy</span> from 29.1% to
+          <span class="font-mono-tight text-fog-100">36.2%</span>, but it's a real tradeoff, not a
+          free win: abstention accuracy dropped from 82.2% to
+          <span class="font-mono-tight text-fog-100">64.4%</span>, since more context also means more
+          tangentially-related content that can undermine a confident "nothing relevant here." Both
+          configurations are disclosed above and in the full write-up, not just the higher number.
         </p>
 
         <a
