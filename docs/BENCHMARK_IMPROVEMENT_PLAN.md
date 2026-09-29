@@ -181,25 +181,39 @@ pre-existing list with this session's EvalMem findings:
    against a real Postgres instance — all pass, confirming the added
    `ts` column select and prompt changes didn't regress anything else.
 
-6. 🔖 **Flagged by the user for deeper investigation before scoping**
-   (2026-09-28) — do not skip this one; revisit once steps 3-5 are done
-   so there's a fuller, better-understood picture to design against, not
-   because it's lower-priority. **Surface `summary_key_facts` more
-   prominently in the assembled context, not just as trailing bullet
-   points under each summary.** Most speculative item here. Generation
-   defects (`GF`/`GRF`) stayed
-   high across every EvalMem run this session even after the answer-style
-   prompt fix and even with the larger budget — suggesting that
-   sometimes the right fact genuinely is present in the assembled
-   context, but the model still doesn't extract it correctly from prose
-   it has to parse itself. Idea: give the single most relevant extracted
-   key fact its own leading position/emphasis in the context, rather
-   than presenting it as one bullet among several under a summary
-   paragraph. Not scoped further yet — needs a smaller, targeted
-   experiment (e.g. on the same bounded EvalMem sample from step 7) to
-   check whether this actually reduces `GF`/`GRF` before considering it
-   for a real benchmark re-run; listed last because it's the least
-   understood of the six.
+6. ✅ **Surface `summary_key_facts` more prominently in the assembled
+   context** (`8a257ca`), revisited once steps 3-5 gave a fuller picture,
+   per the user's own explicit note — not skipped, not treated as lower
+   priority. `appendKeyFacts` previously wrote every grounded key_fact in
+   plain insertion order, no query-awareness at all. `mostRelevantFactIndex`
+   now picks the fact sharing the most query vocabulary and
+   `appendKeyFacts` moves it to the front, marked `"(most relevant)"` —
+   the same deliberate-emphasis reasoning as the graph-walk and
+   vector+keyword match markers. Returns no reordering when there are
+   fewer than 2 facts, no query terms, or every fact ties on shared
+   vocabulary (including a 0-0 tie) — a fabricated "most relevant" label
+   on an arbitrary pick would be worse than none.
+
+   Unit-tested in isolation (clear-winner, no-signal, tie, and both
+   trivial no-op cases) and against real infra (the already-consolidated
+   `conv-26` scope, real Postgres, real GPT-4.1): a genuine-tie query
+   correctly triggered no promotion; a second query against a summary
+   with ~15 key facts did trigger promotion — but honestly, it promoted
+   a fact about *Melanie's* pets (which happened to literally contain
+   the word "pets") over the actually-correct fact about Caroline's
+   guinea pig (which doesn't use that literal word) — a real,
+   understood limitation of lexical-overlap scoring, the same category
+   of limitation the MMR diversity signal (step 3) already has. The
+   model still answered correctly despite this, but this specific test
+   doesn't demonstrate a clean win, and this is recorded honestly rather
+   than oversold. Full `internal/store` test suite verified against real
+   Postgres — no regressions.
+
+   **Whether this net helps `GF`/`GRF` at benchmark scale is still
+   unconfirmed** — per the plan's own original framing, that needs a
+   real benchmark re-run, not this exploratory, bounded check. Listed
+   last among steps 3-6 because it remains the least certain to actually
+   help, not because it was skipped or deprioritized.
 
 ## Non-goals for this pass
 
