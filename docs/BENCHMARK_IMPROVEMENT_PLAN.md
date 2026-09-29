@@ -146,22 +146,40 @@ pre-existing list with this session's EvalMem findings:
    LGBTQ-community query correctly labeled all 5 selected summaries as
    found by both mechanisms.
 
-5. **Resolve relative dates into absolute ones at consolidation time,
-   not just via the query-time prompt.** New finding: the existing
-   `qaConcisenessPrompt` fix (`docs/BENCHMARKS.md` §3) patches the
-   *query* side — it tells the model to always answer with an absolute
-   date. But if a summary itself still stores "yesterday" or "last week"
-   (LoCoMo's own raw dialogue phrasing) instead of resolving it against
-   that session's real recorded date at consolidation time, the
-   ambiguity is baked into the stored memory itself, not just into
-   answer phrasing — and no query-time instruction can fully recover
-   information that was never resolved to begin with. LoCoMo's
-   temporal-reasoning category is one of its weakest (23.1%,
-   `docs/BENCHMARKS.md` §1) — a plausible, targeted fix for specifically
-   that category. Scoped to `internal/consolidation`'s summary-writing
-   prompt/logic: instruct the consolidation model to resolve relative
-   time references against the episode's own known timestamp before
-   writing them into a summary.
+5. ✅ **Resolve relative dates into absolute ones at consolidation time,
+   not just via the query-time prompt** (`a9f1220`). `textSource` gained
+   a `date` field ("YYYY-MM-DD", empty for rollup sources);
+   `loadDailyEpisodes`/`loadEpisodesByID` now select the episode's own
+   real `ts`; `buildSummaryPrompt` labels each source with its date when
+   known, and `summarySystemPrompt` instructs resolving a source's
+   relative date references against its own labeled date into an
+   absolute date before writing it into a summary/key_fact.
+
+   Verification surfaced a real second half of the problem, not just
+   confirmed the first: against a real, deliberately targeted synthetic
+   conversation (real Postgres, real GPT-4.1 — a session dated 8 May
+   2023 with "I lost my job yesterday"), the consolidation model
+   correctly resolved the date in the summary prose and key_fact ("lost
+   their banking job on 2023-05-07") — but the *separate* grounding-check
+   pass (a second, independent LLM call that re-verifies every fact
+   against the raw source text) marked that same key_fact ungrounded,
+   since the raw text only literally says "yesterday" and the grounding
+   checker's own instruction required a fact be "stated," not inferred —
+   a correctly resolved date wasn't in its vocabulary as acceptable.
+   Extended the identical date-labeling treatment to `joinSources`/
+   `groundingSystemPrompt` (the grounding pass's own prompt builder);
+   re-verified on the same real scenario — the same key_fact now
+   correctly comes back `grounded: true`. Without this second half, the
+   resolved date still would have reached the retrievable summary prose
+   (ungrounded key_facts aren't shown, but summary prose always is), so
+   the fix wasn't broken, but this makes it complete rather than
+   partial.
+
+   New unit tests for `buildSummaryPrompt`'s date-label behavior; full
+   `internal/consolidation` test suite (`RunDaily`, `RunRollup`,
+   `Correct`, relationship writes, entity embedding backfill) verified
+   against a real Postgres instance — all pass, confirming the added
+   `ts` column select and prompt changes didn't regress anything else.
 
 6. 🔖 **Flagged by the user for deeper investigation before scoping**
    (2026-09-28) — do not skip this one; revisit once steps 3-5 are done
