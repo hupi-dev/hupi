@@ -70,24 +70,42 @@ pre-existing list with this session's EvalMem findings:
    dataset, no design work — then decide (b) only if it still shows
    nothing.
 
-3. **Diversity-aware context assembly (MMR-style de-duplication).**
-   New finding, not previously flagged: raising `HUPI_MAX_VECTOR_RESULTS`
-   from 5 to 12 (`docs/EVALMEM_INTEGRATION_PLAN.md` §7) was neutral, not
-   a win, because LoCoMo's two-speaker conversations mean most extra
-   vector-search candidates are near-duplicate restatements of
-   already-well-covered facts, not new ones — raising K just means more
-   competition for the same fixed char budget without more *distinct*
-   coverage. A relevance-*and*-diversity re-ranker (Maximal Marginal
-   Relevance is the standard, well-understood technique — score by
-   `λ · similarity(candidate, query) - (1-λ) · max(similarity(candidate, already_selected))`,
-   greedily) over `internal/store/retrieve.go`'s already-collected
-   candidate pool, before truncating to the char budget, should let a
-   fixed budget cover more distinct facts. Real, medium-sized change:
-   touches `vectorSearchSummaries`/`vectorSearchEntities`/
-   `vectorSearchEpisodes`'s result assembly, needs a real embedding
-   available for the similarity-to-already-selected computation (already
-   have summary/entity/episode embeddings — no new embedding calls
-   needed, just a similarity computation over vectors already fetched).
+3. ✅ **Diversity-aware context assembly (MMR-style de-duplication).**
+   Done for `vectorSearchSummaries`, `1bd6a7a`. Scoped to summaries only
+   for this pass, not entities/episodes/keyword-search/graph-walk — see
+   the commit for why (establishes the refactor point step 4 builds on,
+   with a smaller, independently-verifiable change first). Used lexical
+   (Jaccard token) overlap between candidate summaries as the diversity
+   signal instead of a second embedding round-trip per pair — real
+   inspection of the redundancy problem confirmed near-duplicate
+   summaries share most content words even when phrased slightly
+   differently, so this is a simpler, dependency-free, no-extra-query
+   proxy for what a second embedding comparison would measure anyway.
+   `vectorSearchSummaries` now overfetches 3x `maxVectorResults()`
+   real threshold-clearing candidates, then `mmrSelect` narrows back
+   down using standard MMR (`HUPI_MMR_LAMBDA`, default 0.7, same
+   override pattern as `contextCharBudget`/`maxVectorResults`).
+
+   Unit-tested in isolation first (`mmr_test.go`): the core hypothesis
+   directly (MMR picks a genuinely distinct lower-relevance candidate
+   over a near-duplicate higher-relevance one once the top pick is
+   already selected), the `lambda=1` boundary (degenerates to plain
+   top-K), and the no-real-surplus no-op case.
+
+   Then verified against real infra, not just unit tests: reused the
+   already-consolidated `conv-26` scope, real Postgres, real GPT-4.1,
+   keyword search disabled to isolate vector search's own contribution.
+   At `maxVectorResults=5` (real surplus: 10 threshold-clearing
+   candidates for 5 slots), MMR swapped out a weekly-rollup summary that
+   was a real near-duplicate of an already-selected daily summary (both
+   about "a necklace from Sweden, growing interest in counseling") for a
+   genuinely distinct daily summary (adoption agency interviews — a
+   topic none of the other 4 selected summaries covered). At
+   `maxVectorResults=12` there was no real surplus for this
+   scope/query (only 10 candidates cleared threshold), so `mmrSelect`
+   correctly no-op'd — confirms it isn't manufacturing a difference
+   where there's nothing to select from, not just that it does something
+   when there is.
 
 4. **Fuse vector + BM25 keyword + graph-walk into one ranked candidate
    list, instead of three independently-run searches concatenated.**
