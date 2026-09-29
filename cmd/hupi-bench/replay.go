@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"time"
@@ -243,9 +244,17 @@ func runBaselineConversation(handler *gateway.Handler, userID, answerModel strin
 		content := fmt.Sprintf("%s\n\nQuestion: %s", fullTranscript, qa.question)
 		var context string
 		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
-		answer, err := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), content)
-		if err != nil {
-			return nil, nil, fmt.Errorf("bench: baseline answer question %d of %s: %w", i, conv.id, err)
+		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), content)
+		if aerr != nil {
+			// Log and continue rather than aborting the whole
+			// conversation: a single transient failure (rate limit,
+			// momentary outage) shouldn't discard every other
+			// already-answered question here. Left as "" — main.go's
+			// loadPriorAnswers treats an empty answer as "not really
+			// answered," so a resumed run redoes this conversation
+			// rather than silently accepting a hole in its answers.
+			slog.Error("baseline answer question failed, continuing to next question", "id", conv.id, "question_index", i, "error", aerr)
+			continue
 		}
 		answers[i] = answer
 		retrievedContexts[i] = context
@@ -275,9 +284,16 @@ func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv 
 		handler.Now = func() time.Time { return qt }
 		var context string
 		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
-		answer, err := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), qa.question)
-		if err != nil {
-			return nil, nil, fmt.Errorf("bench: answer question %d of %s: %w", i, conv.id, err)
+		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), qa.question)
+		if aerr != nil {
+			// Log and continue rather than aborting the whole
+			// conversation — see runBaselineConversation's identical
+			// comment; this is the exact path a single late-run 429
+			// hit for real, discarding a whole night's already-paid-for
+			// consolidation because the old code aborted the entire
+			// process on the first such error.
+			slog.Error("answer question failed, continuing to next question", "id", conv.id, "question_index", i, "error", aerr)
+			continue
 		}
 		answers[i] = answer
 		retrievedContexts[i] = context

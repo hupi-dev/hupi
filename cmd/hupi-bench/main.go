@@ -17,9 +17,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -28,7 +30,9 @@ import (
 
 	"hupi/internal/auth"
 	"hupi/internal/bootstrap"
+	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
+	"hupi/internal/identity"
 	"hupi/internal/store"
 )
 
@@ -111,8 +115,29 @@ func run() error {
 
 	model := *answerModel
 
-	results := make([]conversationResult, len(convs))
+	// Resume support: if -out-file already has complete results for some
+	// conversations (from a prior run interrupted mid-way — e.g. the real
+	// OpenAI credit-exhaustion incident this was added for), skip
+	// re-processing them instead of either redoing ~8 hours of paid-for
+	// work or silently double-replaying an already-populated scope (see
+	// resetScope's own doc comment on why the latter would corrupt data).
+	priorAnswers, err := loadPriorAnswers(*benchmark, *outFile, convs)
+	if err != nil {
+		return err
+	}
+	if len(priorAnswers) > 0 {
+		slog.Info("resuming from existing -out-file", "already_complete", len(priorAnswers), "total", len(convs))
+	}
+
+	var results []conversationResult
+	var failedConvs []string
 	for ci, conv := range convs {
+		if answers, done := priorAnswers[conv.id]; done {
+			slog.Info("skipping already-completed conversation", "index", ci, "id", conv.id)
+			results = append(results, conversationResult{conv: conv, answers: answers, retrievedContexts: make([]string, len(conv.qa))})
+			continue
+		}
+
 		slog.Info("processing conversation", "index", ci, "id", conv.id, "sessions", len(conv.sessions), "questions", len(conv.qa))
 
 		// Baseline runs use a distinct scope from the HUPI-memory runs
@@ -126,8 +151,25 @@ func run() error {
 			modeTag = "baseline"
 		}
 		userID := fmt.Sprintf("user:bench-%s-%s-%s", *benchmark, modeTag, conv.id)
+
+		if !*baseline && !*answerOnly {
+			// Guarantee a clean scope before every real replay, whether
+			// this conversation is brand new or was left partially
+			// consolidated by a run that crashed before reaching this
+			// point — replayConversation has no dedup guard, so
+			// re-replaying into an already-populated scope would
+			// silently double episodes rather than cleanly redo it.
+			if err := resetScope(ctx, deps.DB, userID); err != nil {
+				slog.Error("conversation failed, continuing to next", "id", conv.id, "error", fmt.Errorf("reset scope: %w", err))
+				failedConvs = append(failedConvs, conv.id)
+				continue
+			}
+		}
+
 		if err := authStore.CreateUser(ctx, userID, ""); err != nil {
-			return fmt.Errorf("bench: provision scope for %s: %w", conv.id, err)
+			slog.Error("conversation failed, continuing to next", "id", conv.id, "error", fmt.Errorf("provision scope: %w", err))
+			failedConvs = append(failedConvs, conv.id)
+			continue
 		}
 
 		handler := &gateway.Handler{
@@ -138,22 +180,64 @@ func run() error {
 		}
 
 		var answers, retrievedContexts []string
+		var convErr error
 		switch {
 		case *baseline:
-			answers, retrievedContexts, err = runBaselineConversation(handler, userID, model, conv)
+			answers, retrievedContexts, convErr = runBaselineConversation(handler, userID, model, conv)
 		case *answerOnly:
-			answers, retrievedContexts, err = answerConversation(handler, userID, model, conv)
+			answers, retrievedContexts, convErr = answerConversation(handler, userID, model, conv)
 		default:
-			answers, retrievedContexts, err = runHUPIConversation(handler, userID, model, conv, *consolidateBin)
+			answers, retrievedContexts, convErr = runHUPIConversation(handler, userID, model, conv, *consolidateBin)
 		}
-		if err != nil {
-			return err
+		if convErr != nil {
+			// Log and continue rather than aborting the whole process:
+			// this is exactly what turned a single late-run 429 into a
+			// total loss of ~31 already-consolidated conversations'
+			// worth of real, paid-for work. failedConvs is reported at
+			// the end and can be retried by re-running the same command
+			// with the same -out-file.
+			slog.Error("conversation failed, continuing to next", "id", conv.id, "error", convErr)
+			failedConvs = append(failedConvs, conv.id)
+			continue
 		}
-		results[ci] = conversationResult{conv: conv, answers: answers, retrievedContexts: retrievedContexts}
+		results = append(results, conversationResult{conv: conv, answers: answers, retrievedContexts: retrievedContexts})
+
+		// Incremental write: persist progress after every conversation,
+		// not just once at the very end, so a later failure (this run or
+		// the process being killed) never discards already-completed
+		// work.
+		if *outFile != "" {
+			if err := writeOutputs(results, *benchmark, *outFile, *retrievedContextOutFile); err != nil {
+				return fmt.Errorf("bench: incremental write after %s: %w", conv.id, err)
+			}
+		}
 	}
 
+	if len(failedConvs) > 0 {
+		slog.Warn("some conversations failed and were skipped — re-run the same command with the same -out-file to retry just these", "failed_count", len(failedConvs), "total", len(convs), "failed_ids", failedConvs)
+	}
+
+	if err := writeOutputs(results, *benchmark, *outFile, *retrievedContextOutFile); err != nil {
+		return err
+	}
+
+	if len(failedConvs) > 0 {
+		return fmt.Errorf("bench: %d of %d conversations failed (see log) — output written for the %d that succeeded; re-run with the same -out-file to retry just the failures", len(failedConvs), len(convs), len(results))
+	}
+	return nil
+}
+
+// writeOutputs marshals results into the requested benchmark's own
+// expected shape and writes -out-file (or prints to stdout if unset),
+// plus the optional -retrieved-context-out-file. Called after every
+// conversation, not just once at the end of run() — see run()'s own
+// comment on why (the real credit-exhaustion incident that discarded a
+// whole night's consolidation work because output was previously only
+// written once, at the very end).
+func writeOutputs(results []conversationResult, benchmark, outFile, retrievedContextOutFile string) error {
 	var out []byte
-	if *benchmark == "longmemeval" {
+	var err error
+	if benchmark == "longmemeval" {
 		out, err = marshalLongMemEvalHypotheses(results)
 	} else {
 		out, err = marshalLoCoMoPredictions(results)
@@ -161,21 +245,159 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if *retrievedContextOutFile != "" {
+
+	if retrievedContextOutFile != "" {
 		contextsOut, err := marshalRetrievedContexts(results)
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(*retrievedContextOutFile, contextsOut, 0o644); err != nil {
+		if err := os.WriteFile(retrievedContextOutFile, contextsOut, 0o644); err != nil {
 			return fmt.Errorf("bench: write retrieved contexts: %w", err)
 		}
 	}
 
-	if *outFile == "" {
+	if outFile == "" {
 		fmt.Println(string(out))
 		return nil
 	}
-	return os.WriteFile(*outFile, out, 0o644)
+	return os.WriteFile(outFile, out, 0o644)
+}
+
+// loadPriorAnswers reads an existing -out-file from a prior (possibly
+// interrupted) run and returns, per conversation ID, its answers in
+// conv.qa order — but only for conversations that are genuinely
+// complete: every one of their questions must have a real, non-empty
+// recorded answer. answerQuestions/runBaselineConversation record a
+// failed question as "" rather than aborting (see their own doc
+// comments), so a conversation that partially failed last time is
+// correctly treated as incomplete here and gets fully redone, not
+// silently accepted with a hole in its answers. Returns (nil, nil) if
+// outFile is unset or doesn't exist yet (first run).
+func loadPriorAnswers(benchmark, outFile string, convs []benchConversation) (map[string][]string, error) {
+	if outFile == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("bench: read existing -out-file for resume: %w", err)
+	}
+
+	complete := map[string][]string{}
+
+	if benchmark == "longmemeval" {
+		byQID := map[string]string{}
+		dec := json.NewDecoder(bytes.NewReader(data))
+		for {
+			var line struct {
+				QuestionID string `json:"question_id"`
+				Hypothesis string `json:"hypothesis"`
+			}
+			if err := dec.Decode(&line); err != nil {
+				if err == io.EOF {
+					break
+				}
+				return nil, fmt.Errorf("bench: parse existing longmemeval output for resume: %w", err)
+			}
+			byQID[line.QuestionID] = line.Hypothesis
+		}
+		for _, conv := range convs {
+			if len(conv.qa) == 0 {
+				continue
+			}
+			answers := make([]string, len(conv.qa))
+			ok := true
+			for i, qa := range conv.qa {
+				a, found := byQID[qa.id]
+				if !found || a == "" {
+					ok = false
+					break
+				}
+				answers[i] = a
+			}
+			if ok {
+				complete[conv.id] = answers
+			}
+		}
+		return complete, nil
+	}
+
+	var entries []struct {
+		SampleID string `json:"sample_id"`
+		QA       []struct {
+			HupiPrediction string `json:"hupi_prediction"`
+		} `json:"qa"`
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("bench: parse existing locomo output for resume: %w", err)
+	}
+	bySample := map[string][]string{}
+	for _, e := range entries {
+		answers := make([]string, len(e.QA))
+		for i, qa := range e.QA {
+			answers[i] = qa.HupiPrediction
+		}
+		bySample[e.SampleID] = answers
+	}
+	for _, conv := range convs {
+		answers, found := bySample[conv.id]
+		if !found || len(answers) != len(conv.qa) {
+			continue
+		}
+		ok := true
+		for _, a := range answers {
+			if a == "" {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			complete[conv.id] = answers
+		}
+	}
+	return complete, nil
+}
+
+// resetScope wipes any existing data for userID's private scope before a
+// fresh replay. replayConversation/replayAndConsolidate have no dedup
+// guard, so re-replaying into an already-populated scope (e.g. one left
+// partially consolidated by a run that crashed mid-way — the real OpenAI
+// credit-exhaustion incident this was added for) would silently double
+// episodes rather than cleanly redo it. A no-op for a conversation
+// that's never been touched. Table order and RLS-scoped-transaction
+// requirement match internal/store's own test cleanup helper
+// (scope_isolation_test.go's cleanupScope); scope_keys and users aren't
+// RLS-protected (see internal/demo/store_test.go's own non-scoped
+// cleanup), so those two are deleted outside the scoped transaction.
+func resetScope(ctx context.Context, db *sql.DB, userID string) error {
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: userID}
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`delete from entity_relationships where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reset scope: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `delete from scope_keys where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner); err != nil {
+		return fmt.Errorf("reset scope: delete scope_keys: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `delete from users where id = $1`, userID); err != nil {
+		return fmt.Errorf("reset scope: delete user: %w", err)
+	}
+	return nil
 }
 
 func loadAll(benchmark, dataFile string) ([]benchConversation, error) {
