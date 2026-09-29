@@ -483,7 +483,7 @@ func (r *Runner) embedHighImportanceEpisodes(ctx context.Context, scope identity
 	var sources []textSource
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-			select id, input_text, output_text, key_version from episodes
+			select id, input_text, output_text, key_version, ts from episodes
 			where type = 'interaction' and ts >= $1 and ts < $2
 			  and importance >= $3
 			  and (embedding is null or embedding_model is distinct from $4)
