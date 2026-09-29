@@ -356,8 +356,30 @@ margin, confirming steps 3/4/6's retrieval improvements were genuinely
 valuable all along; the verbosity side effect was masking them, not
 canceling them out. Since `qaConcisenessPrompt` is shared across every
 category (not multi-hop-specific), this plausibly helps single-hop,
-temporal, and open-domain too, not just multi-hop — unconfirmed at full
-scale until the next full re-run.
+temporal, and open-domain too, not just multi-hop.
+
+**Confirmed at full scale.** Re-ran all 10 conversations / 1,986
+questions with the fix (`-answer-only` against the already-consolidated
+scopes — the fix only touches answering, not consolidation), scored
+with LoCoMo's own real `eval_question_answering`: 0 errors.
+
+| Category | Original (50.2%) | Post steps 1/3-6, pre-fix (51.3%) | Post steps 1/3-6, with fix |
+|---|---|---|---|
+| 1 — multi-hop | 39.6% | 32.7% (-6.9pp) | **46.4%** (+6.8pp vs original) |
+| 2 — single-hop | 38.0% | 51.4% | **61.1%** |
+| 3 — temporal | 23.1% | 22.0% | **35.3%** |
+| 4 — open-domain | 52.3% | 50.3% | **56.4%** |
+| 5 — adversarial (abstention) | 67.7% | 71.1% | 68.2% |
+| **Overall** | **50.2%** | **51.3%** | **57.3%** |
+
+The verbosity fix didn't just recover the multi-hop regression — every
+category improved over the original baseline, confirming the 74-question
+subset result held at full scale. Category 5 (abstention) dipped
+slightly vs. the pre-fix run (71.1% → 68.2%) but stayed above the
+original 67.7% — a reasonable tradeoff: a little of the "say less"
+abstention benefit traded for more complete, correct answers everywhere
+else. Net: **+7.1pp overall vs. the original published baseline**, with
+no category left worse off than where this pass started.
 
 **The RRF dual-signal-bias cause: investigated, not cleanly fixable.**
 A max-based fusion formula (`max(vectorRRF, keywordRRF)` with a bonus
@@ -378,8 +400,23 @@ hand-traced example.
 
 ### LongMemEval result
 
-Re-run in progress as of this writing (real GPT-4.1, same codepoint);
-result to be added here once complete.
+The combined re-verification run (48 instances, real GPT-4.1) is still
+in progress as of this writing, using the bug-fixed but **pre-verbosity-
+fix** binary (started before `fda0a3f` landed). Decision: let it finish
+rather than kill it mid-consolidation — restarting would throw away
+hours of already-completed real GPT-4.1 consolidation work for a fix
+whose impact on this benchmark specifically isn't established yet.
+LongMemEval's scoring is an LLM judge (GPT-4o), not literal F1/EM like
+LoCoMo, so it may be more tolerant of the same verbosity increase — this
+is genuinely unknown until the pre-fix result is in hand.
+
+Plan: score this pre-fix run for real once it completes. If it shows the
+same verbosity-driven score loss pattern LoCoMo did (or otherwise
+undershoots the 52.1% baseline), do a second cheap `-answer-only` re-run
+with the fix, reusing the 48 already-consolidated scopes — the same
+approach just used for LoCoMo's fixed re-run, at near-zero extra
+consolidation cost. Result to be added here once the pre-fix run
+completes and this decision is made.
 
 ## Non-goals for this pass
 
