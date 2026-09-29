@@ -220,6 +220,102 @@ pre-existing list with this session's EvalMem findings:
    last among steps 3-6 because it remains the least certain to actually
    help, not because it was skipped or deprioritized.
 
+## Combined full-scale re-verification (after all 6 steps)
+
+Full LoCoMo (all 10 conversations, 1,986 questions) and full LongMemEval
+(the same 48-instance stratified sample) re-run from scratch — fresh
+ingestion, not reused scopes, since step 5's consolidation-time fix only
+shows up in newly-consolidated data — against the current codepoint
+(steps 1, 3, 4, 5, 6 all applied; step 2 was investigation-only, no code
+change). Real GPT-4.1, `HUPI_CONTEXT_CHAR_BUDGET=20000`, scored with each
+benchmark's own unmodified code.
+
+**A real bug was caught mid-run, not by code review**: the first attempt
+at this re-verification hit the exact same `"sql: expected 4 destination
+arguments in Scan, not 5"` error on both benchmarks simultaneously — step
+5's `textSource.date` change updated `scanEpisodeSources`'s two known
+callers but missed a third, `embedHighImportanceEpisodes`'s own separate
+query. Every existing test fixture hardcodes `importance=0.5`, below the
+embedding threshold (0.6), so this path was never exercised by any test
+in this package, before or during this session. Both runs were already
+producing silently-degraded, missing-memory predictions by the time this
+was caught; both were killed, the bug fixed (`74d3ba4`, with a real
+regression test verified to actually catch it), and both runs restarted
+clean from a fresh wipe. See that commit for the full account.
+
+### LoCoMo result: 51.3% (up from 50.2%), but not a clean sweep
+
+| Category | Original (50.2%) | New (51.3%) | Change |
+|---|---|---|---|
+| 1 — multi-hop | 39.6% | 32.7% | **-6.9pp** |
+| 2 — single-hop | 38.0% | 51.4% | **+13.4pp** |
+| 3 — temporal | 23.1% | 22.0% | -1.1pp |
+| 4 — open-domain | 52.3% | 50.3% | -2.0pp |
+| 5 — adversarial (abstention) | 67.7% | 71.1% | +3.4pp |
+
+Net positive overall, but a real, honest mixed picture: single-hop and
+abstention improved substantially (consistent with steps 3/4's better-
+ranked, less-redundant retrieval), but **multi-hop regressed 6.9pp** and
+temporal reasoning didn't improve despite step 5 being specifically
+aimed at it (a small category, 96 questions, more noise-prone — not a
+clear win, but not clearly explained away by noise alone either).
+
+### Why multi-hop regressed — investigated, not just noted
+
+Compared old vs. new `hupi_prediction` per multi-hop question (matched
+by question text, scored with LoCoMo's own real `eval_question_answering`)
+directly: 18 real regressions (score dropped ≥0.5) vs. only 6 real
+improvements — a genuine, substantial net negative shift, not noise.
+Two distinct, evidenced causes, not one:
+
+1. **Answer verbosity increased (13 of 18 regressions).** Real,
+   measurable: average category-1 answer length went from 17.9 → 19.8
+   words (median 13 → 16, +23%), confirmed by directly counting words
+   across every category-1 answer in both runs. `qaConcisenessPrompt` is
+   completely unchanged for LoCoMo (step 1's preference-prompt branch
+   never triggers here — LoCoMo never sets `questionType`), so this
+   isn't a prompt regression. Likely mechanism: steps 3/4/6 genuinely
+   improved retrieval quality, and richer, more relevant context gives
+   the model more material to elaborate on even under an unchanged
+   conciseness instruction. Multi-hop's own official scoring
+   (`eval_question_answering`'s `f1()`, which splits an answer into
+   sub-answers and scores each independently) is measurably more
+   sensitive to this precision dilution than the flatter `f1_score()`
+   the other categories use — which is also consistent with why
+   single-hop and open-domain, seeing the same verbosity trend, didn't
+   regress the same way.
+2. **Genuine retrieval misses (5 of 18) — a real, understood cost of
+   MMR (step 3).** Investigated one concretely: "Who gave Maria's family
+   money during tough times?" (gold: her aunt) came back "No information
+   available" in the new run. Exporting the scope's full memory shows
+   the fact is correctly extracted and grounded in **three separate
+   summaries** — all near-duplicate restatements of the same fact
+   ("Maria was inspired to volunteer by her aunt, who helped her family
+   when they were struggling"). None of the three made it into the
+   assembled context for this query. This is MMR's redundancy penalty
+   doing exactly what it was built to do — correctly identifying the
+   three as redundant with each other — but when a genuinely important
+   fact only ever gets *stored* in redundant form across a scope's
+   history, MMR's diversity preference can end up discarding all copies
+   of it if none individually scores high enough on relevance for that
+   specific query, rather than keeping at least one. A real, honest
+   tradeoff of diversity-aware selection, not a bug in the MMR
+   implementation itself (which is behaving exactly as designed) —
+   surfaced here for the first time at real benchmark scale, not caught
+   by the bounded step-3 verification.
+
+**Net read**: steps 3/4/6 are real, working improvements — they clearly
+helped single-hop and abstention — but they introduced a genuine,
+non-hypothetical cost for multi-hop specifically, via both an answer-
+verbosity side effect and MMR's redundancy penalty occasionally over-
+penalizing a fact that's only ever restated, never uniquely stated. Not
+silently accepted as a win; see "Is this fixable?" below.
+
+### LongMemEval result
+
+Re-run in progress as of this writing (real GPT-4.1, same codepoint);
+result to be added here once complete.
+
 ## Non-goals for this pass
 
 - Not re-running the full LoCoMo/LongMemEval benchmarks from scratch
