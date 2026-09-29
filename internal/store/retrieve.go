@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -551,6 +552,12 @@ func (s *Store) formatEntity(ctx context.Context, q dbscope.Querier, scope ident
 // running a correction end-to-end and watching the model answer with
 // the stale, "corrected-away" fact instead of the fix.
 func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+	// Overfetches (summaryOverfetchFactor) beyond maxVectorResults() so
+	// mmrSelect below has real candidates to choose *from* -- see that
+	// constant's own doc comment for why (real finding: raising
+	// maxVectorResults alone was neutral, since a two-speaker
+	// conversation's summaries mostly repeat the same well-covered
+	// facts).
 	rows, err := q.QueryContext(ctx, `
 		select id, summary, key_version, (embedding <=> $1::vector) as distance
 		from summaries s
@@ -559,7 +566,7 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxVectorResults())
+	`, queryVector, scope.Kind, scope.Owner, maxVectorResults()*summaryOverfetchFactor)
 	if err != nil {
 		return nil, err
 	}
@@ -571,9 +578,10 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 	// produced a real "driver: bad connection" failure caught by this
 	// package's own existing tests, not just a theoretical concern.
 	type hit struct {
-		id   string
-		text string
-		enc  *crypto.Encryptor
+		id         string
+		text       string
+		enc        *crypto.Encryptor
+		similarity float64
 	}
 	var hits []hit
 	for rows.Next() {
@@ -598,15 +606,29 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 		if err != nil {
 			return nil, err
 		}
-		hits = append(hits, hit{id: id, text: text, enc: enc})
+		hits = append(hits, hit{id: id, text: text, enc: enc, similarity: similarity})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	rows.Close()
 
+	// MMR selection: pick maxVectorResults() of the (up to
+	// summaryOverfetchFactor*maxVectorResults()) real threshold-clearing
+	// hits above, balancing each one's own query-relevance against
+	// redundancy with whatever's already chosen — see mmrSelect's own
+	// doc comment. A no-op (falls straight through to selecting
+	// everything, in similarity order) whenever overfetching didn't
+	// actually turn up more than the cap.
+	pool := make([]mmrCandidate, len(hits))
+	for i, h := range hits {
+		pool[i] = mmrCandidate{relevance: h.similarity, tokens: tokenSet(h.text)}
+	}
+	picked := mmrSelect(pool, maxVectorResults(), mmrLambda())
+
 	var refs []identity.Ref
-	for _, h := range hits {
+	for _, idx := range picked {
+		h := hits[idx]
 		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s): %s", h.id, h.text))
 		if err := appendKeyFacts(ctx, q, h.id, h.enc, sb); err != nil {
 			return nil, err
@@ -862,6 +884,128 @@ func maxVectorResults() int {
 		}
 	}
 	return defaultMaxVectorResults
+}
+
+// summaryOverfetchFactor controls how many candidates
+// vectorSearchSummaries pulls before MMR selection narrows them down to
+// maxVectorResults() — MMR has nothing to select *from* if it's only
+// ever handed exactly as many candidates as it's asked to return.
+// docs/BENCHMARK_IMPROVEMENT_PLAN.md's own real finding motivating this:
+// raising maxVectorResults from 5 to 12 alone was neutral (not a win)
+// because a two-speaker conversation's summaries mostly repeat the same
+// well-covered facts -- more candidates competing for the same fixed
+// char budget, not more distinct coverage. 3x is enough slack for MMR to
+// actually have a meaningful choice without querying the whole scope's
+// summary history on every request.
+const summaryOverfetchFactor = 3
+
+// mmrLambda is the same "informed minority override" pattern as
+// contextCharBudget/maxVectorResults. Standard Maximal Marginal
+// Relevance: score = lambda*relevance - (1-lambda)*maxSimilarityToAlreadySelected.
+// 0.7 favors relevance over diversity as the default (a deployment's
+// first, most-similar match is usually still what the user is asking
+// about) while still meaningfully penalizing a near-duplicate of
+// something already selected -- not calibrated against real measured
+// queries yet, unlike vectorSimilarityThreshold and friends; re-measure
+// once this has real traffic behind it.
+func mmrLambda() float64 {
+	if v := os.Getenv("HUPI_MMR_LAMBDA"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+			return f
+		}
+	}
+	return 0.7
+}
+
+// jaccardOverlap is the diversity signal mmrSelectSummaries uses instead
+// of a second round of embedding math: two summaries repeating the same
+// well-covered narrative ("Caroline and Melanie catch up...") share most
+// of their content words even when phrased slightly differently run to
+// run, which real inspection of this exact redundancy problem
+// (docs/EVALMEM_INTEGRATION_PLAN.md §7) confirmed is the actual shape of
+// the near-duplicates costing budget space -- lexical overlap is a
+// simple, dependency-free, no-extra-query proxy for that, reusing
+// tokenize (bm25.go) rather than a second embedding round-trip per
+// candidate pair.
+func jaccardOverlap(a, b map[string]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	small, large := a, b
+	if len(large) < len(small) {
+		small, large = large, small
+	}
+	intersection := 0
+	for t := range small {
+		if large[t] {
+			intersection++
+		}
+	}
+	union := len(a) + len(b) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
+// tokenSet is tokenize's output as a set, for jaccardOverlap.
+func tokenSet(text string) map[string]bool {
+	tokens := tokenize(text)
+	set := make(map[string]bool, len(tokens))
+	for _, t := range tokens {
+		set[t] = true
+	}
+	return set
+}
+
+// mmrCandidate is the minimal shape mmrSelect needs: something rankable
+// by query-relevance and comparable pairwise for redundancy. Kept
+// generic (not summary-specific) so the same selection logic could later
+// serve entities/episodes too, per docs/BENCHMARK_IMPROVEMENT_PLAN.md's
+// own note that steps 3 and 4 share this refactor point.
+type mmrCandidate struct {
+	relevance float64
+	tokens    map[string]bool
+}
+
+// mmrSelect greedily picks up to k candidates from pool, balancing each
+// candidate's own query-relevance against its maximum similarity to
+// whatever's already been picked -- standard Maximal Marginal Relevance.
+// Returns the *indices* into pool, in selection order (most relevant
+// first) -- the caller's own candidate slice already carries the rest of
+// each candidate's data (id/text/enc for summaries), so this only needs
+// to hand back which ones won and in what order.
+func mmrSelect(pool []mmrCandidate, k int, lambda float64) []int {
+	if k >= len(pool) {
+		out := make([]int, len(pool))
+		for i := range pool {
+			out[i] = i
+		}
+		return out
+	}
+	remaining := make([]int, len(pool))
+	for i := range pool {
+		remaining[i] = i
+	}
+	var selected []int
+	for len(selected) < k && len(remaining) > 0 {
+		bestPos, bestScore := 0, math.Inf(-1)
+		for pos, idx := range remaining {
+			maxSim := 0.0
+			for _, sIdx := range selected {
+				if sim := jaccardOverlap(pool[idx].tokens, pool[sIdx].tokens); sim > maxSim {
+					maxSim = sim
+				}
+			}
+			score := lambda*pool[idx].relevance - (1-lambda)*maxSim
+			if score > bestScore {
+				bestPos, bestScore = pos, score
+			}
+		}
+		selected = append(selected, remaining[bestPos])
+		remaining = append(remaining[:bestPos], remaining[bestPos+1:]...)
+	}
+	return selected
 }
 
 // graphWalkMaxHops/graphWalkMaxResults are the "own hop-limit and token
