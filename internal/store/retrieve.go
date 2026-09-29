@@ -806,7 +806,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 			label = ", keyword match"
 		}
 		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s): %s", c.id, label, c.text))
-		if err := appendKeyFacts(ctx, q, c.id, c.enc, sb); err != nil {
+		if err := appendKeyFacts(ctx, q, c.id, c.enc, queryTerms, sb); err != nil {
 			return nil, err
 		}
 		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: c.id})
@@ -831,7 +831,23 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 // Only grounded facts are surfaced — an ungrounded one already failed
 // groundingCheck's own re-verification against the source text and
 // shouldn't be presented as reliable.
-func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, sb *strings.Builder) error {
+//
+// docs/BENCHMARK_IMPROVEMENT_PLAN.md step 6: originally wrote every
+// grounded fact in plain insertion order, no query-awareness at all —
+// generation defects (GF/GRF) stayed high across every EvalMem run this
+// session even after the answer-style prompt fix and a larger context
+// budget, consistent with the right fact sometimes genuinely being
+// present but buried a few bullets down in a summary with several
+// key_facts, unordered by relevance, for the model to find on its own.
+// When one fact clearly shares more query vocabulary than the others (a
+// real signal, not every summary's facts are about equally
+// (ir)relevant), it's promoted to the front and marked
+// "(most relevant)" — real, deliberate emphasis, the same reasoning as
+// the graph-walk/fusion match markers. Left in original order,
+// unmarked, whenever nothing actually stands out (every fact scores 0,
+// or ties for the top score) — a fabricated "most relevant" label on an
+// arbitrary pick would be worse than no reordering at all.
+func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryTerms []string, sb *strings.Builder) error {
 	rows, err := q.QueryContext(ctx, `
 		select fact from summary_key_facts
 		where summary_id = $1 and grounded = true
@@ -842,6 +858,7 @@ func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, en
 	}
 	defer rows.Close()
 
+	var facts []string
 	for rows.Next() {
 		var factCT []byte
 		if err := rows.Scan(&factCT); err != nil {
@@ -851,9 +868,58 @@ func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, en
 		if err != nil {
 			return fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
 		}
+		facts = append(facts, fact)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
+		sb.WriteString(fmt.Sprintf("\n  - (most relevant) %s", facts[best]))
+		for i, fact := range facts {
+			if i != best {
+				sb.WriteString(fmt.Sprintf("\n  - %s", fact))
+			}
+		}
+		return nil
+	}
+	for _, fact := range facts {
 		sb.WriteString(fmt.Sprintf("\n  - %s", fact))
 	}
-	return rows.Err()
+	return nil
+}
+
+// mostRelevantFactIndex returns the index (within facts, in its original
+// order) of the fact sharing the most query vocabulary, or -1 if there
+// are fewer than 2 facts, no query terms, or every fact ties (including
+// a 0-0 tie — nothing to distinguish "most relevant" from the rest).
+func mostRelevantFactIndex(facts []string, queryTerms []string) int {
+	if len(facts) < 2 || len(queryTerms) == 0 {
+		return -1
+	}
+	querySet := make(map[string]bool, len(queryTerms))
+	for _, t := range queryTerms {
+		querySet[t] = true
+	}
+	best, bestScore, tied := -1, 0, false
+	for i, fact := range facts {
+		score := 0
+		for t := range tokenSet(fact) {
+			if querySet[t] {
+				score++
+			}
+		}
+		switch {
+		case score > bestScore:
+			best, bestScore, tied = i, score, false
+		case score == bestScore && i != best:
+			tied = true
+		}
+	}
+	if bestScore == 0 || tied {
+		return -1
+	}
+	return best
 }
 
 // vectorSearchEntities is vectorSearchSummaries' sibling over `entities`
