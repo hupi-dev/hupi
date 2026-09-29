@@ -49,26 +49,31 @@ pre-existing list with this session's EvalMem findings:
    pointing at steps 3/4 below (diversity-aware assembly, signal fusion)
    rather than further prompt tuning to close the rest of the gap.
 
-2. **Resolve the graph-walk question — fix or deliberately stop
-   relying on it.** Two independent measurements now agree it isn't
-   contributing on these benchmarks: the original ablation at the v3
-   codepoint (`HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK=false`) showed no
-   measurable difference (34.2% vs. 34.8%, within noise,
-   `docs/BENCHMARKS.md` §8), and this session's own EvalMem work
-   (`docs/EVALMEM_INTEGRATION_PLAN.md` §7) found the walk firing 0/32
-   times on real LoCoMo multi-hop questions despite 84 real relationships
-   existing for that scope. Working hypothesis from that investigation:
-   LoCoMo's own "multi-hop" tests cross-*session* narrative linking, not
-   multi-*edge* graph traversal — this feature may be solving a
-   different problem than these two benchmarks pose. Two honest options,
-   not a foregone conclusion: (a) re-run the ablation at the current
-   (v6-equivalent, `main`) codepoint to get one more real, current data
-   point before deciding, since the last one is stale relative to
-   today's code, or (b) accept the walk isn't the right lever for these
-   benchmarks and invest in an explicit cross-session linking mechanism
-   instead. Do (a) first — cheap, re-uses the existing full-scale
-   dataset, no design work — then decide (b) only if it still shows
-   nothing.
+2. ✅ **Resolve the graph-walk question.** Option (a) done — a real,
+   cheap re-verification at the *current* codepoint (this branch,
+   steps 1/3/4/5/6 all applied), not the stale v3 ablation. Genuinely
+   cheap: reused the 10 already-consolidated real scopes from the
+   original full-scale LoCoMo run (`user:bench-locomo-hupi-conv-*`,
+   confirmed still present in the real Postgres instance) via
+   `cmd/hupi-bench -answer-only` — zero re-ingestion cost, just
+   re-answering. Filtered to the 3 most multi-hop-heavy conversations
+   (`conv-42`, `conv-49`, `conv-26` — 106 real category-1 questions
+   combined, the most any 3 conversations could offer), run twice
+   (`HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK` on vs. off), scored with
+   LoCoMo's own real, unmodified scoring code, category 1 specifically
+   (not overall — overall would dilute a category-specific effect into
+   noise, the original ablation's own real blind spot).
+
+   **Result: 35.3% (on) vs. 35.4% (off), n=106 — a 0.1pp difference,
+   well within noise.** This is now the *third* independent measurement
+   agreeing the graph walk isn't contributing on these benchmarks (the
+   stale v3 ablation, the EvalMem 0/32 firing-rate finding, and now this
+   real per-category re-check at the current codepoint). Given three
+   independent methods converge on the same answer, this is now a
+   settled finding, not an open question — option (b) (invest in an
+   explicit cross-session linking mechanism instead, since that's what
+   LoCoMo's own "multi-hop" actually tests) is the real next step if this
+   is worth pursuing further, not another re-measurement.
 
 3. ✅ **Diversity-aware context assembly (MMR-style de-duplication).**
    Done for `vectorSearchSummaries`, `1bd6a7a`. Scoped to summaries only
