@@ -122,9 +122,13 @@ pre-existing list with this session's EvalMem findings:
    time references against the episode's own known timestamp before
    writing them into a summary.
 
-6. **Surface `summary_key_facts` more prominently in the assembled
-   context, not just as trailing bullet points under each summary.**
-   Most speculative item here. Generation defects (`GF`/`GRF`) stayed
+6. 🔖 **Flagged by the user for deeper investigation before scoping**
+   (2026-09-28) — do not skip this one; revisit once steps 3-5 are done
+   so there's a fuller, better-understood picture to design against, not
+   because it's lower-priority. **Surface `summary_key_facts` more
+   prominently in the assembled context, not just as trailing bullet
+   points under each summary.** Most speculative item here. Generation
+   defects (`GF`/`GRF`) stayed
    high across every EvalMem run this session even after the answer-style
    prompt fix and even with the larger budget — suggesting that
    sometimes the right fact genuinely is present in the assembled
