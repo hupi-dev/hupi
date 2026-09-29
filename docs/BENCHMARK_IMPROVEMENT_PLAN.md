@@ -284,32 +284,97 @@ Two distinct, evidenced causes, not one:
    the other categories use — which is also consistent with why
    single-hop and open-domain, seeing the same verbosity trend, didn't
    regress the same way.
-2. **Genuine retrieval misses (5 of 18) — a real, understood cost of
-   MMR (step 3).** Investigated one concretely: "Who gave Maria's family
-   money during tough times?" (gold: her aunt) came back "No information
-   available" in the new run. Exporting the scope's full memory shows
-   the fact is correctly extracted and grounded in **three separate
-   summaries** — all near-duplicate restatements of the same fact
-   ("Maria was inspired to volunteer by her aunt, who helped her family
-   when they were struggling"). None of the three made it into the
-   assembled context for this query. This is MMR's redundancy penalty
-   doing exactly what it was built to do — correctly identifying the
-   three as redundant with each other — but when a genuinely important
-   fact only ever gets *stored* in redundant form across a scope's
-   history, MMR's diversity preference can end up discarding all copies
-   of it if none individually scores high enough on relevance for that
-   specific query, rather than keeping at least one. A real, honest
-   tradeoff of diversity-aware selection, not a bug in the MMR
-   implementation itself (which is behaving exactly as designed) —
-   surfaced here for the first time at real benchmark scale, not caught
-   by the bounded step-3 verification.
+2. **Genuine retrieval misses (5 of 18) — root-caused precisely, not
+   just hypothesized.** Investigated one concretely: "Who gave Maria's
+   family money during tough times?" (gold: her aunt) came back "No
+   information available" in the new run. Exporting the scope's full
+   memory shows the fact is correctly extracted and grounded in **three
+   separate summaries** — all near-duplicate restatements of the same
+   fact ("Maria was inspired to volunteer by her aunt, who helped her
+   family when they were struggling"). None made it into the assembled
+   context. Initial hypothesis was MMR's redundancy penalty trading away
+   all three near-duplicates — **wrong, or at least imprecise**: added a
+   real diagnostic (`HUPI_DEBUG_FUSION`, `64c713d`) that prints every
+   candidate's vector rank, keyword rank, and fused score, and re-ran
+   this exact query. The best "aunt" summary had fused score 0.1667
+   (vector rank 5, **no keyword-match support at all**) — well below the
+   ~0.25-0.34 cutoff, based purely on RRF-fusion ranking, before MMR's
+   diversity logic ever got a chance to matter for it. MMR *did* make
+   one real substitution in this same candidate pool (excluding a weekly
+   rollup in favor of a lower-fused-score daily summary, correctly
+   judging the rollup redundant with an already-picked summary) — but
+   that swap is unrelated to the aunt-summary's exclusion.
+
+   The real mechanism is more precise: **RRF's additive fusion
+   structurally favors a candidate found by both signals, even weakly in
+   each, over one found strongly by only one signal** — `reciprocalRank(11) + reciprocalRank(0) = 0.577`
+   comfortably beats `reciprocalRank(4) + 0 = 0.167`, regardless of how
+   solid that single vector match actually was. A quick back-of-envelope
+   check (substituting a max-based combination instead of pure sum)
+   still didn't flip this specific case — the competing candidates' own
+   individual signals were also genuinely strong, not just double-
+   counted — suggesting this isn't a clean, one-line-fix bug so much as
+   an inherent property of any additive rank-fusion scheme: reasonable
+   people can disagree on whether "found twice, weakly" should beat
+   "found once, solidly," and no formula gets this right for every case.
 
 **Net read**: steps 3/4/6 are real, working improvements — they clearly
 helped single-hop and abstention — but they introduced a genuine,
-non-hypothetical cost for multi-hop specifically, via both an answer-
-verbosity side effect and MMR's redundancy penalty occasionally over-
-penalizing a fact that's only ever restated, never uniquely stated. Not
+non-hypothetical cost for multi-hop specifically, via an answer-
+verbosity side effect (clearly fixable, see below) and a structural
+property of additive RRF fusion that sometimes ranks a solid
+single-signal match below several weaker dual-signal ones (a real
+tradeoff of the fusion design, not a bug, and not obviously fixable
+without its own new tradeoffs). Not
 silently accepted as a win; see "Is this fixable?" below.
+
+### Is this fixable?
+
+**The verbosity cause: yes, fixed and verified (`fda0a3f`).** Added one
+targeted paragraph to `qaConcisenessPrompt` (both copies, per this
+repo's own "small tools duplicate rather than cross-import"
+convention): for a list or yes/no answer, give only the items or the
+verdict, not supporting context for each one, even when that detail is
+available. Deliberately additive — doesn't touch the existing "include
+every specific detail the question asks for" instruction, which guards
+against a real, separate, already-fixed truncation problem from earlier
+in this benchmarking effort's own history.
+
+Verified against real infra, not just reasoning: reused the already-
+consolidated `conv-26`/`conv-30`/`conv-41` scopes from the full
+re-verification (`-answer-only`, real GPT-4.1, real LoCoMo scoring),
+re-answered the same 74 multi-hop questions that showed the regression.
+
+| | Accuracy (these 74 questions) |
+|---|---|
+| Original baseline (before steps 1/3-6) | 38.5% |
+| After steps 1/3-6, before this fix (the regression) | 31.7% |
+| **With this fix** | **45.9%** |
+
+Not just a recovery — this beats the original baseline by a real
+margin, confirming steps 3/4/6's retrieval improvements were genuinely
+valuable all along; the verbosity side effect was masking them, not
+canceling them out. Since `qaConcisenessPrompt` is shared across every
+category (not multi-hop-specific), this plausibly helps single-hop,
+temporal, and open-domain too, not just multi-hop — unconfirmed at full
+scale until the next full re-run.
+
+**The RRF dual-signal-bias cause: investigated, not cleanly fixable.**
+A max-based fusion formula (`max(vectorRRF, keywordRRF)` with a bonus
+for dual-signal agreement, instead of a plain sum) was worked through
+by hand against the real numbers from the `HUPI_DEBUG_FUSION` trace: it
+still wouldn't have surfaced the aunt-summary in this specific case,
+because the candidates that beat it don't just win *by* being
+dual-signal — their individual best signal (e.g. a genuine top-1
+keyword match) is independently strong enough to win either way. This
+isn't a bug to patch so much as an inherent property of any rank-fusion
+scheme: reasonable systems can disagree on whether "found twice,
+weakly" should outrank "found once, solidly," and different real
+queries will want different answers to that question. Not pursued
+further this pass — flagged as a real, open design question for
+`fusedSearchSummaries` if it recurs as a measurable cost at full
+benchmark scale, not something to speculatively "fix" against one
+hand-traced example.
 
 ### LongMemEval result
 
