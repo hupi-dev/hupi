@@ -16,7 +16,9 @@ import (
 // strings — so a plausible-looking but unsupported self-citation can't
 // talk its way past the check. See MEMORY_FORMAT.md § Grounding &
 // correction.
-const groundingSystemPrompt = `You are a fact-checker. You will be given source text and a numbered list of claimed facts. For each fact, in order, decide whether the source text actually, specifically supports it — not just plausible, not just related, but stated. Respond with exactly one JSON object, nothing else: {"grounded": [true, false, ...]} — one boolean per fact, same order and count as given.`
+const groundingSystemPrompt = `You are a fact-checker. You will be given source text and a numbered list of claimed facts. For each fact, in order, decide whether the source text actually, specifically supports it — not just plausible, not just related, but stated. Respond with exactly one JSON object, nothing else: {"grounded": [true, false, ...]} — one boolean per fact, same order and count as given.
+
+A source's own labeled date ("(date: YYYY-MM-DD)" after its id, when present) is part of what it states. If a fact gives an absolute date (e.g. "2023-05-07") that is the correct resolution of a relative reference in that labeled source ("yesterday", "last week", etc. relative to that source's own date), treat the date as grounded — the source is stating that day, just not spelling out the calendar date itself. Only mark it ungrounded if the resolution is wrong (the arithmetic doesn't match the source's own date) or the source has no date label to resolve against at all.`
 
 func buildGroundingPrompt(sourceText string, facts []KeyFactOutput) string {
 	var sb strings.Builder

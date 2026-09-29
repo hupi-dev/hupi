@@ -6,9 +6,21 @@ import "encoding/json"
 // USER/ASSISTANT transcript for a daily rollup, or a lower-level summary's
 // text for a weekly/monthly/yearly rollup. Both cases feed the same
 // generateSummary/groundingCheck machinery.
+//
+// date is "YYYY-MM-DD" (empty when not known/applicable — rollup
+// sources, a plain lower-level summary, don't set it) — the episode's
+// own real ts, given to the consolidation model specifically so it can
+// resolve a source's relative date phrasing ("yesterday", "last week")
+// against something concrete instead of leaving it unresolved in the
+// stored summary. docs/BENCHMARK_IMPROVEMENT_PLAN.md step 5: the
+// query-time qaConcisenessPrompt fix (docs/BENCHMARKS.md §3) already
+// tells the answer model to always respond with absolute dates, but
+// that can't recover information a summary never resolved to begin
+// with — this is the consolidation-time half of that same problem.
 type textSource struct {
 	id   string
 	text string
+	date string
 }
 
 // KeyFactOutput is what the consolidation LLM is asked to produce per
