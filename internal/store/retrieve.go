@@ -791,6 +791,25 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	}
 	picked := mmrSelect(pool, maxVectorResults(), mmrLambda())
 
+	// HUPI_DEBUG_FUSION is a real, permanent diagnostic escape hatch, not
+	// throwaway debug code -- added while investigating a real multi-hop
+	// regression (docs/BENCHMARK_IMPROVEMENT_PLAN.md, full-scale
+	// re-verification section) precisely because there was previously no
+	// way to see each candidate's own vector/keyword rank and fused
+	// score, only the final assembled context. Off by default, zero
+	// cost when unset, same pattern as every other env-var override in
+	// this file.
+	if os.Getenv("HUPI_DEBUG_FUSION") != "" {
+		pickedSet := make(map[int]bool, len(picked))
+		for _, idx := range picked {
+			pickedSet[idx] = true
+		}
+		for i, id := range ids {
+			fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d fused=%.4f picked=%v\n",
+				id, byID[id].vectorRank, byID[id].keywordRank, pool[i].relevance, pickedSet[i])
+		}
+	}
+
 	var refs []identity.Ref
 	for _, idx := range picked {
 		c := byID[ids[idx]]
