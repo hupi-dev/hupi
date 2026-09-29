@@ -107,21 +107,44 @@ pre-existing list with this session's EvalMem findings:
    where there's nothing to select from, not just that it does something
    when there is.
 
-4. **Fuse vector + BM25 keyword + graph-walk into one ranked candidate
-   list, instead of three independently-run searches concatenated.**
-   New finding: each mechanism currently contributes its own candidates
-   somewhat independently (see `retrieve.go`'s `vectorSearchSummaries`
-   vs. `keywordSearchSummaries` vs. `graphWalkRelationships`, each
-   writing directly to the same `strings.Builder`). A single fused rank
-   (e.g. reciprocal rank fusion across the three signals, or a weighted
-   linear combination) before truncating to the char budget should
-   produce a higher-precision top-N within the same budget — directly
-   targeting the retrieval-defect dominance (`RF`/`NOI`) seen in every
-   EvalMem run this session. Bigger, more architectural change than #3 —
-   sequenced after it since #3's de-duplication logic and #4's fusion
-   logic will likely share the same "candidate pool before truncation"
-   refactor point in `retrieve.go`; doing #3 first establishes that
-   refactor with a smaller, easier-to-verify change.
+4. ✅ **Fuse vector + BM25 keyword into one ranked candidate list for
+   summaries** (`6e8fa66`), building on step 3's refactor point exactly
+   as anticipated. Scoped to summaries only for this pass, not
+   entities/episodes/graph-walk — episodes/entities stay two
+   independently-run searches for now (episodes are a supplementary
+   path, not the primary retrieval surface summaries are; see the commit
+   for the full reasoning). `fusedSearchSummaries` replaces
+   `vectorSearchSummaries`/`keywordSearchSummaries` running as two
+   independent searches (one gets first pick of slots, the other only
+   adds leftovers) with Reciprocal Rank Fusion — a summary found by
+   *both* mechanisms, even at a modest rank in each, now outranks one
+   found strongly by only one — with `mmrSelect` (step 3) applying on top
+   of the fused score, so redundancy is penalized regardless of which
+   mechanism found a candidate.
+
+   Used `k=1` for RRF's smoothing constant, not the literature's usual
+   `k=60` — that value was tuned for TREC-scale rankings of hundreds of
+   results; at this candidate pool's much smaller scale (a few dozen at
+   most) `k=60` would flatten every candidate to nearly the same fused
+   score, defeating the point of fusing rankings at all.
+
+   Added a real, deliberate observability label (`", vector+keyword
+   match"`, distinct from vector-only/keyword-only), the same reasoning
+   as the graph-walk match marker — otherwise dual-signal agreement is
+   indistinguishable from a single signal's own confidence.
+
+   Verified thoroughly: unit tests for the fusion math in isolation;
+   updated the one existing test whose assertion the new label
+   intentionally changed (`TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms`,
+   was `TestRetrieve_KeywordSearchSkipsWhatVectorSearchAlreadyFound`);
+   ran the **full internal/store test suite against a real Postgres
+   instance** (`HUPI_TEST_DATABASE_URL`) — every pre-existing retrieval
+   test still passes (graph walk, key facts, corrected-summary, entity
+   substring match, keyword-without-phrase), confirming no regression
+   elsewhere in the retrieval pipeline; and a real end-to-end check
+   against the already-consolidated `conv-26` scope, where a real
+   LGBTQ-community query correctly labeled all 5 selected summaries as
+   found by both mechanisms.
 
 5. **Resolve relative dates into absolute ones at consolidation time,
    not just via the query-time prompt.** New finding: the existing
