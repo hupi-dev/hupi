@@ -276,9 +276,15 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	queryTerms := tokenize(query)
 
 	err = dbscope.Run(ctx, s.db, workspace, workspace, func(tx *sql.Tx) error {
-		summaryRefs, err := s.vectorSearchSummaries(ctx, tx, workspace, queryVector, &sb, &strongHit)
+		// Summaries fuse their vector and keyword rankings into one MMR
+		// selection (docs/BENCHMARK_IMPROVEMENT_PLAN.md step 4) — unlike
+		// episodes/entities below, which stay two independently-run
+		// searches (vector picks first, keyword only adds what's left
+		// over) for now. See fusedSearchSummaries' own doc comment for
+		// why summaries specifically.
+		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit)
 		if err != nil {
-			return fmt.Errorf("vector search summaries: %w", err)
+			return fmt.Errorf("fused search summaries: %w", err)
 		}
 		refs = append(refs, summaryRefs...)
 
@@ -295,22 +301,11 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		refs = append(refs, entityRefs...)
 
 		// Keyword (BM25) search runs after its vector counterpart, over
-		// the same two content types, excluding whatever vector search
-		// already surfaced — the same "second chance, skip duplicates"
-		// shape vectorSearchEntities already uses for stage 1's own
-		// matches. See keywordSearchSummaries' doc comment for why this
-		// isn't a symmetric rank-fusion of two independently-run
-		// searches: BM25 over encrypted text has no index to search with,
-		// so it already decrypts and scores the whole scope's corpus by
-		// the time it has an answer, unlike vector search's cheap,
-		// index-accelerated top-K.
+		// episodes/entities, excluding whatever vector search already
+		// surfaced — the same "second chance, skip duplicates" shape
+		// vectorSearchEntities already uses for stage 1's own matches.
+		// Summaries are handled above instead, by fusedSearchSummaries.
 		if len(queryTerms) > 0 && keywordSearchEnabled() {
-			summaryKeywordRefs, err := s.keywordSearchSummaries(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindSummary), &sb, &strongHit)
-			if err != nil {
-				return fmt.Errorf("keyword search summaries: %w", err)
-			}
-			refs = append(refs, summaryKeywordRefs...)
-
 			episodeKeywordRefs, err := s.keywordSearchEpisodes(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEpisode), &sb, &strongHit)
 			if err != nil {
 				return fmt.Errorf("keyword search episodes: %w", err)
@@ -551,14 +546,98 @@ func (s *Store) formatEntity(ctx context.Context, q dbscope.Querier, scope ident
 // and silently excluded every corrected one, discovered by actually
 // running a correction end-to-end and watching the model answer with
 // the stale, "corrected-away" fact instead of the fix.
-func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
-	// Overfetches (summaryOverfetchFactor) beyond maxVectorResults() so
-	// mmrSelect below has real candidates to choose *from* -- see that
-	// constant's own doc comment for why (real finding: raising
-	// maxVectorResults alone was neutral, since a two-speaker
-	// conversation's summaries mostly repeat the same well-covered
-	// facts).
-	rows, err := q.QueryContext(ctx, `
+// rrfK is Reciprocal Rank Fusion's smoothing constant. The original RRF
+// literature's usual k=60 was tuned for TREC-scale rankings (hundreds of
+// results) — at that scale a document's exact rank barely moves its
+// score, which is the point (robustness to any one ranker's noise). This
+// candidate pool never exceeds maxVectorResults()*summaryOverfetchFactor
+// (a few dozen at most); k=60 would flatten a #1-ranked candidate and a
+// #20-ranked one to nearly the same fused score, defeating the purpose
+// of fusing rankings at all. k=1 preserves meaningful separation between
+// ranks at this much smaller scale.
+const rrfK = 1.0
+
+func reciprocalRank(rank int) float64 {
+	return 1.0 / (rrfK + float64(rank+1))
+}
+
+// fusedSearchSummaries replaces running vectorSearchSummaries and
+// keywordSearchSummaries as two independent searches — one gets first
+// pick of maxVectorResults() slots, the other only adds whatever wasn't
+// already claimed — with a single fused ranking
+// (docs/BENCHMARK_IMPROVEMENT_PLAN.md step 4): both mechanisms' own
+// rankings feed into one Reciprocal Rank Fusion score per candidate, so
+// a summary found by *both* (even at a modest rank in each) outranks one
+// found strongly by only one — real, checkable evidence from two
+// independent signals agreeing beats a single signal's own confidence.
+// The same MMR diversity selection from step 3 (mmrSelect) applies on
+// top of the fused score, not on raw vector similarity alone, so
+// redundant summaries are penalized regardless of which mechanism found
+// them.
+//
+// The keyword half still pays BM25's real, deliberate cost: BM25 over
+// application-encrypted text (ARCHITECTURE.md § Storage security) has no
+// index to search with, since Postgres's own full-text search machinery
+// can't see through ciphertext, so it decrypts and scores every matching
+// summary in scope on every call — fine at personal/team-history scale,
+// genuinely bad if a scope's corpus ever grew past what a single query
+// should fully decrypt. Not restricted to "embedding is not null" the
+// way vector search is: a summary missing an embedding (an
+// embedding-provider failure at creation time, say) shouldn't also be
+// invisible to keyword search — a genuine, small coverage improvement
+// vector search alone can't offer.
+//
+// bm25Score's own score cutoff (kept as "> 0", not a calibrated positive
+// value) is measured, not guessed — the same way vectorSimilarityThreshold
+// and friends were (a constructed set of real true-positive/near-miss/
+// true-negative query-document pairs, scored with this package's actual
+// bm25Score, not hand-estimated), against an 18-document corpus mixing
+// several genuinely distinct topics:
+//
+//	11.10  true positive  — exact rare-term match, direct question
+//	 6.91  true positive  — exact rare-term match, different phrasing
+//	 5.29  true positive  — exact rare-term match, different topic
+//	 5.19  near-miss      — same rare term, but the wrong specific
+//	                        document (query asks about the job queue,
+//	                        this document is about migrating a
+//	                        different service to use it)
+//	 3.39  true positive
+//	 3.11  true positive
+//	 2.55  near-miss      — a shared moderately-common word ("favorite"),
+//	                        wrong topic entirely
+//	 1.80  true positive
+//	 1.29  near-miss      — query uses "async runtime", document says
+//	                        "tokio" — BM25 can't bridge that gap (no
+//	                        notion that the words are related), the one
+//	                        remaining shared token is a rare name
+//	 0.00  every true negative, with zero exceptions
+//
+// True positives and near-misses interleave throughout the positive
+// range — the same finding vectorSimilarityThreshold's own comment
+// documents for its metric, for the same underlying reason: a document
+// sharing one real, rare token with the query scores comparably whether
+// it's actually what's being asked about or just adjacent to it. The one
+// real, clean gap in this entire measurement is between 0 and any
+// positive score — every true negative landed at exactly 0, with no
+// exceptions — which is exactly the cutoff already implemented. RRF's
+// own rank-based fusion (this function, above) is what now actually
+// separates a true positive from a same-topic near-miss in practice, on
+// top of that cutoff. Re-measure if the tokenizer's stopword list or the
+// BM25 k1/b constants ever change.
+func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+	type candidate struct {
+		id          string
+		text        string
+		enc         *crypto.Encryptor
+		vectorRank  int // -1 if not found by vector search
+		keywordRank int // -1 if not found by keyword search
+	}
+	byID := make(map[string]*candidate)
+
+	// Vector search: same overfetch + threshold vectorSearchSummaries
+	// used before this refactor — see summaryOverfetchFactor's own doc
+	// comment for why overfetching matters.
+	vecRows, err := q.QueryContext(ctx, `
 		select id, summary, key_version, (embedding <=> $1::vector) as distance
 		from summaries s
 		where embedding is not null
@@ -570,26 +649,14 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 	if err != nil {
 		return nil, err
 	}
-	// Collected into a slice and the outer cursor drained/closed before
-	// any follow-up query (appendKeyFacts) runs below — q is often a
-	// single-connection *sql.Tx (dbscope.Run's scoped transaction), which
-	// can't have a second query in flight while this one's Rows is still
-	// open. Interleaving them (issuing appendKeyFacts inside this loop)
-	// produced a real "driver: bad connection" failure caught by this
-	// package's own existing tests, not just a theoretical concern.
-	type hit struct {
-		id         string
-		text       string
-		enc        *crypto.Encryptor
-		similarity float64
-	}
-	var hits []hit
-	for rows.Next() {
+	vecRank := 0
+	for vecRows.Next() {
 		var id string
 		var summaryCT []byte
 		var keyVersion int
 		var distance float64
-		if err := rows.Scan(&id, &summaryCT, &keyVersion, &distance); err != nil {
+		if err := vecRows.Scan(&id, &summaryCT, &keyVersion, &distance); err != nil {
+			vecRows.Close()
 			return nil, err
 		}
 		// Cosine distance -> similarity for a normalized embedding space;
@@ -600,43 +667,152 @@ func (s *Store) vectorSearchSummaries(ctx context.Context, q dbscope.Querier, sc
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
 		if err != nil {
+			vecRows.Close()
 			return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
 		}
 		text, err := enc.Decrypt(summaryCT)
 		if err != nil {
+			vecRows.Close()
 			return nil, err
 		}
-		hits = append(hits, hit{id: id, text: text, enc: enc, similarity: similarity})
+		byID[id] = &candidate{id: id, text: text, enc: enc, vectorRank: vecRank, keywordRank: -1}
+		vecRank++
 	}
-	if err := rows.Err(); err != nil {
+	if err := vecRows.Err(); err != nil {
+		vecRows.Close()
 		return nil, err
 	}
-	rows.Close()
+	// Fully drained and closed before the keyword query below opens a
+	// second cursor on the same connection — q is often a
+	// single-connection *sql.Tx; see the "driver: bad connection" note
+	// this package's own existing tests already caught on this exact
+	// gotcha.
+	vecRows.Close()
 
-	// MMR selection: pick maxVectorResults() of the (up to
-	// summaryOverfetchFactor*maxVectorResults()) real threshold-clearing
-	// hits above, balancing each one's own query-relevance against
-	// redundancy with whatever's already chosen — see mmrSelect's own
-	// doc comment. A no-op (falls straight through to selecting
-	// everything, in similarity order) whenever overfetching didn't
-	// actually turn up more than the cap.
-	pool := make([]mmrCandidate, len(hits))
-	for i, h := range hits {
-		pool[i] = mmrCandidate{relevance: h.similarity, tokens: tokenSet(h.text)}
+	if keywordSearchEnabled() && len(queryTerms) > 0 {
+		kwRows, err := q.QueryContext(ctx, `
+			select id, summary, key_version
+			from summaries s
+			where summary is not null
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+			  and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner)
+		if err != nil {
+			return nil, err
+		}
+		var docs []bm25Document
+		kwText := make(map[string]string)
+		kwEnc := make(map[string]*crypto.Encryptor)
+		for kwRows.Next() {
+			var id string
+			var summaryCT []byte
+			var keyVersion int
+			if err := kwRows.Scan(&id, &summaryCT, &keyVersion); err != nil {
+				kwRows.Close()
+				return nil, err
+			}
+			// Already decrypted by the vector pass above — reuse it
+			// rather than paying for a second decrypt of the same
+			// ciphertext.
+			if c, ok := byID[id]; ok {
+				docs = append(docs, newBM25Document(id, c.text))
+				continue
+			}
+			enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+			if err != nil {
+				kwRows.Close()
+				return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
+			}
+			text, err := enc.Decrypt(summaryCT)
+			if err != nil {
+				kwRows.Close()
+				return nil, err
+			}
+			kwText[id] = text
+			kwEnc[id] = enc
+			docs = append(docs, newBM25Document(id, text))
+		}
+		if err := kwRows.Err(); err != nil {
+			kwRows.Close()
+			return nil, err
+		}
+		kwRows.Close()
+
+		docFreq := bm25DocFrequency(docs)
+		avgDocLen := bm25AverageDocLength(docs)
+		type scored struct {
+			id    string
+			score float64
+		}
+		var matches []scored
+		for _, doc := range docs {
+			if score := bm25Score(doc, queryTerms, docFreq, len(docs), avgDocLen); score > 0 {
+				matches = append(matches, scored{id: doc.id, score: score})
+			}
+		}
+		sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+		kwCap := maxVectorResults() * summaryOverfetchFactor
+		if len(matches) > kwCap {
+			matches = matches[:kwCap]
+		}
+		for rank, m := range matches {
+			if c, ok := byID[m.id]; ok {
+				c.keywordRank = rank
+				continue
+			}
+			byID[m.id] = &candidate{id: m.id, text: kwText[m.id], enc: kwEnc[m.id], vectorRank: -1, keywordRank: rank}
+		}
+	}
+
+	if len(byID) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	// Deterministic order before mmrSelect's own greedy tie-breaking —
+	// map iteration order is randomized in Go, and a tie shouldn't
+	// depend on that.
+	sort.Strings(ids)
+
+	pool := make([]mmrCandidate, len(ids))
+	for i, id := range ids {
+		c := byID[id]
+		var fused float64
+		if c.vectorRank >= 0 {
+			fused += reciprocalRank(c.vectorRank)
+		}
+		if c.keywordRank >= 0 {
+			fused += reciprocalRank(c.keywordRank)
+		}
+		pool[i] = mmrCandidate{relevance: fused, tokens: tokenSet(c.text)}
 	}
 	picked := mmrSelect(pool, maxVectorResults(), mmrLambda())
 
 	var refs []identity.Ref
 	for _, idx := range picked {
-		h := hits[idx]
-		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s): %s", h.id, h.text))
-		if err := appendKeyFacts(ctx, q, h.id, h.enc, sb); err != nil {
+		c := byID[ids[idx]]
+		// Real, deliberate observability, same reasoning as the
+		// graph-walk match marker: a candidate two independent signals
+		// agree on is worth being able to tell apart from one only a
+		// single signal found.
+		label := ""
+		switch {
+		case c.vectorRank >= 0 && c.keywordRank >= 0:
+			label = ", vector+keyword match"
+		case c.keywordRank >= 0:
+			label = ", keyword match"
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s): %s", c.id, label, c.text))
+		if err := appendKeyFacts(ctx, q, c.id, c.enc, sb); err != nil {
 			return nil, err
 		}
-		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: h.id})
+		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: c.id})
 		*strongHit = true
 	}
-	return refs, rows.Err()
+	return refs, nil
 }
 
 // appendKeyFacts writes a summary's grounded key_facts (see
@@ -1115,132 +1291,13 @@ func refIDsOfKind(refs []identity.Ref, kind string) []string {
 	return ids
 }
 
-// keywordSearchSummaries is vectorSearchSummaries' BM25 counterpart —
-// catches exact-term matches (a specific name, ID, or acronym) a dense
-// embedding can miss or dilute, at a cost this function pays
-// deliberately: BM25 over application-encrypted text (ARCHITECTURE.md §
-// Storage security) has no index to search with, since Postgres's own
-// full-text search machinery can't see through ciphertext. So this
-// decrypts and scores every matching summary in scope on every call —
-// fine at personal/team-history scale (the same trade-off
-// stage1EntityMatches already makes fetching a whole entity table per
-// request), genuinely bad if a scope's corpus ever grew past what a
-// single query should fully decrypt.
-//
-// Deliberately not a symmetric rank-fusion (e.g. reciprocal rank fusion)
-// with vectorSearchSummaries: since this already decrypts the whole
-// corpus to score it, there's no cost saved by deferring to a later
-// fusion step, so it simply runs after its vector counterpart and skips
-// whatever excludeIDs already found — the same shape vectorSearchEntities
-// already uses for stage 1's own matches.
-//
-// Not restricted to "embedding is not null" the way keywordSearchEpisodes
-// mirrors vectorSearchEpisodes' restriction: BM25 doesn't need an
-// embedding to exist at all, and a summary missing one (an embedding-
-// provider failure at creation time, say) shouldn't also be invisible to
-// keyword search — this is a genuine, small coverage improvement over
-// what vector search alone can offer for summaries specifically.
-//
-// Score cutoff is "> 0", not a calibrated positive value — measured
-// deliberately, the same way vectorSimilarityThreshold and friends were
-// (a constructed set of real true-positive/near-miss/true-negative
-// query-document pairs, scored with this package's actual bm25Score,
-// not hand-estimated), against an 18-document corpus mixing several
-// genuinely distinct topics:
-//
-//	11.10  true positive  — exact rare-term match, direct question
-//	 6.91  true positive  — exact rare-term match, different phrasing
-//	 5.29  true positive  — exact rare-term match, different topic
-//	 5.19  near-miss      — same rare term, but the wrong specific
-//	                        document (query asks about the job queue,
-//	                        this document is about migrating a
-//	                        different service to use it)
-//	 3.39  true positive
-//	 3.11  true positive
-//	 2.55  near-miss      — a shared moderately-common word ("favorite"),
-//	                        wrong topic entirely
-//	 1.80  true positive
-//	 1.29  near-miss      — query uses "async runtime", document says
-//	                        "tokio" — BM25 can't bridge that gap (no
-//	                        notion that the words are related), the one
-//	                        remaining shared token is a rare name
-//	 0.00  every true negative, with zero exceptions
-//
-// True positives and near-misses interleave throughout the positive
-// range — the same finding vectorSimilarityThreshold's own comment
-// documents for its metric, for the same underlying reason: a document
-// sharing one real, rare token with the query scores comparably whether
-// it's actually what's being asked about or just adjacent to it. No
-// positive cutoff value cleanly separates the two categories; raising
-// the threshold to exclude the 1.29 near-miss would also exclude the
-// 1.80 true positive sitting right above it, while still admitting the
-// 2.55 and 5.19 near-misses further up. The one real, clean gap in this
-// entire measurement is between 0 and any positive score — every true
-// negative landed at exactly 0, with no exceptions — which is exactly
-// the cutoff already implemented. Ranking by score and capping at
-// maxVectorResults (both already implemented in rankBM25) is what
-// actually separates a true positive from a same-topic near-miss in
-// practice: both get included when there's room, but the true positive
-// ranks first. Re-measure if the tokenizer's stopword list or the BM25
-// k1/b constants ever change.
-func (s *Store) keywordSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
-	rows, err := q.QueryContext(ctx, `
-		select id, summary, key_version
-		from summaries s
-		where summary is not null
-		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
-		  and not (id = any($1::text[]))
-		  and scope_kind = $2 and scope_owner = $3
-	`, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	textByID := make(map[string]string)
-	encByID := make(map[string]*crypto.Encryptor)
-	var docs []bm25Document
-	for rows.Next() {
-		var id string
-		var summaryCT []byte
-		var keyVersion int
-		if err := rows.Scan(&id, &summaryCT, &keyVersion); err != nil {
-			return nil, err
-		}
-		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
-		if err != nil {
-			return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
-		}
-		text, err := enc.Decrypt(summaryCT)
-		if err != nil {
-			return nil, err
-		}
-		textByID[id] = text
-		encByID[id] = enc
-		docs = append(docs, newBM25Document(id, text))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	matches := rankBM25(docs, queryTerms)
-
-	var refs []identity.Ref
-	for _, m := range matches {
-		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s, keyword match): %s", m, textByID[m]))
-		if err := appendKeyFacts(ctx, q, m, encByID[m], sb); err != nil {
-			return nil, err
-		}
-		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: m})
-		*strongHit = true
-	}
-	return refs, nil
-}
-
-// keywordSearchEpisodes is keywordSearchSummaries' sibling over
-// `episodes` — see that function's doc comment for the shared design
-// (why this decrypts the whole matching set rather than using an index,
-// why it isn't a rank-fusion with vectorSearchEpisodes).
+// keywordSearchEpisodes shares fusedSearchSummaries' keyword half's
+// design (see that function's doc comment): why this decrypts the whole
+// matching set rather than using an index. Unlike summaries, this one
+// isn't fused with vectorSearchEpisodes — episodes are a supplementary
+// path (see vectorSearchEpisodes' own doc comment), not the primary
+// retrieval surface summaries are, so the smaller, independent-searches
+// shape hasn't been worth revisiting yet.
 //
 // Deliberately NOT restricted to "embedding is not null" the way
 // vectorSearchEpisodes is: that restriction exists there because a
