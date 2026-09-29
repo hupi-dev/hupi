@@ -25,19 +25,29 @@ pre-existing list with this session's EvalMem findings:
 
 ## Sequenced steps
 
-1. **A `single-session-preference`-aware answer prompt (LongMemEval).**
-   Already flagged in `docs/BENCHMARKS.md` §7/§8, not newly discovered —
-   the highest-confidence item here because the root cause is fully
-   understood already: that category's `answer` field is a
-   personalized-recommendation *rubric*, not a fact to recall, and
-   `qaConcisenessPrompt` was tuned entirely against terse-factual
-   answers (close to the opposite style a rubric-satisfying
-   recommendation needs). Scoped fix: detect the question shape (or use
-   LongMemEval's own category label, already available to the harness)
-   and switch to a different answer-style instruction for that category
-   specifically. Cheapest real step here — testable on just the 8
-   `single-session-preference` instances already in the existing
-   48-instance sample, no new data or full re-run needed.
+1. ✅ **A `single-session-preference`-aware answer prompt (LongMemEval).**
+   Done, `d7fe2af`. Added `preferenceAnswerPrompt` + `answerPromptFor(qa)`,
+   selected by LongMemEval's own `question_type` (falls back to
+   `qaConcisenessPrompt` everywhere else, including LoCoMo). Applied to
+   both `answerQuestions` and `runBaselineConversation` so the no-memory
+   baseline still isolates "does memory help."
+
+   Verified against real infra, not just reasoning: reused the exact 8
+   `single-session-preference` scopes already consolidated by the
+   original 48-instance run (found via `cmd/hupi-bench`'s own
+   deterministic scope naming, split across the two real Postgres
+   instances that run used), re-answered with `-answer-only` (no
+   re-consolidation needed), scored with LongMemEval's own unmodified
+   `evaluate_qa.py` + real GPT-4o judge — same instances, same scoring
+   code as the original 0% result.
+
+   **Result: 0% (0/8) → 37.5% (3/8)**, real and judge-verified. Honest
+   mixed picture, not a full fix: the 5 remaining failures are a
+   different problem now — at least one (the AI/healthcare publications
+   question) is a genuine retrieval miss (the answer explicitly says no
+   relevant preference was found), not an answer-style issue anymore —
+   pointing at steps 3/4 below (diversity-aware assembly, signal fusion)
+   rather than further prompt tuning to close the rest of the gap.
 
 2. **Resolve the graph-walk question — fix or deliberately stop
    relying on it.** Two independent measurements now agree it isn't
