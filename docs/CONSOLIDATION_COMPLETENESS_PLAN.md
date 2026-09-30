@@ -1114,20 +1114,48 @@ better-understood.
   hint (`HUPI_DEBUG_AGGREGATION` confirms extraction found real dated
   charity facts, but none within the plausibility cap), and the model
   answered exactly as honestly as before — no regression, no
-  misleading hint. Tracing *why* no valid pair surfaced led to a further
-  real finding: direct inspection of the raw haystack sessions shows the
-  actual, genuine consecutive-day pair the question refers to really
-  does exist in the source conversation — a "24-Hour Bike Ride" charity
-  event on 2023-02-14 and a "Ride to Cure Cancer" charity bike ride on
-  2023-02-15 — but neither fact survived into any summary the current
-  retrieval layer can reach. Manually computing the intended answer from
-  this real pair (Feb 15 to the question's real 2023-04-18 date is 62
-  days ≈ 2 months) **exactly matches the gold answer ("2")** — confirming
-  the reasoning pass's own arithmetic is correct and would resolve this
-  exact case if the right two facts were retrievable. This is Gap 1
-  (single-day dilution) territory, not Gap 4 — a separate, real,
-  not-yet-investigated retrieval-completeness question, left open rather
-  than folded into this pass.
+  misleading hint. Tracing *why* no valid pair surfaced led to the
+  actual root cause, investigated and closed in the same pass:
+
+  **Root cause: stale data, not a live gap.** Direct inspection of the
+  raw haystack sessions confirmed the genuine consecutive-day pair the
+  question refers to really exists in the source conversation — a
+  "24-Hour Bike Ride" charity event on 2023-02-14 and a "Ride to Cure
+  Cancer" charity bike ride on 2023-02-15 — but neither fact survived
+  into any summary this scope's retrieval could reach. The actual log
+  from the overnight benchmark run that originally consolidated this
+  scope showed **zero** "clustering busy day" events across all 48
+  conversations, even though this exact day had 10 source episodes —
+  above `clusterEpisodeThreshold` (8) and enough to trigger Phase B's
+  topic-clustered consolidation and per-episode extraction, both already
+  implemented and merged. The run's own timestamps (started 2026-09-29
+  11:44, finished 02:56 the next morning) predate today's Phase B/PR #11
+  merge (08:17:58) entirely — this scope was simply never reprocessed
+  with the code that already fixes exactly this dilution pattern, not a
+  new, undiscovered gap.
+
+  **Fixed by re-consolidating, not by writing new code.** Re-ran
+  `hupi-consolidate -date 2023-02-14` (4 real scopes shared this date,
+  a small, bounded cost) using the current `main` binary: clustering
+  correctly fired (`sources=10 clusters=6`), and the 2023-02-14 summary
+  now contains the "24-Hour Bike Ride" fact, grounded. Manually computing
+  the intended answer from the real, now-retrievable pair (Feb 15 to the
+  question's real 2023-04-18 date is 62 days ≈ 2 months) **exactly
+  matches the gold answer ("2")**.
+
+  **Real end-to-end re-verification, 5 runs**: with both facts now
+  retrievable, the full pipeline (retrieval → aggregation pass →
+  answer) correctly produced **"2 months"**, matching gold exactly, in
+  3 of 5 real attempts — the other 2 had the extraction step miss one of
+  the two needed facts (real, expected non-determinism in a single
+  best-effort LLM call, the same failure mode every other narrow
+  extraction pass in this document already has) and safely abstained
+  rather than answering wrong. Real-verified that the same exhaustiveness
+  wording that fixed per-episode extraction's own identical recall gap
+  earlier in this document improves this one too: 1 of 3 runs succeeded
+  with the original extraction prompt, 3 of 5 with an added "be
+  exhaustive, don't stop at one or two" instruction — kept as a real,
+  measured improvement, not a guess.
 - **Gap 4 mechanism 2 — semantic-bridging sub-case, still fully open.**
   The Phase E adversarial case, retrieval-clean end to end (see above),
   needs the model to bridge a literal phrase ("AI conference") to a
