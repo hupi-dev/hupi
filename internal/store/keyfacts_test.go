@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -97,11 +98,15 @@ func TestSummaryCitationSnippetIsProseOnlyWithoutAClearWinner(t *testing.T) {
 // docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 1 exists for:
 // whatever guaranteedFact returns is protected from summaryDepthCap's
 // truncation, so it must be the single most useful thing to keep, not
-// just the first fact in insertion order.
+// just the first fact in insertion order. Uses more facts than
+// guaranteedFactMaxCount specifically so this exercises the "pick one"
+// ranking path, not the "guarantee everything" small-set path below.
 func TestGuaranteedFactPrefersMostRelevant(t *testing.T) {
 	facts := []string{
 		"Melanie enjoys painting landscapes in her free time.",
 		"Melanie has camped at the beach, in the mountains, and in the forest.",
+		"Melanie likes hiking on weekends.",
+		"Melanie collects vintage postcards.",
 	}
 	queryTerms := []string{"where", "has", "melanie", "camped"}
 	got := guaranteedFact("Melanie's hobbies and travels.", facts, queryTerms)
@@ -114,11 +119,62 @@ func TestGuaranteedFactPrefersMostRelevant(t *testing.T) {
 // TestGuaranteedFactFallsBackToFirstFactWithoutAClearWinner mirrors
 // mostRelevantFactIndex's own no-clear-winner behavior — still guarantee
 // *a* fact over nothing, just not one fabricated as "most relevant."
+// Uses more facts than guaranteedFactMaxCount for the same reason as
+// TestGuaranteedFactPrefersMostRelevant above.
 func TestGuaranteedFactFallsBackToFirstFactWithoutAClearWinner(t *testing.T) {
-	facts := []string{"Melanie went camping at the beach.", "Melanie went camping in the mountains."}
+	facts := []string{
+		"Melanie went camping at the beach.",
+		"Melanie went camping in the mountains.",
+		"Melanie went camping in the desert.",
+		"Melanie went camping by the lake.",
+	}
 	got := guaranteedFact("Melanie's hobbies and travels.", facts, []string{"melanie", "camping"})
 	if got != facts[0] {
 		t.Errorf("guaranteedFact() = %q, want the first fact %q when nothing stands out", got, facts[0])
+	}
+}
+
+// TestGuaranteedFactGuaranteesAllWhenFewEnough is the real, measured fix
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md, Phase E adversarial case):
+// picking just one fact from a small set is a real lottery when neither
+// shares query vocabulary — a real consolidation run split "attended a
+// robotics event" and "actuators and control systems were featured"
+// into two separate facts, and guaranteeing only the first (content-free)
+// one measurably broke the answer at temperature 0 (9/10 wrong vs. 10/10
+// correct once both were guaranteed). Below guaranteedFactMaxCount, every
+// fact is guaranteed together instead of picking one.
+func TestGuaranteedFactGuaranteesAllWhenFewEnough(t *testing.T) {
+	facts := []string{
+		"On 2024-05-15, the user attended a downtown robotics event.",
+		"At the event, actuators and control systems were featured.",
+	}
+	got := guaranteedFact("prose", facts, []string{"what", "did", "i", "learn", "at", "the", "ai", "conference"})
+	for _, f := range facts {
+		if !strings.Contains(got, f) {
+			t.Errorf("guaranteedFact() = %q, want it to include both facts, missing %q", got, f)
+		}
+	}
+}
+
+// TestGuaranteedFactPicksOneAtExactlyMaxCountPlusOne pins down the exact
+// boundary: guaranteedFactMaxCount facts guarantee all of them,
+// guaranteedFactMaxCount+1 falls back to picking one.
+func TestGuaranteedFactPicksOneAtExactlyMaxCountPlusOne(t *testing.T) {
+	atThreshold := make([]string, guaranteedFactMaxCount)
+	for i := range atThreshold {
+		atThreshold[i] = fmt.Sprintf("fact %d", i)
+	}
+	got := guaranteedFact("prose", atThreshold, nil)
+	for _, f := range atThreshold {
+		if !strings.Contains(got, f) {
+			t.Errorf("guaranteedFact() at exactly the threshold = %q, want all facts included, missing %q", got, f)
+		}
+	}
+
+	overThreshold := append(atThreshold, "one fact too many")
+	got = guaranteedFact("prose", overThreshold, nil)
+	if got != overThreshold[0] {
+		t.Errorf("guaranteedFact() one over the threshold = %q, want just the first fact %q", got, overThreshold[0])
 	}
 }
 
