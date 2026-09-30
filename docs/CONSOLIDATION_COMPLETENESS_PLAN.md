@@ -1018,42 +1018,45 @@ better-understood.
   down to zero.
 
   **Real re-verification found this doesn't yet close the adversarial
-  case, for two further, deeper reasons — both honestly documented, not
-  fixed here:**
-  1. **A third, untouched entity path**: `vectorSearchEntities`
+  case, for two further reasons — one now fixed, one still open:**
+  1. **`entities.last_updated` never reflected a simulated historical
+     date: ✅ fixed, real-verified.** Direct inspection of the real
+     database found every entity in the Phase E adversarial scope — the
+     January-dated "AI conference" *and* the May-dated "robotics event"
+     alike — had the identical real value `2026-09-30`, the actual
+     wall-clock day the benchmark happened to run, not either entity's
+     own simulated historical date. Root cause: `upsertEntities`
+     (`internal/consolidation/store.go`) set `last_updated = current_date`
+     — Postgres's own real clock — never wired to the date actually being
+     consolidated, the way a summary's `period` column and an episode's
+     `ts` column already were. Fixed with a new `periodAsOfDate(level,
+     period)` (`internal/consolidation/period.go`) resolving any
+     level/period into the one real calendar date it represents (the
+     period's *last* day for weekly/monthly/yearly, matching how "as of"
+     naturally reads), threaded into `upsertEntities`'s insert/update
+     for both `first_seen` (new entities) and `last_updated` (every
+     touch). 5 new unit tests plus a real DB-integration regression test
+     using a date years in the past specifically so a real regression
+     back to `current_date` can't pass by coincidence.
+
+     Real re-verification: re-ran real consolidation for both the
+     January and May dates in the actual Phase E scope; the "AI
+     conference" entity's `last_updated` in the real database changed
+     from `2026-09-30` to the correct `2024-01-15`. The two entity
+     retrieval fixes above are now genuinely load-bearing for backdated
+     benchmark/import scenarios, not just day-by-day production use as
+     originally scoped.
+  2. **A third, still-untouched entity path: `vectorSearchEntities`**
      (embedding-similarity search) is a fifth retrieval mechanism
-     overall and the actual one surfacing this entity in the live
-     benchmark — the query's semantic similarity to "AI conference"
-     matches even without a literal substring/keyword hit, bypassing
-     both fixes above entirely. Same fix pattern would apply; not yet
-     done.
-  2. **A deeper, structural problem discovered while diagnosing #1,
-     which #1's fix alone wouldn't survive either**: direct inspection of
-     the real database (`select last_updated from entities where
-     scope_owner = '...phase-e...'`) shows every entity in this scope —
-     the January-dated "AI conference" *and* the May-dated "robotics
-     event" alike — has the identical real value `2026-09-30`, the
-     actual wall-clock day this benchmark happened to run, not either
-     entity's own simulated historical date. Root cause, confirmed
-     directly: `internal/consolidation/store.go`'s `upsertEntities` sets
-     `last_updated = current_date` — Postgres's own real current date,
-     never wired to `RunDaily`'s own simulated date the way a summary's
-     `period` column and an episode's `ts` column already are. Every
-     entity created within one real consolidation run — the normal case
-     for backdated benchmark/test replay, and also possible in
-     production for a manual historical import or catch-up run — gets
-     the same, indistinguishable `last_updated`, so a filter keyed on it
-     can't tell them apart no matter how it's implemented at the
-     retrieval layer. The two fixes above are still real, correct
-     improvements for genuine day-by-day production use (where
-     `last_updated` does track real, meaningfully-different days across
-     an entity's real lifetime) — they just can't close *this specific
-     backdated benchmark reproduction* until entities get the same
-     as-of-date threading summaries/episodes already have, a
-     consolidation-layer change in a different package, not a retrieval
-     fix, and a real design decision (what does "when" mean for an
-     entity in general?) rather than a quick extension of what's already
-     built.
+     overall, and — confirmed by re-running the adversarial case again
+     after fix #1 above — the actual one surfacing this entity in the
+     live benchmark now that `last_updated` is correct: the query's
+     semantic similarity to "AI conference" matches even without a
+     literal substring/keyword hit, bypassing both already-fixed entity
+     paths entirely, and carries no date label or timeframe filter of
+     its own at all. Same fix pattern would now apply cleanly (the
+     underlying date data finally being correct is exactly what was
+     blocking it from being worth doing before); not yet done.
 - **Gap 4 mechanism 2 (answer-time reasoning/arithmetic), remaining
   scope** — the charity-events aggregation case (find which two of
   several mentions are "the pair," then compute the gap) is not
