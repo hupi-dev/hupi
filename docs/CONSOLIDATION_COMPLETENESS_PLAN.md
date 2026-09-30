@@ -999,16 +999,61 @@ better-understood.
   exists rather than inferring that the May robotics event *is* what
   the question's phrasing refers to.
 
-  This is a genuinely different, harder problem than the first two
-  fixes, not a copy-paste extension of them: entities aren't naturally
-  date-scoped the way summaries (a `period` column) and episodes (a
-  `ts` column) are — this specific entity only has a date because
-  consolidation happened to bake one into its name for a one-time event,
-  not because entities have a general notion of "when." Applying the
-  same hard-filter pattern here would need a real design decision about
-  what "an entity's date" even means in general, not just for this one
-  case. Left as an open, explicitly out-of-scope-for-this-round finding,
-  not silently absorbed into the two fixes above.
+  Entities turned out to have a real, general date-scoping signal after
+  all — `entities.last_updated` (schema/0001_init.sql), not just a
+  one-off naming artifact — closing what first looked like a genuinely
+  different, harder problem. **✅ Fixed for two of what turned out to be
+  three separate entity-touching retrieval paths**: `stage1EntityMatches`
+  (direct substring/name pre-check) and `keywordSearchEntities` (BM25
+  over the whole entity corpus) both now apply the same hard filter
+  using each entity's own `last_updated`, and inject the same computed
+  date label. Both deliberately do **not** back off when excluding would
+  leave nothing — unlike the summary/episode paths — because the real
+  motivating case for both is exactly one coarsely-matched entity whose
+  only date is wrong, and a backoff there would restore precisely the
+  match the fix exists to remove; entities are a supplementary signal
+  either way, with the real facts and dates living in summaries/episodes
+  (where the backoff guarantee still applies). 4 new DB-integration
+  tests, including one confirming a match can now correctly be excluded
+  down to zero.
+
+  **Real re-verification found this doesn't yet close the adversarial
+  case, for two further, deeper reasons — both honestly documented, not
+  fixed here:**
+  1. **A third, untouched entity path**: `vectorSearchEntities`
+     (embedding-similarity search) is a fifth retrieval mechanism
+     overall and the actual one surfacing this entity in the live
+     benchmark — the query's semantic similarity to "AI conference"
+     matches even without a literal substring/keyword hit, bypassing
+     both fixes above entirely. Same fix pattern would apply; not yet
+     done.
+  2. **A deeper, structural problem discovered while diagnosing #1,
+     which #1's fix alone wouldn't survive either**: direct inspection of
+     the real database (`select last_updated from entities where
+     scope_owner = '...phase-e...'`) shows every entity in this scope —
+     the January-dated "AI conference" *and* the May-dated "robotics
+     event" alike — has the identical real value `2026-09-30`, the
+     actual wall-clock day this benchmark happened to run, not either
+     entity's own simulated historical date. Root cause, confirmed
+     directly: `internal/consolidation/store.go`'s `upsertEntities` sets
+     `last_updated = current_date` — Postgres's own real current date,
+     never wired to `RunDaily`'s own simulated date the way a summary's
+     `period` column and an episode's `ts` column already are. Every
+     entity created within one real consolidation run — the normal case
+     for backdated benchmark/test replay, and also possible in
+     production for a manual historical import or catch-up run — gets
+     the same, indistinguishable `last_updated`, so a filter keyed on it
+     can't tell them apart no matter how it's implemented at the
+     retrieval layer. The two fixes above are still real, correct
+     improvements for genuine day-by-day production use (where
+     `last_updated` does track real, meaningfully-different days across
+     an entity's real lifetime) — they just can't close *this specific
+     backdated benchmark reproduction* until entities get the same
+     as-of-date threading summaries/episodes already have, a
+     consolidation-layer change in a different package, not a retrieval
+     fix, and a real design decision (what does "when" mean for an
+     entity in general?) rather than a quick extension of what's already
+     built.
 - **Gap 4 mechanism 2 (answer-time reasoning/arithmetic), remaining
   scope** — the charity-events aggregation case (find which two of
   several mentions are "the pair," then compute the gap) is not
