@@ -27,6 +27,11 @@ const features = [
     body:
       "Pick from your open files, describe a change, and review a real diff for every file HUPI proposes — accept some, all, or none. Scoped to files you already have open, not a whole-workspace scan.",
   },
+  {
+    title: 'Answer citations',
+    body:
+      'Now HUPI can tell you why a decision was taken. Every answer in the sidebar and @hupi comes with a Sources list underneath it — the exact summaries, entities, or past exchanges it actually pulled from, with the real text it read. On by default, free. Turn on hupi.citations.deep for one extra verification pass that marks which sources the answer actually relied on, not just what was available.',
+  },
 ];
 
 const settingGroups = [
@@ -87,6 +92,21 @@ const settingGroups = [
         name: 'hupi.inlineSuggestions.model',
         default: '""',
         body: 'A separate, cheaper/faster/local providers.yaml profile just for completions, independent of hupi.model.',
+      },
+    ],
+  },
+  {
+    title: 'Answer citations',
+    settings: [
+      {
+        name: 'hupi.citations.enabled',
+        default: 'true',
+        body: 'Shows a Sources list under each answer — the memories it actually pulled from. Free, on by default: no extra request, just surfaces what retrieval already computed.',
+      },
+      {
+        name: 'hupi.citations.deep',
+        default: 'false',
+        body: 'Also verifies which cited sources the answer actually relied on, vs. merely had available. Off by default — costs one extra real model call per answer. No effect unless citations.enabled is also on.',
       },
     ],
   },
