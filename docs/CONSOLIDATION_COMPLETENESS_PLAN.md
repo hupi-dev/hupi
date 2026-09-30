@@ -308,17 +308,47 @@ sub-problems need a real design pass on detection precision before any
 code, matching this document's own "verify before design, design before
 code" discipline. Not scoped down to a concrete implementation here.
 
-### Phase D — Gap 2's real fix: cross-day stitching, only after Phase B lands
+### Phase D — Gap 2's real fix: cross-day stitching, now confirmed needed
 
-1. **Re-test retrieval breadth widening for detected multi-event/
+Phase B's real verification (see Status above) directly confirmed this
+phase is necessary, not speculative — recovering the previously-missing
+facts exposed three concrete, distinct follow-ups, the first two
+belonging here:
+
+1. **Budget-aware context assembly, not naive tail-truncation.**
+   `internal/store/retrieve.go`'s context builder currently appends
+   selected summaries in relevance order and truncates whatever doesn't
+   fit at the end (`truncateToBudget`) — real-verified against the
+   charity-events case: both needed daily summaries are correctly
+   retrieved and selected, but the lower-ranked one gets cut off
+   mid-sentence, one sentence before the fact the question needs, even
+   at `HUPI_CONTEXT_CHAR_BUDGET=20000`. The fix: guarantee at least the
+   single most-relevant key_fact from every *selected* summary before
+   spending remaining budget on additional depth from higher-ranked
+   ones — a fixed small reservation per summary, then fill the rest
+   greedily by rank, rather than one global ordered append-then-cut.
+2. **Re-test retrieval breadth widening for detected multi-event/
    cross-day query shapes** — the same mechanism
    `docs/LONGMEMEVAL_ACCURACY_PLAN.md` already tried and reverted for
-   Category 2 cause 1, but only worth re-testing once Phase B gives it
-   real candidates to find. If Phase B lands and this still shows zero
-   effect, that's real evidence retrieval breadth genuinely isn't the
-   bottleneck here (as opposed to today's result, which only proves the
-   candidate pool was empty).
-2. **Make rollups re-run-aware, not write-once.** `RunRollup`'s
+   Category 2 cause 1. Real-verified this is now genuinely needed: the
+   sports-order case's `HUPI_DEBUG_FUSION` trace showed 2 of 3 needed
+   summaries never entering the candidate pool at all, regardless of
+   context budget — a real retrieval-selection miss, not a truncation
+   problem. The original revert is still correct for *why it failed
+   then* (the candidate pool was empty, nothing to widen into); Phase B
+   now supplies real candidates, so this needs a fresh, real
+   re-verification, not a reuse of the old (now-obsolete) negative
+   result.
+3. **Calibrate or redesign `maxClustersPerDay`.** The Ibotta case's day
+   has more genuinely distinct topics than the current cap of 6 allows,
+   so its fact still landed in an under-cap, still-diluted cluster —
+   confirmed via `hupi-export-memory`, the one Phase B example that
+   didn't recover. Cheapest first step: measure whether raising the cap
+   (real cost tradeoff — more LLM calls on already-expensive busy days)
+   recovers it; if a higher cap still doesn't fully separate every real
+   topic on especially diverse days, the cap itself may need to scale
+   with a day's real topic diversity rather than being a fixed constant.
+4. **Make rollups re-run-aware, not write-once.** `RunRollup`'s
    `summaryExists` early-return means a week's rollup, once generated,
    never incorporates a later correction to one of its source days.
    Once Phase B and Phase C exist, a day's summary can legitimately
@@ -357,7 +387,55 @@ code" discipline. Not scoped down to a concrete implementation here.
   `internal/consolidation/prompts.go` back to its pre-fix state
   (`git checkout`); `go build`/`go vet`/`go test ./internal/consolidation/...`
   all clean afterward.
-- Phase A items 2-3, and everything in Phases B through E: not started.
+- Phase A items 2-3: not started.
+- **Phase B (topic-clustered batch consolidation): implemented, real-verified,
+  shipped.** `internal/consolidation/cluster.go` — `generateDailySummary`
+  clusters a day's sources by cosine similarity (union-find, 0.60
+  threshold, capped at `maxClustersPerDay=6` for real LLM-call cost)
+  once session count exceeds `clusterEpisodeThreshold=8`; each cluster
+  gets its own `generateSummary` call, mechanically merged (no further
+  LLM pass) into the day's stored output. 7 pure unit tests
+  (`cluster_test.go`), full `go test ./...` clean.
+
+  Real verification (fresh scopes, real GPT-4.1, a clean test database
+  set up specifically to avoid this session's earlier accumulated-scope
+  slowdown) against all 4 known failing examples: **3 of 4 previously
+  100%-absent facts were fully recovered** into their consolidated daily
+  summaries — the NFL playoffs game, both charity events (2023-02-14 and
+  -15), and all 3 sports events (triathlon/5K/soccer) for the ordering
+  question. This is a real, structural win the Phase A prompt-only
+  attempt completely failed to achieve on the same examples.
+
+  Recovering the facts exposed three further real, distinct gaps that
+  were previously invisible (there was nothing to retrieve before):
+  1. **Context assembly is naive tail-truncation, not budget-aware.**
+     The NFL case was fully fixed end-to-end by combining clustering
+     with `HUPI_CONTEXT_CHAR_BUDGET=20000` (a single-summary case).
+     The charity case (needs 2 summaries combined) still failed even
+     at 20,000 chars — with more, richer summaries now qualifying,
+     the lowest-ranked-but-still-needed summary gets cut off
+     mid-sentence rather than every selected summary getting a
+     guaranteed minimum share of the budget.
+  2. **Retrieval candidate selection can still miss relevant summaries
+     entirely for multi-event questions**, independent of budget — the
+     sports-order case's `HUPI_DEBUG_FUSION` trace showed 2 of the 3
+     needed summaries never entering the candidate pool at all (not
+     merely losing a ranking; `vectorRank=-1` for every candidate, the
+     same signature that originally motivated Category 2's already-
+     reverted retrieval-widening attempt in
+     `docs/LONGMEMEVAL_ACCURACY_PLAN.md`). Now that real facts exist to
+     retrieve, that widening is worth re-testing — it was only ever
+     disproven against an empty candidate pool.
+  3. **`maxClustersPerDay=6` is a real, separate limit.** The Ibotta
+     case's day has more genuinely distinct topics than the cap allows,
+     so its fact still got merged into an under-cap, still-diluted
+     cluster — confirmed via `hupi-export-memory`, the only one of the
+     4 where the fact is still fully absent post-Phase-B.
+
+  None of these three require reversing Phase B — it's a confirmed,
+  real, net-positive foundation. They're follow-up work, tracked
+  separately below, not blocking this commit.
+- Phases C, D, E: not started.
 - Category 1 (`single-session-preference`) work is separate, already
   shipped (PR #11), and unaffected by this document — see
   `docs/LONGMEMEVAL_ACCURACY_PLAN.md` for its own status and the
