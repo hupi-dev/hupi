@@ -49,6 +49,48 @@ clean category. The fix should widen entity retrieval generally for
 detected preference-seeking queries, not filter by `kind=preference`
 specifically — a kind-based filter would under-fire on real data.
 
+**Status: ✅ implemented, verified against real data — real, partial
+improvement, not a clean benchmark win.** `looksLikeRecommendationRequest`
+(`internal/store/retrieve.go`) detects the query shape via a keyword
+list (`recommendationKeywords`); when matched, `vectorSearchEntities`
+runs with `recommendationEntitySimilarityThreshold` (0.25, vs. the
+normal 0.50) and `recommendationEntityMaxResults` (10, vs. the normal 5)
+instead of the defaults — both reasoned starting points, not yet
+measured the way the file's other thresholds were.
+
+Re-verified against the 5 real LongMemEval questions that failed this
+exact way, reusing their already-consolidated scopes (`-answer-only`,
+real GPT-4.1, real GPT-4o judge):
+
+- **3 of 5 moved from "found nothing" to "found real, different
+  preference facts"** — e.g. the cultural-events question now surfaces a
+  real "volunteering at cultural festivals" interest instead of "you
+  haven't mentioned your location or interests"; the baking question now
+  surfaces a real prior cookie-platter memory instead of a blank
+  fallback. Genuine retrieval improvement, verified, not assumed.
+- **Score on this narrow slice stayed 0/5** — LongMemEval's grader
+  requires the one specific fact its own answer key designated as
+  canonical (e.g. the baking gold answer specifically wants "lemon
+  poppyseed cake," not any true baking-preference fact). Widening
+  recall found *a* real fact, not necessarily *that* one, when multiple
+  true facts about the same person exist. That's a different, harder
+  problem (precision/ranking among several true candidates) than what
+  this step was scoped to fix (recall — finding anything at all).
+- **2 of 5 unchanged**, for two different real reasons: the bike
+  question's phrasing ("Could there be a reason for this?") doesn't
+  match any `recommendationKeywords` entry — a real detector-coverage
+  gap, exactly the risk flagged above; the publications question's
+  detector *did* fire, but a competing (wrong) entity already outranked
+  the correct one before any widening, so a wider net didn't change
+  which one came out on top.
+
+**Two real follow-ups this surfaced, not yet built**: broaden
+`recommendationKeywords` to catch more phrasings (a real, bounded
+follow-up), and a genuinely different mechanism for the multi-candidate
+ranking problem (widening the net doesn't help once several true facts
+about the same person are all in reach — that needs picking the *right*
+one, not finding *a* one).
+
 ## Category 2: `temporal-reasoning` — three distinct causes, not one
 
 **Real finding**, from inspecting all 5 failures together:

@@ -87,6 +87,20 @@ const (
 	// highest near-miss (0.44), with unrelated content an order of
 	// magnitude below both — re-measure if the embedding model changes.
 	entityVectorSimilarityThreshold = 0.50
+	// recommendationEntitySimilarityThreshold/-MaxResults widen entity
+	// retrieval specifically for a detected recommendation-seeking
+	// question (looksLikeRecommendationRequest,
+	// docs/LONGMEMEVAL_ACCURACY_PLAN.md category 1) — a real, observed
+	// gap: "recommend a cultural event" shares no vocabulary at all with
+	// a preference stated weeks earlier ("I want to practice my
+	// Spanish"), so entityVectorSimilarityThreshold's normal 0.50 bar
+	// under-admits exactly the standing facts this query shape needs.
+	// Not yet measured against real embedding distances the way the
+	// thresholds above were (0.40/0.50/0.55) — a reasoned starting point
+	// (roughly half the normal bar, double the normal result cap),
+	// flagged for real calibration once this is verified to help at all.
+	recommendationEntitySimilarityThreshold = 0.25
+	recommendationEntityMaxResults          = 10
 	// episodeVectorSimilarityThreshold is vectorSimilarityThreshold's
 	// counterpart for individual episodes (vectorSearchEpisodes) — used
 	// to reuse vectorSimilarityThreshold outright, which real measurement
@@ -147,6 +161,31 @@ const (
 var stage1SignalKeywords = []string{
 	"remember", "recall", "decided", "decide", "prefer",
 	"we discussed", "last time", "again", "what did", "earlier", "before",
+}
+
+// recommendationKeywords backs looksLikeRecommendationRequest
+// (docs/LONGMEMEVAL_ACCURACY_PLAN.md category 1) — a real query-shape
+// signal, same cheap substring-match pattern as stage1SignalKeywords,
+// deliberately generous (a false positive here just widens entity
+// retrieval a bit for one query, unlike stage1's own keywords, which
+// gate whether search runs at all).
+var recommendationKeywords = []string{
+	"recommend", "suggest", "should i", "any tips", "any advice",
+	"what do you think i", "any ideas", "what would you", "any suggestions",
+}
+
+// looksLikeRecommendationRequest detects a question asking for a
+// personalized recommendation/suggestion — the shape that needs standing
+// preference facts recalled even when the current question's own wording
+// shares nothing with how that preference was originally stated.
+func looksLikeRecommendationRequest(query string) bool {
+	lower := strings.ToLower(query)
+	for _, kw := range recommendationKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // Retrieve implements gateway.Retriever, delegating to retrieve for the
@@ -279,6 +318,20 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 
 	queryTerms := tokenize(query)
 
+	// docs/LONGMEMEVAL_ACCURACY_PLAN.md category 1: a recommendation-
+	// seeking question ("what should I bake for..." months after the
+	// user last mentioned baking preferences) often shares no real
+	// vocabulary with the preference statement it needs to recall —
+	// standing facts like this live in entities, so widen entity
+	// retrieval specifically for this query shape rather than lowering
+	// the threshold for everyone.
+	entitySimilarityThreshold := entityVectorSimilarityThreshold
+	entityMaxResults := maxVectorResults()
+	if looksLikeRecommendationRequest(query) {
+		entitySimilarityThreshold = recommendationEntitySimilarityThreshold
+		entityMaxResults = recommendationEntityMaxResults
+	}
+
 	err = dbscope.Run(ctx, s.db, workspace, workspace, func(tx *sql.Tx) error {
 		// Summaries fuse their vector and keyword rankings into one MMR
 		// selection (docs/BENCHMARK_IMPROVEMENT_PLAN.md step 4) — unlike
@@ -298,7 +351,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		}
 		refs = append(refs, episodeRefs...)
 
-		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit, &citations)
+		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit, &citations, entitySimilarityThreshold, entityMaxResults)
 		if err != nil {
 			return fmt.Errorf("vector search entities: %w", err)
 		}
@@ -986,7 +1039,7 @@ func mostRelevantFactIndex(facts []string, queryTerms []string) int {
 // excluded the same way stage1EntityMatches excludes it: it's handled
 // unconditionally by buildAnchor regardless of query content, not
 // something that should ever compete for a vector-search slot.
-func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
+func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, name, attributes, key_version, (embedding <=> $1::vector) as distance
 		from entities
@@ -995,7 +1048,7 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 		  and scope_kind = $3 and scope_owner = $4
 		order by embedding <=> $1::vector
 		limit $5
-	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxVectorResults())
+	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxResults)
 	if err != nil {
 		return nil, err
 	}
@@ -1011,7 +1064,7 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 			return nil, err
 		}
 		similarity := 1 - distance
-		if similarity < entityVectorSimilarityThreshold {
+		if similarity < similarityThreshold {
 			continue
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
