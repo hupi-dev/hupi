@@ -116,3 +116,20 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
 }
+
+// Flush lets a streamed response (gateway.handleStream's SSE path) keep
+// working through this wrapper. Embedding http.ResponseWriter as an
+// interface field only promotes methods that interface itself declares
+// — Flush isn't one of them (that's the separate http.Flusher
+// interface), so without this, a real *http.response's Flush method
+// exists on the concrete value underneath but is never promoted to
+// *statusRecorder, and handleStream's own `w.(http.Flusher)` type
+// assertion fails with "streaming not supported" on every request this
+// wraps — found for real by testing streamed chat completions through
+// the actual registered route (metrics.InstrumentHandler wraps
+// /v1/chat/completions in cmd/hupi/main.go), not a synthetic case.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
