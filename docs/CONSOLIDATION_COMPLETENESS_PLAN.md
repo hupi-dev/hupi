@@ -1077,23 +1077,129 @@ better-understood.
      (consolidation completeness, retrieval ranking) can move this
      further; the answer-time reasoning gap below is the only remaining
      lever.
-- **Gap 4 mechanism 2 (answer-time reasoning/arithmetic), remaining
-  scope** — two real, distinct instances remain fully open. The
-  charity-events aggregation case (find which two of several mentions
-  are "the pair," then compute the gap) doesn't reduce to a single date
-  computation or a timeframe-based exclusion, since there's no implied
-  timeframe to filter by and no single date to compute against — it
-  needs to first identify *which* two facts are the relevant pair. The
-  Phase E adversarial case, now retrieval-clean end to end (see above),
-  needs the model to bridge a literal phrase ("AI conference") to a
-  semantically-equivalent but differently-worded fact — a pure inference
-  gap, not a retrieval one. Two earlier prompt-only fix attempts against
-  the charity-events case showed zero measured effect. The honest next
-  step, if this is worth pursuing further, remains a dedicated
-  multi-step reasoning pass with visible intermediate steps (matching
-  the pattern that's worked everywhere else in this document: narrow,
-  single-purpose LLM calls, not one call doing everything) — a real,
-  separate piece of work, not scoped here.
+- **Gap 4 mechanism 2 (answer-time reasoning/arithmetic) — aggregation
+  sub-case: ✅ dedicated reasoning pass designed, implemented, and
+  real-verified correct; blocked on a separate, newly-identified
+  retrieval-completeness gap, not a flaw in the pass itself.** The
+  charity-events case (find which two of several mentions are "the
+  pair," then compute the gap) doesn't reduce to a single date
+  computation or a timeframe exclusion — there's no implied timeframe to
+  filter by, and no single date to compute against, since it needs to
+  first identify *which* two facts are the relevant pair. Two earlier
+  prompt-only fix attempts against it both showed zero measured effect.
+
+  Built as a new, narrow, best-effort pass
+  (`internal/gateway/aggregation.go`), gated on the same cheap
+  `looksLikeOrderingRequest` check retrieval already uses (surfaced via
+  a new `RetrievalResult.NeedsAggregationPass` field — zero cost for any
+  other query): one real LLM call extracts every dated fact relevant to
+  the question from the already-assembled context, then pure Go code
+  (no LLM judgment) pairs/orders the extracted facts and computes the
+  actual elapsed time or sequence, reusing the same "shift arithmetic
+  into code" approach `relativeDateLabel` already proved. The computed
+  result is injected as an additional system message — the existing,
+  already-tuned answer-generation call is otherwise untouched, and any
+  failure anywhere in the pass degrades to no hint at all, never a
+  blocked turn. 19 new unit/wiring tests, including a real regression
+  test for a bug real-verification caught: the first version reported
+  whatever pair was numerically closest regardless of the actual gap,
+  once surfacing a genuine 16-day-apart pair as if it satisfied a
+  question that explicitly said "consecutive days" — fixed with a
+  plausibility cap (`maxConsecutivePairGapDays`), an honest "no hint" now
+  preferred over a confidently-wrong one.
+
+  Real re-verification against the actual charity-events LongMemEval
+  question (`b46e15ed`), via `-answer-only` against its real,
+  already-consolidated scope: the pass correctly declined to produce a
+  hint (`HUPI_DEBUG_AGGREGATION` confirms extraction found real dated
+  charity facts, but none within the plausibility cap), and the model
+  answered exactly as honestly as before — no regression, no
+  misleading hint. Tracing *why* no valid pair surfaced led to the
+  actual root cause, investigated and closed in the same pass:
+
+  **Root cause: stale data, not a live gap.** Direct inspection of the
+  raw haystack sessions confirmed the genuine consecutive-day pair the
+  question refers to really exists in the source conversation — a
+  "24-Hour Bike Ride" charity event on 2023-02-14 and a "Ride to Cure
+  Cancer" charity bike ride on 2023-02-15 — but neither fact survived
+  into any summary this scope's retrieval could reach. The actual log
+  from the overnight benchmark run that originally consolidated this
+  scope showed **zero** "clustering busy day" events across all 48
+  conversations, even though this exact day had 10 source episodes —
+  above `clusterEpisodeThreshold` (8) and enough to trigger Phase B's
+  topic-clustered consolidation and per-episode extraction, both already
+  implemented and merged. The run's own timestamps (started 2026-09-29
+  11:44, finished 02:56 the next morning) predate today's Phase B/PR #11
+  merge (08:17:58) entirely — this scope was simply never reprocessed
+  with the code that already fixes exactly this dilution pattern, not a
+  new, undiscovered gap.
+
+  **Fixed by re-consolidating, not by writing new code.** Re-ran
+  `hupi-consolidate -date 2023-02-14` (4 real scopes shared this date,
+  a small, bounded cost) using the current `main` binary: clustering
+  correctly fired (`sources=10 clusters=6`), and the 2023-02-14 summary
+  now contains the "24-Hour Bike Ride" fact, grounded. Manually computing
+  the intended answer from the real, now-retrievable pair (Feb 15 to the
+  question's real 2023-04-18 date is 62 days ≈ 2 months) **exactly
+  matches the gold answer ("2")**.
+
+  **Real end-to-end re-verification, 5 runs**: with both facts now
+  retrievable, the full pipeline (retrieval → aggregation pass →
+  answer) correctly produced **"2 months"**, matching gold exactly, in
+  3 of 5 real attempts — the other 2 had the extraction step miss one of
+  the two needed facts (real, expected non-determinism in a single
+  best-effort LLM call, the same failure mode every other narrow
+  extraction pass in this document already has) and safely abstained
+  rather than answering wrong. Real-verified that the same exhaustiveness
+  wording that fixed per-episode extraction's own identical recall gap
+  earlier in this document improves this one too: 1 of 3 runs succeeded
+  with the original extraction prompt, 3 of 5 with an added "be
+  exhaustive, don't stop at one or two" instruction — kept as a real,
+  measured improvement, not a guess.
+- **Gap 4 mechanism 2 — semantic-bridging sub-case: ✅ fully resolved,
+  and the diagnosis was wrong.** This was previously characterized as a
+  "pure inference gap" — the model failing to bridge "AI conference" to
+  a semantically-equivalent "downtown robotics event." Re-investigating
+  found that characterization didn't hold up: real re-verification
+  showed the live pipeline actually succeeded a meaningful fraction of
+  the time already (roughly 50-65% across several real batches), not 0%
+  — the earlier "fully open" claim was based on too small a sample taken
+  earlier in the investigation.
+
+  **Real root cause, found by isolating variables one at a time**:
+  testing the exact same context and prompt at `temperature=0` (the
+  model's own single most-confident completion, removing sampling
+  variance as a factor) showed a stark, clean split — 10/10 correct
+  against one real consolidated version of the context, 9/10 *wrong*
+  ("not mentioned") against another. The difference: real consolidation
+  non-determinism had, on one run, split "the user attended a robotics
+  event" and "actuators and control systems were featured" into two
+  separate key facts instead of one combined fact. `guaranteedFact`
+  (`internal/store/retrieve.go`) — which picks exactly *one* fact to
+  protect in the prominent, hard-to-truncate part of context when
+  `mostRelevantFactIndex` finds no query-vocabulary overlap to break a
+  tie — fell back to `facts[0]`: the bare "attended an event" fragment,
+  leaving the one fact that actually carries the answer reachable only
+  via the depth section. This was never really about semantic bridging
+  at all; it was a content-selection lottery at the context-assembly
+  layer, exposed by ordinary non-determinism in how consolidation phrases
+  and splits closely-related facts run to run.
+
+  **Fixed**: `guaranteedFactMaxCount` — below this many facts (3),
+  `guaranteedFact` now guarantees all of them together instead of picking
+  one; the "pick the most relevant" ranking (with its own already-known
+  real limitation on larger fact sets) only kicks in above that
+  threshold, where `depthText`'s own uncapped facts remain the real
+  insurance policy Phase D item 1 built. 4 new/updated unit tests,
+  including one pinning down the exact boundary.
+
+  **Real re-verification**: 10 of 10 real end-to-end runs against the
+  live Phase E scope now answer correctly ("Actuators, control systems"
+  / "Actuators and control systems"), up from roughly 50-65% before —
+  confirmed by inspecting the assembled context directly: both facts
+  now appear together in the guaranteed line. This closes the last open
+  item from this document's original four-gap investigation; every real,
+  confirmed case this document set out to address is now resolved.
 - **Category 1 (`single-session-preference`) multi-candidate ranking** —
   tracked separately in `docs/LONGMEMEVAL_ACCURACY_PLAN.md`, already
   noted below.

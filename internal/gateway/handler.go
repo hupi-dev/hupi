@@ -45,6 +45,13 @@ type RetrievalResult struct {
 	// ("what the answer actually relied on") — that distinction is the
 	// plan doc's own Phase 1 vs Phase 2 split.
 	Citations []Citation
+	// NeedsAggregationPass mirrors internal/store's own cheap
+	// looksLikeOrderingRequest query-shape check (already computed
+	// during retrieval to widen search, docs/CONSOLIDATION_COMPLETENESS_PLAN.md
+	// Phase D item 2) — surfaced here so Handler can gate the answer-time
+	// aggregation reasoning pass (Gap 4 mechanism 2) without re-detecting
+	// query shape itself.
+	NeedsAggregationPass bool
 }
 
 // Citation pairs a Ref with the exact text that was injected into
@@ -272,17 +279,30 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	explainMode := r.Header.Get("X-Hupi-Explain")
 
 	// Step 3: context injection.
-	augmented := messages
+	var systemMessages []provider.Message
 	if result.ContextMessage != "" {
-		augmented = append(
-			[]provider.Message{{Role: provider.RoleSystem, Content: result.ContextMessage}},
-			messages...,
-		)
+		systemMessages = append(systemMessages, provider.Message{Role: provider.RoleSystem, Content: result.ContextMessage})
 	}
 
 	// Step 1 (model name -> provider profile) + step 4 (forward upstream).
 	target := h.resolveProvider(req.Model)
 	inputText := lastUserMessage(messages)
+
+	// Answer-time aggregation reasoning pass (Gap 4 mechanism 2,
+	// docs/CONSOLIDATION_COMPLETENESS_PLAN.md): gated on retrieval's own
+	// cheap query-shape check, so this costs nothing for the common
+	// case. One extra real LLM call only for ordering/counting-shaped
+	// questions; best-effort — a failure or an empty result here just
+	// means no hint gets added, never a blocked turn. Reuses target, the
+	// same provider already answering this turn — no separate "judge"
+	// provider role, same reasoning as attributionCheck's own choice.
+	if result.NeedsAggregationPass && result.ContextMessage != "" {
+		if hint := AggregationHint(ctx, target, inputText, result.ContextMessage, h.now()); hint != "" {
+			systemMessages = append(systemMessages, provider.Message{Role: provider.RoleSystem, Content: hint})
+		}
+	}
+
+	augmented := append(systemMessages, messages...)
 
 	if req.Stream {
 		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode)
