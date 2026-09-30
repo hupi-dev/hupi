@@ -1156,12 +1156,50 @@ better-understood.
   with the original extraction prompt, 3 of 5 with an added "be
   exhaustive, don't stop at one or two" instruction — kept as a real,
   measured improvement, not a guess.
-- **Gap 4 mechanism 2 — semantic-bridging sub-case, still fully open.**
-  The Phase E adversarial case, retrieval-clean end to end (see above),
-  needs the model to bridge a literal phrase ("AI conference") to a
-  semantically-equivalent but differently-worded fact ("downtown robotics
-  event") — a pure inference gap, not an aggregation problem the pass
-  above addresses. Not attempted here; a real, separate design question.
+- **Gap 4 mechanism 2 — semantic-bridging sub-case: ✅ fully resolved,
+  and the diagnosis was wrong.** This was previously characterized as a
+  "pure inference gap" — the model failing to bridge "AI conference" to
+  a semantically-equivalent "downtown robotics event." Re-investigating
+  found that characterization didn't hold up: real re-verification
+  showed the live pipeline actually succeeded a meaningful fraction of
+  the time already (roughly 50-65% across several real batches), not 0%
+  — the earlier "fully open" claim was based on too small a sample taken
+  earlier in the investigation.
+
+  **Real root cause, found by isolating variables one at a time**:
+  testing the exact same context and prompt at `temperature=0` (the
+  model's own single most-confident completion, removing sampling
+  variance as a factor) showed a stark, clean split — 10/10 correct
+  against one real consolidated version of the context, 9/10 *wrong*
+  ("not mentioned") against another. The difference: real consolidation
+  non-determinism had, on one run, split "the user attended a robotics
+  event" and "actuators and control systems were featured" into two
+  separate key facts instead of one combined fact. `guaranteedFact`
+  (`internal/store/retrieve.go`) — which picks exactly *one* fact to
+  protect in the prominent, hard-to-truncate part of context when
+  `mostRelevantFactIndex` finds no query-vocabulary overlap to break a
+  tie — fell back to `facts[0]`: the bare "attended an event" fragment,
+  leaving the one fact that actually carries the answer reachable only
+  via the depth section. This was never really about semantic bridging
+  at all; it was a content-selection lottery at the context-assembly
+  layer, exposed by ordinary non-determinism in how consolidation phrases
+  and splits closely-related facts run to run.
+
+  **Fixed**: `guaranteedFactMaxCount` — below this many facts (3),
+  `guaranteedFact` now guarantees all of them together instead of picking
+  one; the "pick the most relevant" ranking (with its own already-known
+  real limitation on larger fact sets) only kicks in above that
+  threshold, where `depthText`'s own uncapped facts remain the real
+  insurance policy Phase D item 1 built. 4 new/updated unit tests,
+  including one pinning down the exact boundary.
+
+  **Real re-verification**: 10 of 10 real end-to-end runs against the
+  live Phase E scope now answer correctly ("Actuators, control systems"
+  / "Actuators and control systems"), up from roughly 50-65% before —
+  confirmed by inspecting the assembled context directly: both facts
+  now appear together in the guaranteed line. This closes the last open
+  item from this document's original four-gap investigation; every real,
+  confirmed case this document set out to address is now resolved.
 - **Category 1 (`single-session-preference`) multi-candidate ranking** —
   tracked separately in `docs/LONGMEMEVAL_ACCURACY_PLAN.md`, already
   noted below.
