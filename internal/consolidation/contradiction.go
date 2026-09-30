@@ -41,9 +41,11 @@ const contradictionCheckPrompt = `You are checking whether any of a set of NEW f
 A contradiction means a NEW fact states a different, incompatible value for the exact same specific real-world attribute an EXISTING fact already states — for example, a mortgage pre-approval amount that changed, or a job title that changed. It is NOT a contradiction if a NEW fact is simply a different, additional fact about the same entity, or only relates to the same entity/topic without stating a conflicting value for the same specific thing. When in doubt, do not report it as a contradiction — a missed contradiction is far less costly than incorrectly discarding a fact that was actually still true.
 
 Respond with exactly one JSON object, nothing else, no markdown fences:
-{"contradictions": [{"old_fact": "<the EXISTING fact's exact text>", "replacement": "<the corrected fact text, or an empty string to remove the old fact with nothing to replace it>"}]}
+{"contradictions": [{"old_fact": "<the EXISTING fact's exact text>", "replacement": "<the corrected fact text, or an empty string to remove the old fact with nothing to replace it>"}], "corrected_prose": "<the EXISTING prose paragraph, rewritten to reflect every contradiction above instead of the stale value it currently states — omit or leave empty if contradictions is empty>"}
 
-If there are no real contradictions, respond with {"contradictions": []}.`
+The EXISTING prose paragraph is given below alongside the EXISTING facts. If you report any contradictions, corrected_prose must be a complete rewrite of that whole paragraph — not just the changed sentence — with every stale value replaced and everything else preserved as-is, since this will wholesale replace the paragraph a person or another system would read.
+
+If there are no real contradictions, respond with {"contradictions": [], "corrected_prose": ""}.`
 
 type contradictionResult struct {
 	OldFact     string `json:"old_fact"`
@@ -52,21 +54,25 @@ type contradictionResult struct {
 
 type contradictionResponse struct {
 	Contradictions []contradictionResult `json:"contradictions"`
+	CorrectedProse string                `json:"corrected_prose"`
 }
 
 // buildContradictionCheckPrompt assembles the user message for one
 // related-summary comparison: today's new facts against one other
-// period's existing facts, labeled with both periods and the entities
-// they share so the model has the same context a human reviewer would
-// use to judge "same fact updated" vs. "different fact, same entity."
-func buildContradictionCheckPrompt(newPeriod string, newFacts []string, oldLevel, oldPeriod string, oldFacts []string, sharedEntityNames []string) string {
+// period's existing facts and prose, labeled with both periods and the
+// entities they share so the model has the same context a human
+// reviewer would use to judge "same fact updated" vs. "different fact,
+// same entity," and enough of the existing prose to rewrite it in place
+// rather than guessing at surrounding context it can't see.
+func buildContradictionCheckPrompt(newPeriod string, newFacts []string, oldLevel, oldPeriod, oldProse string, oldFacts []string, sharedEntityNames []string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Entities in common: %s\n\n", strings.Join(sharedEntityNames, ", "))
 	fmt.Fprintf(&sb, "NEW facts (from %s):\n", newPeriod)
 	for _, f := range newFacts {
 		fmt.Fprintf(&sb, "- %s\n", f)
 	}
-	fmt.Fprintf(&sb, "\nEXISTING facts (from %s %s, which may need updating):\n", oldLevel, oldPeriod)
+	fmt.Fprintf(&sb, "\nEXISTING prose (from %s %s, which may need rewriting):\n%s\n", oldLevel, oldPeriod, oldProse)
+	fmt.Fprintf(&sb, "\nEXISTING facts (from the same %s %s, which may need updating):\n", oldLevel, oldPeriod)
 	for _, f := range oldFacts {
 		fmt.Fprintf(&sb, "- %s\n", f)
 	}
@@ -193,7 +199,7 @@ func (r *Runner) checkCrossPeriodContradictions(ctx context.Context, scope ident
 	}
 
 	for _, old := range related {
-		r.checkOneRelatedSummary(ctx, scope, newPeriod, newFacts, old, entitiesTouched)
+		r.checkOneRelatedSummary(ctx, scope, newSummaryID, newPeriod, newFacts, old, entitiesTouched)
 	}
 }
 
@@ -204,7 +210,7 @@ func (r *Runner) checkCrossPeriodContradictions(ctx context.Context, scope ident
 // starting point Correct needs (see CurrentContent's own doc comment),
 // so this only has to surgically replace the contradicted fact(s) within
 // that snapshot, leaving prose/entities_touched/relationships untouched.
-func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scope, newPeriod string, newFacts []string, old relatedSummary, sharedEntityNames []string) {
+func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scope, newSummaryID, newPeriod string, newFacts []string, old relatedSummary, sharedEntityNames []string) {
 	oldFacts, err := r.loadGroundedKeyFactsByID(ctx, scope, old.id)
 	if err != nil {
 		slog.Warn("consolidation: load related summary's key facts for contradiction check failed", "related_summary", old.id, "error", err)
@@ -214,10 +220,22 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 		return
 	}
 
+	// Loaded before the LLM call, not after: current.Summary is the old
+	// prose the model needs to see in order to rewrite it (the second
+	// follow-up gap this closes — see contradictionCheckPrompt's own doc
+	// comment), and current.KeyFacts (the *full* fact list, unlike
+	// oldFacts' grounded-only comparison set above) is what actually gets
+	// edited and handed to Correct below.
+	current, err := r.CurrentContent(ctx, scope, old.id)
+	if err != nil {
+		slog.Warn("consolidation: load current content for contradiction check failed", "related_summary", old.id, "error", err)
+		return
+	}
+
 	req := provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: contradictionCheckPrompt},
-			{Role: provider.RoleUser, Content: buildContradictionCheckPrompt(newPeriod, newFacts, old.level, old.period, oldFacts, sharedEntityNames)},
+			{Role: provider.RoleUser, Content: buildContradictionCheckPrompt(newPeriod, newFacts, old.level, old.period, current.Summary, oldFacts, sharedEntityNames)},
 		},
 	}
 	resp, err := r.consolidation.ChatCompletion(ctx, req)
@@ -231,12 +249,6 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 		return
 	}
 	if len(parsed.Contradictions) == 0 {
-		return
-	}
-
-	current, err := r.CurrentContent(ctx, scope, old.id)
-	if err != nil {
-		slog.Warn("consolidation: load current content for contradicted summary failed", "related_summary", old.id, "error", err)
 		return
 	}
 
@@ -265,11 +277,62 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 	if applied == 0 {
 		return
 	}
+	if strings.TrimSpace(parsed.CorrectedProse) != "" {
+		current.Summary = parsed.CorrectedProse
+	}
+
+	// The replacement fact(s) above are, by construction, grounded in
+	// newSummaryID's own sources, not old.id's — without this, Correct's
+	// own re-grounding check only ever sees old.id's original sources
+	// and the real, correct replacement comes back ungrounded every
+	// time, real-verified via live testing (see Correct's own doc
+	// comment on extraGroundingSourceText).
+	extraGrounding, err := r.loadGroundingSourceTextForSummary(ctx, scope, newSummaryID)
+	if err != nil {
+		slog.Warn("consolidation: load triggering period's sources for grounding failed, correcting without them", "related_summary", old.id, "new_summary", newSummaryID, "error", err)
+	}
 
 	reason := fmt.Sprintf("system-detected contradiction: a %s summary stated a different value for the same fact", newPeriod)
-	if err := r.Correct(ctx, scope, old.id, current, reason, systemActor); err != nil {
+	if err := r.Correct(ctx, scope, old.id, current, reason, systemActor, extraGrounding); err != nil {
 		slog.Warn("consolidation: applying contradiction correction failed", "related_summary", old.id, "error", err)
 		return
 	}
-	slog.Info("consolidation: cross-period contradiction corrected", "corrected_summary", old.id, "triggering_period", newPeriod, "facts_replaced", applied)
+	slog.Info("consolidation: cross-period contradiction corrected", "corrected_summary", old.id, "triggering_period", newPeriod, "facts_replaced", applied, "prose_rewritten", strings.TrimSpace(parsed.CorrectedProse) != "")
+}
+
+// loadGroundingSourceTextForSummary rebuilds a summary's own grounding
+// source text from its recorded sources — factored out of Correct so
+// checkOneRelatedSummary can also supply a *different* summary's sources
+// as Correct's extraGroundingSourceText (see that param's own doc
+// comment for why).
+func (r *Runner) loadGroundingSourceTextForSummary(ctx context.Context, scope identity.Scope, summaryID string) (string, error) {
+	var level, sourceEpisodeIDsLit, sourceSummaryPeriodsLit string
+	if err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select level, source_episode_ids, source_summary_periods from summaries
+			where id = $1 and scope_kind = $2 and scope_owner = $3
+		`, summaryID, scope.Kind, scope.Owner).Scan(&level, &sourceEpisodeIDsLit, &sourceSummaryPeriodsLit)
+	}); err != nil {
+		return "", fmt.Errorf("load summary %s for grounding source: %w", summaryID, err)
+	}
+
+	var sources []textSource
+	var err error
+	if level == "daily" {
+		err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+			var err error
+			sources, err = r.loadEpisodesByID(ctx, tx, scope, pgfmt.ParseTextArray(sourceEpisodeIDsLit))
+			return err
+		})
+	} else {
+		err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+			var err error
+			sources, err = r.loadSummaries(ctx, tx, scope, sourceLevelBelow(level), pgfmt.ParseTextArray(sourceSummaryPeriodsLit))
+			return err
+		})
+	}
+	if err != nil {
+		return "", fmt.Errorf("load sources for summary %s: %w", summaryID, err)
+	}
+	return joinSources(sources), nil
 }

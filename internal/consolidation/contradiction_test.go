@@ -13,7 +13,7 @@ import (
 func TestBuildContradictionCheckPromptIncludesBothPeriodsAndEntities(t *testing.T) {
 	got := buildContradictionCheckPrompt(
 		"2023-03-15", []string{"Pre-approval is now $300,000"},
-		"daily", "2023-03-01", []string{"Pre-approval is $250,000"},
+		"daily", "2023-03-01", "The user was pre-approved for $250,000.", []string{"Pre-approval is $250,000"},
 		[]string{"Wells Fargo"},
 	)
 	for _, want := range []string{"Wells Fargo", "2023-03-15", "2023-03-01", "$300,000", "$250,000"} {
@@ -96,7 +96,7 @@ func TestFindRelatedSummaries_MatchesSharedEntityExcludesOthers(t *testing.T) {
 // superseded, and its corrected content reflects the new value, not a
 // stale duplicate sitting alongside it.
 func TestCheckCrossPeriodContradictions_AppliesCorrection(t *testing.T) {
-	contradictionJSON := `{"contradictions": [{"old_fact": "Wells Fargo pre-approval amount is $250,000", "replacement": "Wells Fargo pre-approval amount is $300,000"}]}`
+	contradictionJSON := `{"contradictions": [{"old_fact": "Wells Fargo pre-approval amount is $250,000", "replacement": "Wells Fargo pre-approval amount is $300,000"}], "corrected_prose": "Discussed mortgage pre-approval, now at $300,000."}`
 	groundingJSON := `{"grounded": [true]}`
 	runner, db := testRunner(t, contradictionJSON, groundingJSON)
 
@@ -167,5 +167,8 @@ func TestCheckCrossPeriodContradictions_AppliesCorrection(t *testing.T) {
 	}
 	if len(corrected.KeyFacts) != 1 || corrected.KeyFacts[0].Fact != "Wells Fargo pre-approval amount is $300,000" {
 		t.Errorf("corrected.KeyFacts = %+v, want exactly one fact with the replacement text", corrected.KeyFacts)
+	}
+	if corrected.Summary != "Discussed mortgage pre-approval, now at $300,000." {
+		t.Errorf("corrected.Summary = %q, want the model's corrected_prose to have replaced the stale prose too", corrected.Summary)
 	}
 }

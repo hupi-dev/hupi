@@ -287,7 +287,19 @@ func (r *Runner) entitiesMissingEmbeddings(ctx context.Context, scope identity.S
 // entry (docs/GAP_CLOSURE_PLAN.md §4.3) — cmd/hupi-correct's -actor flag,
 // not derived from anything in this package, since a correction is always
 // a deliberate human action.
-func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID string, output ConsolidationOutput, reason, actor string) error {
+//
+// extraGroundingSourceText, when non-empty, is appended to the source
+// material a fact gets checked against — normally empty (a human
+// correction via cmd/hupi-correct is grounded in the summary's own
+// original sources, nothing else). checkOneRelatedSummary
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase C sub-problem 2) is the
+// one caller that needs this: a cross-period correction's replacement
+// fact is, by construction, actually grounded in the *triggering*
+// period's own sources, not oldSummaryID's — without this, groundingCheck
+// only ever sees the old summary's sources and the real, correct
+// replacement fact comes back ungrounded every time, real-verified via
+// live testing.
+func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID string, output ConsolidationOutput, reason, actor, extraGroundingSourceText string) error {
 	if reason == "" {
 		return fmt.Errorf("consolidation: correction_reason is required to correct %s", oldSummaryID)
 	}
@@ -350,6 +362,9 @@ func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID
 		}
 	}
 	groundingSourceText := joinSources(sources)
+	if extraGroundingSourceText != "" {
+		groundingSourceText += "\n\n" + extraGroundingSourceText
+	}
 
 	return r.storeSummary(ctx, storeSummaryInput{
 		scope:                scope,

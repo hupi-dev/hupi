@@ -105,7 +105,7 @@ func run() error {
 		return fmt.Errorf("parse %s: %w", *contentPath, err)
 	}
 
-	if err := runner.Correct(ctx, scope, *summaryID, output, *reason, *actor); err != nil {
+	if err := runner.Correct(ctx, scope, *summaryID, output, *reason, *actor, ""); err != nil {
 		return fmt.Errorf("correct %s: %w", *summaryID, err)
 	}
 

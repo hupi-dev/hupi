@@ -415,34 +415,42 @@ doesn't reliably judge semantic sameness.
    also real and unplanned, a genuine bonus from reusing `Correct`
    rather than a hand-rolled write path.
 
-   **This same verification surfaced two real, honest follow-up gaps,
-   not yet fixed:**
-   - **The replacement fact fails re-grounding.** `Correct`'s
+   **This same verification surfaced two real, honest follow-up gaps —
+   both now ✅ closed, real-verified with real GPT-4.1:**
+   - **The replacement fact failed re-grounding, fixed.** `Correct`'s
      `storeSummary` call re-runs `groundingCheck` against the *old*
      summary's own original source episodes (by design, for the human-
      correction case it was built for) — but a cross-period
      replacement fact is, by construction, actually grounded in the
-     *other* period's sources, not the old summary's. The corrected fact
-     came back `grounded: false` in real testing, meaning it's currently
-     invisible to retrieval (`loadKeyFacts`' own `grounded = true`
-     filter) even though it's now the historically-correct value. Net
-     effect is still a real improvement (the stale, wrong fact is no
-     longer surfaced either, since the old summary version is
-     superseded), just not a full fix — the corrected fact needs its own
-     grounding path that includes the triggering period's sources, not
-     only the old summary's.
-   - **The prose summary text isn't touched.** This implementation only
-     edits `KeyFacts` within the `CurrentContent` snapshot; the prose
-     paragraph (which retrieval also surfaces alongside key facts,
-     verified in real testing to still read "...pre-approved for a
-     $250,000 mortgage...") is carried through unchanged. A
-     retrieval-time reader of the prose itself would still see the
-     stale value even though the structured fact has been superseded.
+     *other* period's sources, not the old summary's, and came back
+     `grounded: false` in the first real test. Fixed: `Correct` gained
+     an `extraGroundingSourceText` parameter, appended to what it
+     already builds from the old summary's own sources; a new
+     `loadGroundingSourceTextForSummary` (factored out of `Correct`'s
+     own existing source-loading logic, so both share one
+     implementation) loads the *triggering* period's own sources for
+     `checkOneRelatedSummary` to supply. Re-verified on a fresh run of
+     the same scenario: the corrected fact now comes back
+     `"grounded": true`.
+   - **The prose summary text wasn't touched, fixed.** The original
+     implementation only edited `KeyFacts` within the `CurrentContent`
+     snapshot, leaving the prose paragraph itself carrying the stale
+     value (verified reading "...pre-approved for a $250,000
+     mortgage..." in the first real test even after the fact-level
+     correction). Fixed: `contradictionCheckPrompt`'s response schema
+     gained a `corrected_prose` field — a full rewrite of the old
+     paragraph, not just the changed clause — and
+     `checkOneRelatedSummary` now loads `CurrentContent` *before* the
+     LLM call (previously after, once a contradiction was already
+     confirmed) specifically so the old prose can be included in the
+     prompt for the model to rewrite. Re-verified on the same fresh
+     run: the corrected summary's prose is now a complete, accurate
+     rewrite with no trace of the stale value.
 
-   Neither gap invalidates the core mechanism (detection judgment +
-   safe, correctly-guarded application) — both are real, scoped
-   follow-ups on making the correction's effect fully retrieval-visible,
-   not evidence the detection or supersession logic itself is wrong.
+   Both fixes are covered by the existing/updated unit tests
+   (`corrected_prose` exercised in
+   `TestCheckCrossPeriodContradictions_AppliesCorrection`) and by this
+   real, live GPT-4.1 re-verification — not just plausible in theory.
 
 Sequencing: (1) first — lower risk, no new LLM call, fully
 self-contained. (2) only after (1) is real-verified working, since (2)
@@ -734,21 +742,23 @@ belonging here:
   Wells Fargo scenario: the older day's summary was genuinely
   superseded, with the corrected `key_facts` reflecting the new value.
 
-  Two real, honest follow-up gaps surfaced by that same verification,
-  not yet fixed: (1) the replacement fact fails `Correct`'s
-  re-grounding, since it checks against the *old* summary's own
-  original sources, not the triggering period's — currently makes the
-  corrected fact invisible to retrieval, though the stale fact is still
-  correctly no longer surfaced either (net improvement, not a full fix);
-  (2) the prose summary text is untouched — only `KeyFacts` gets edited,
-  so a retrieval-time reader of the prose paragraph itself would still
-  see the stale value. See Phase C's own writeup above for the full
-  detail on both.
-- Phase D item 4 (rollup re-run-awareness): not started — still gated
-  on Phase C sub-problem 2's own two follow-up gaps being closed first
-  (its premise, "a contradiction gets resolved," should mean fully
-  resolved, not just structurally superseded with the correction still
-  invisible to retrieval).
+  Both follow-up gaps found by that verification are now **✅ closed,
+  real-verified with real GPT-4.1**: `Correct` gained an
+  `extraGroundingSourceText` parameter (the triggering period's own
+  sources, loaded via a new `loadGroundingSourceTextForSummary`,
+  factored out of `Correct`'s own existing source-loading logic so both
+  share it); `contradictionCheckPrompt`'s response gained a
+  `corrected_prose` field, with `checkOneRelatedSummary` now loading
+  `CurrentContent` *before* the LLM call (not after) so the model can
+  see and rewrite the old prose, not just the facts. Re-ran the same
+  synthetic Wells Fargo scenario fresh: the corrected fact now comes
+  back `"grounded": true` (previously `false`), and the corrected
+  summary's prose is a complete, accurate rewrite with no trace of the
+  stale $250,000 value. Phase C is now fully closed, not just
+  core-mechanism-complete.
+- Phase D item 4 (rollup re-run-awareness): not started — no longer
+  gated on anything within Phase C (both sub-problems and their
+  follow-ups are done); the next real blocker for this item.
 - Phase E: not started — gated on Phases B/C/D, per its own section.
 - Per-episode fact extraction (Phase B's second design option): not
   started — confirmed necessary for the Ibotta case specifically (see
@@ -769,20 +779,14 @@ belonging here:
 Everything below is real and confirmed-needed (not speculative), just
 not yet built:
 
-- **Phase C sub-problem 1** (entity attribute key-aliasing): ✅ done —
-  implemented and real-verified end to end with real GPT-4.1 against
-  the actual Wells Fargo failure mode.
-- **Phase C sub-problem 2** (cross-period `key_fact` supersession): ✅
-  core mechanism done — real-verified end to end with real GPT-4.1
-  (reuses `Runner.CurrentContent` + `Runner.Correct`, not a hand-rolled
-  `storeSummary` call as originally sketched). Two real follow-up gaps
-  found by that same verification, not yet fixed: the replacement fact
-  fails re-grounding (checked against the wrong period's sources) and
-  the prose summary text is left unchanged — see Phase C's own writeup
-  for detail.
-- **Phase D item 4** (rollup re-run-awareness) — still gated, now on
-  Phase C sub-problem 2's two follow-up gaps being closed rather than
-  on sub-problem 2 not existing at all.
+- **Phase C — fully done**, both sub-problems, real-verified end to end
+  with real GPT-4.1: entity attribute key-aliasing (sub-problem 1), and
+  cross-period `key_fact` supersession including both of its own
+  initially-found follow-up gaps (re-grounding scope, prose rewriting —
+  sub-problem 2). See Phase C's own writeup for full detail on all of
+  it.
+- **Phase D item 4** (rollup re-run-awareness) — the next real item;
+  no longer gated on anything, since Phase C is fully closed.
 - **Phase E** (retrieval date-relevance, if it turns out to still
   matter) — gated on Phases B/C/D.
 - **Per-episode fact extraction** (Phase B's second design option) —
