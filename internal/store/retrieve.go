@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"hupi/internal/audit"
 	"hupi/internal/crypto"
@@ -250,8 +251,8 @@ func looksLikeOrderingRequest(query string) bool {
 // actual read and logging exactly one audit_log row per call regardless
 // of which of retrieve's return paths fired — see retrieve's doc comment
 // for the retrieval logic itself.
-func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (gateway.RetrievalResult, error) {
-	result, err := s.retrieve(ctx, actingUser, workspace, messages)
+func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (gateway.RetrievalResult, error) {
+	result, err := s.retrieve(ctx, actingUser, workspace, messages, now)
 	if err != nil {
 		return result, err
 	}
@@ -299,7 +300,7 @@ func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Sco
 // around the embedding call in the middle (docs/HARDENING_PLAN.md D3):
 // never hold a Postgres transaction open across a network call to an
 // external provider.
-func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (gateway.RetrievalResult, error) {
+func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (gateway.RetrievalResult, error) {
 	var anchor string
 	var anchorRefs []identity.Ref
 	var anchorCitations []gateway.Citation
@@ -418,7 +419,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// see orderingSummarySimilarityThreshold's own doc comment for
 		// the real evidence this stage, not final-selection, was the
 		// actual bottleneck.
-		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, summarySimilarityThreshold, summaryMaxResults)
+		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, summarySimilarityThreshold, summaryMaxResults, query, now)
 		if err != nil {
 			return fmt.Errorf("fused search summaries: %w", err)
 		}
@@ -764,10 +765,11 @@ func reciprocalRank(rank int) float64 {
 // separates a true positive from a same-topic near-miss in practice, on
 // top of that cutoff. Re-measure if the tokenizer's stopword list or the
 // BM25 k1/b constants ever change.
-func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int) ([]identity.Ref, error) {
+func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time) ([]identity.Ref, error) {
 	type candidate struct {
 		id          string
 		text        string
+		period      string
 		enc         *crypto.Encryptor
 		vectorRank  int // -1 if not found by vector search
 		keywordRank int // -1 if not found by keyword search
@@ -778,7 +780,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// used before this refactor — see summaryOverfetchFactor's own doc
 	// comment for why overfetching matters.
 	vecRows, err := q.QueryContext(ctx, `
-		select id, summary, key_version, (embedding <=> $1::vector) as distance
+		select id, summary, key_version, period, (embedding <=> $1::vector) as distance
 		from summaries s
 		where embedding is not null
 		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
@@ -794,8 +796,9 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		var id string
 		var summaryCT []byte
 		var keyVersion int
+		var period string
 		var distance float64
-		if err := vecRows.Scan(&id, &summaryCT, &keyVersion, &distance); err != nil {
+		if err := vecRows.Scan(&id, &summaryCT, &keyVersion, &period, &distance); err != nil {
 			vecRows.Close()
 			return nil, err
 		}
@@ -815,7 +818,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 			vecRows.Close()
 			return nil, err
 		}
-		byID[id] = &candidate{id: id, text: text, enc: enc, vectorRank: vecRank, keywordRank: -1}
+		byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: vecRank, keywordRank: -1}
 		vecRank++
 	}
 	if err := vecRows.Err(); err != nil {
@@ -831,7 +834,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 
 	if keywordSearchEnabled() && len(queryTerms) > 0 {
 		kwRows, err := q.QueryContext(ctx, `
-			select id, summary, key_version
+			select id, summary, key_version, period
 			from summaries s
 			where summary is not null
 			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
@@ -843,14 +846,17 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		var docs []bm25Document
 		kwText := make(map[string]string)
 		kwEnc := make(map[string]*crypto.Encryptor)
+		kwPeriod := make(map[string]string)
 		for kwRows.Next() {
 			var id string
 			var summaryCT []byte
 			var keyVersion int
-			if err := kwRows.Scan(&id, &summaryCT, &keyVersion); err != nil {
+			var period string
+			if err := kwRows.Scan(&id, &summaryCT, &keyVersion, &period); err != nil {
 				kwRows.Close()
 				return nil, err
 			}
+			kwPeriod[id] = period
 			// Already decrypted by the vector pass above — reuse it
 			// rather than paying for a second decrypt of the same
 			// ciphertext.
@@ -900,7 +906,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				c.keywordRank = rank
 				continue
 			}
-			byID[m.id] = &candidate{id: m.id, text: kwText[m.id], enc: kwEnc[m.id], vectorRank: -1, keywordRank: rank}
+			byID[m.id] = &candidate{id: m.id, text: kwText[m.id], period: kwPeriod[m.id], enc: kwEnc[m.id], vectorRank: -1, keywordRank: rank}
 		}
 	}
 
@@ -917,6 +923,15 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// depend on that.
 	sort.Strings(ids)
 
+	// Resolved once for the whole call, not per candidate — Phase E
+	// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): real-verified need, a
+	// synthetic adversarial test confirmed a temporally-wrong but
+	// lexically-closer summary (fused=1.0) outranking the temporally-
+	// correct one (fused=0.667) for a query implying "last month," with
+	// nothing in the existing ranking aware of either summary's own
+	// period at all.
+	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
+
 	pool := make([]mmrCandidate, len(ids))
 	for i, id := range ids {
 		c := byID[id]
@@ -926,6 +941,18 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		}
 		if c.keywordRank >= 0 {
 			fused += reciprocalRank(c.keywordRank)
+		}
+		if hasTimeframe {
+			if pStart, pEnd, ok := parsePeriodRange(c.period); ok && periodsOverlap(pStart, pEnd, tfStart, tfEnd) {
+				// A full reciprocal-rank-0 contribution's worth of boost
+				// (comparable to being the single best vector or keyword
+				// match) — real-verified strong enough to flip the exact
+				// adversarial case above, without being an unconditional
+				// override: a candidate with a much stronger textual
+				// match can still win if its own fused score clears this
+				// margin some other way.
+				fused += temporalRelevanceBoost
+			}
 		}
 		pool[i] = mmrCandidate{relevance: fused, tokens: tokenSet(c.text)}
 	}
@@ -1504,10 +1531,20 @@ type mmrCandidate struct {
 // to hand back which ones won and in what order.
 func mmrSelect(pool []mmrCandidate, k int, lambda float64) []int {
 	if k >= len(pool) {
+		// Still sorted by relevance descending, not left in whatever order
+		// the caller's candidate slice happened to be built in — a real,
+		// previously untested bug (docs/CONSOLIDATION_COMPLETENESS_PLAN.md
+		// Phase E verification): with few enough candidates that none get
+		// discarded here, this branch was the one actually taken for the
+		// exact case Phase D item 2's widened threshold and Phase E's
+		// temporal boost exist to reorder, silently returning candidates
+		// in raw pool order and discarding both fixes' entire effect on
+		// what the model actually sees first.
 		out := make([]int, len(pool))
 		for i := range pool {
 			out[i] = i
 		}
+		sort.Slice(out, func(i, j int) bool { return pool[out[i]].relevance > pool[out[j]].relevance })
 		return out
 	}
 	remaining := make([]int, len(pool))

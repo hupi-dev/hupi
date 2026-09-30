@@ -108,7 +108,7 @@ func TestRetrieve_WritesAuditLogEntry(t *testing.T) {
 
 	_, err := s.Retrieve(ctx, scope, scope, []provider.Message{
 		{Role: provider.RoleUser, Content: "what did we decide about the vector index?"},
-	})
+	}, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}

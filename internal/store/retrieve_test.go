@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
@@ -79,7 +80,7 @@ func TestRetrieve_UsesCorrectedSummaryNotSupersededOne(t *testing.T) {
 	// the cheap stage-1 skip and into the actual vector search being
 	// tested here, with no entity needed to force that.
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "do you remember the answer?"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestRetrieve_SurfacesGroundedKeyFactsAlongsideSummary(t *testing.T) {
 	insertKeyFact(t, s, scope, summaryID, "Alex camped on the moon.", false)
 
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "do you remember where Alex went camping?"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestRetrieve_FindsEntityByVectorSearchWhenSubstringMatchMisses(t *testing.T
 	// stage-1 substring match — neither word is anywhere in the first
 	// entity's name, so that one can only be found by vector search.
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "What language do I prefer? (mentioning Rust here)"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -304,7 +305,7 @@ func TestRetrieve_QuestionWithoutKeywordPhraseStillSearches(t *testing.T) {
 	// by substring — the only reason this should reach stage 2 at all is
 	// stage1QuestionSignal recognizing it as a question.
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "What is my project's codename?"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}

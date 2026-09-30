@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"hupi/internal/identity"
 	"hupi/internal/provider"
@@ -23,7 +24,7 @@ type fakeRetriever struct {
 	result RetrievalResult // zero value (GateSkipped) unless a test sets one
 }
 
-func (f *fakeRetriever) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (RetrievalResult, error) {
+func (f *fakeRetriever) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (RetrievalResult, error) {
 	f.calls++
 	if f.result.Gate == "" {
 		return RetrievalResult{Gate: GateSkipped}, nil

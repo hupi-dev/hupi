@@ -77,7 +77,13 @@ type Citation struct {
 // HandleTeamChatCompletions. For Tier 1/2 (no auth) and any private-scope
 // request, the two are simply equal.
 type Retriever interface {
-	Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (RetrievalResult, error)
+	// now is the request's own current-time reference — h.now() for a
+	// real request, so a test seam that fabricates historical timestamps
+	// (benchmarks, hupi-demo) also gets a coherent "now" for retrieval to
+	// resolve a query's own relative time reference against ("last
+	// month"), not the real wall clock —
+	// docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase E.
+	Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (RetrievalResult, error)
 }
 
 // FeedbackRating is the cheapest possible signal channel for "the memory
@@ -234,7 +240,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	result := RetrievalResult{Gate: GateSkipped}
 	if r.Header.Get("X-Hupi-Memory") != "off" {
 		var err error
-		result, err = h.Retriever.Retrieve(ctx, actingUser, workspace, messages)
+		result, err = h.Retriever.Retrieve(ctx, actingUser, workspace, messages, h.now())
 		if err != nil {
 			// A broken retrieval path degrades to "no memory this turn,"
 			// not a failed chat — see ARCHITECTURE.md § Resilience.

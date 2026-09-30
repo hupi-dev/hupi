@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
@@ -49,7 +50,7 @@ func TestRetrieve_GraphWalkSurfacesConnectedEntityNeverNamedInQuery(t *testing.T
 	insertRelationship(t, s, scope, "rel:test1", "person:melanie", "friends_with", "person:zara")
 
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "Tell me about Melanie"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestRetrieve_GraphWalkDisabledByFlag(t *testing.T) {
 	insertRelationship(t, s, scope, "rel:test2", "person:melanie", "friends_with", "person:zara")
 
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "Tell me about Melanie"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}

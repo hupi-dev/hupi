@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
@@ -18,7 +19,7 @@ type stubRetriever struct {
 	err    error
 }
 
-func (s stubRetriever) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (gateway.RetrievalResult, error) {
+func (s stubRetriever) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (gateway.RetrievalResult, error) {
 	return s.result, s.err
 }
 
@@ -125,7 +126,7 @@ type recordingRetriever struct {
 	onRetrieve func(actingUser, workspace identity.Scope)
 }
 
-func (r recordingRetriever) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (gateway.RetrievalResult, error) {
+func (r recordingRetriever) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (gateway.RetrievalResult, error) {
 	r.onRetrieve(actingUser, workspace)
-	return r.stubRetriever.Retrieve(ctx, actingUser, workspace, messages)
+	return r.stubRetriever.Retrieve(ctx, actingUser, workspace, messages, now)
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
@@ -102,7 +103,7 @@ func TestRetrieve_KeywordSearchFindsEntityByAttributeContentVectorSearchMisses(t
 	)
 
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "what is zephyrbatch used for?"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -138,7 +139,7 @@ func TestRetrieve_KeywordSearchFindsExactTermVectorSearchMisses(t *testing.T) {
 	)
 
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "what async runtime does Meridian use?"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -192,7 +193,7 @@ func TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms(t *testing.T) {
 	)
 
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "what async runtime does Meridian use?"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -257,7 +258,7 @@ func TestRetrieve_KeywordSearchFindsEpisodeWithNoEmbeddingAtAll(t *testing.T) {
 	)
 
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "what async runtime does Meridian use?"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -296,7 +297,7 @@ func TestRetrieve_KeywordSearchDisabledByFlag(t *testing.T) {
 	)
 
 	messages := []provider.Message{{Role: provider.RoleUser, Content: "what async runtime does Meridian use?"}}
-	result, err := s.Retrieve(ctx, scope, scope, messages)
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
