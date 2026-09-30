@@ -10,6 +10,7 @@ import (
 	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
+	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
 
@@ -34,6 +35,36 @@ func insertEntityWithLastUpdated(t *testing.T, s *Store, scope identity.Scope, i
 			insert into entities (id, kind, name, attributes, first_seen, last_updated, scope_kind, scope_owner)
 			values ($1, $2, $3, $4, $5, $5, $6, $7)
 		`, id, kind, name, attrsCT, lastUpdated, scope.Kind, scope.Owner)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test entity: %v", err)
+	}
+}
+
+// insertEntityWithEmbeddingAndLastUpdated is insertEntityWithLastUpdated
+// plus a content-independent fake embedding (same technique
+// insertEntityWithEmbedding in retrieve_test.go uses), needed to exercise
+// vectorSearchEntities specifically — that path requires embedding is
+// not null, unlike stage1EntityMatches/keywordSearchEntities.
+func insertEntityWithEmbeddingAndLastUpdated(t *testing.T, s *Store, scope identity.Scope, id, kind, name string, lastUpdated time.Time) {
+	t.Helper()
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	attrsCT, err := enc.Encrypt(`{}`)
+	if err != nil {
+		t.Fatalf("encrypt test entity attrs: %v", err)
+	}
+	vec := make([]float32, 1536)
+	vec[0] = 1
+	embeddingLiteral := pgfmt.VectorLiteral(vec)
+	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into entities (id, kind, name, attributes, first_seen, last_updated, scope_kind, scope_owner, key_version, embedding)
+			values ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9::vector)
+		`, id, kind, name, attrsCT, lastUpdated, scope.Kind, scope.Owner, keyVersion, embeddingLiteral)
 		return err
 	})
 	if err != nil {
@@ -197,6 +228,71 @@ func TestStage1EntityMatches_TimeframeFilterExcludesEvenTheOnlyMatch(t *testing.
 	if result.Gate != gateway.GatePartial {
 		t.Fatalf("gate = %q, want %q (context: %q)", result.Gate, gateway.GatePartial, result.ContextMessage)
 	}
+	if strings.Contains(result.ContextMessage, "AI conference") {
+		t.Errorf("context includes the entity — it's the only match and out of timeframe, so it should have been excluded entirely, not backed off, got: %q", result.ContextMessage)
+	}
+}
+
+// TestVectorSearchEntities_ExcludesOutOfTimeframeCandidateEntirely is the
+// real, fifth retrieval path this same investigation found needed the
+// same fix, after entities.last_updated itself was fixed to reflect the
+// consolidated date instead of real current_date
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): re-verifying the Phase E
+// adversarial case with that fix in place found vectorSearchEntities —
+// not stage1EntityMatches or keywordSearchEntities, both already fixed —
+// was the one actually still surfacing the wrong entity, because a
+// semantic (embedding) match needs no literal substring/keyword hit at
+// all. The query here deliberately names neither entity literally, so
+// only vectorSearchEntities' own fake-but-uniform embedding similarity
+// can find them — isolating this path from the other two already-tested
+// ones.
+func TestVectorSearchEntities_ExcludesOutOfTimeframeCandidateEntirely(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-vector-entity-timeframe-filter"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	insertEntityWithEmbeddingAndLastUpdated(t, s, scope, "project:ai-conference-2024-01-15", "project", "AI conference",
+		time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC))
+	insertEntityWithEmbeddingAndLastUpdated(t, s, scope, "project:robotics-event-2024-05-15", "project", "robotics event",
+		time.Date(2024, 5, 15, 0, 0, 0, 0, time.UTC))
+
+	now := time.Date(2024, 6, 5, 10, 0, 0, 0, time.UTC) // "last month" resolves to May
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "What did I learn about last month?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, now)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if strings.Contains(result.ContextMessage, "AI conference") {
+		t.Errorf("context includes the January (out-of-timeframe) entity — it should have been excluded entirely, got: %q", result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "robotics event") {
+		t.Errorf("context missing the May (in-timeframe, control) entity, got: %q", result.ContextMessage)
+	}
+}
+
+// TestVectorSearchEntities_ExcludesEvenTheOnlyMatch is this path's own
+// version of the same no-backoff confirmation stage1EntityMatches/
+// keywordSearchEntities already have: excluding must not back off to the
+// unfiltered set even when it's the only candidate, since the real
+// motivating case is exactly that shape.
+func TestVectorSearchEntities_ExcludesEvenTheOnlyMatch(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-vector-entity-timeframe-filter-exclude-only"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	insertEntityWithEmbeddingAndLastUpdated(t, s, scope, "project:ai-conference-2024-01-15", "project", "AI conference",
+		time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC))
+
+	now := time.Date(2024, 6, 5, 10, 0, 0, 0, time.UTC) // "last month" resolves to May — the entity doesn't overlap
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "What did I learn about last month?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, now)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
 	if strings.Contains(result.ContextMessage, "AI conference") {
 		t.Errorf("context includes the entity — it's the only match and out of timeframe, so it should have been excluded entirely, not backed off, got: %q", result.ContextMessage)
 	}

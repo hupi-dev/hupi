@@ -473,7 +473,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		}
 		refs = append(refs, episodeRefs...)
 
-		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit, &citations, entitySimilarityThreshold, entityMaxResults)
+		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit, &citations, entitySimilarityThreshold, entityMaxResults, query, now)
 		if err != nil {
 			return fmt.Errorf("vector search entities: %w", err)
 		}
@@ -1364,9 +1364,9 @@ func mostRelevantFactIndex(facts []string, queryTerms []string) int {
 // excluded the same way stage1EntityMatches excludes it: it's handled
 // unconditionally by buildAnchor regardless of query content, not
 // something that should ever compete for a vector-search slot.
-func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int) ([]identity.Ref, error) {
+func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, name, attributes, key_version, (embedding <=> $1::vector) as distance
+		select id, name, attributes, key_version, last_updated, (embedding <=> $1::vector) as distance
 		from entities
 		where embedding is not null and kind != 'self_model'
 		  and not (id = any($2::text[]))
@@ -1379,17 +1379,36 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 	}
 	defer rows.Close()
 
+	// Same answer-time-reasoning hard filter stage1EntityMatches/
+	// keywordSearchEntities already apply
+	// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md) — a fifth, separate
+	// retrieval path this investigation found also needed it: once
+	// entities.last_updated was fixed to actually reflect the
+	// consolidated date instead of real current_date, re-verifying the
+	// Phase E adversarial case found this embedding-similarity path is
+	// the one actually surfacing the wrong entity now, bypassing the
+	// other two entity paths' own fixes entirely (a semantic match needs
+	// no literal substring/keyword hit). Same no-backoff choice as those
+	// two, for the same reason: the real motivating case is exactly one
+	// semantically-matched entity whose only date is wrong, and a
+	// backoff would restore precisely that match.
+	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
+
 	var refs []identity.Ref
 	for rows.Next() {
 		var id, name string
 		var attrsCT []byte
 		var keyVersion int
+		var lastUpdated time.Time
 		var distance float64
-		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion, &distance); err != nil {
+		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion, &lastUpdated, &distance); err != nil {
 			return nil, err
 		}
 		similarity := 1 - distance
 		if similarity < similarityThreshold {
+			continue
+		}
+		if hasTimeframe && !periodsOverlap(lastUpdated, lastUpdated.AddDate(0, 0, 1), tfStart, tfEnd) {
 			continue
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
@@ -1400,7 +1419,11 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 		if err != nil {
 			return nil, err
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s, %s): %s", id, name, attrs))
+		dateLabel := ""
+		if rel := relativeDateLabel(lastUpdated, now); rel != "" {
+			dateLabel = fmt.Sprintf(", last updated %s (%s)", lastUpdated.Format("2006-01-02"), rel)
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s%s, %s): %s", id, dateLabel, name, attrs))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id},
