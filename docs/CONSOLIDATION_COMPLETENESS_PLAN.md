@@ -154,19 +154,20 @@ nothing resolves which one wins. A fix that only makes consolidation
 preserve more facts, without also addressing precedence, increases the
 surface area for Gap 3 rather than reducing it.
 
-### Gap 4 — Two mechanisms, one now confirmed real, one still unobserved
+### Gap 4 — Two mechanisms, both now confirmed real
 
-1. **Retrieval has no temporal-relevance signal.** Ranking is pure
-   embedding similarity to the question's words; nothing boosts a
-   candidate because its `period` label actually overlaps a timeframe
-   the question implies ("last month," "since my trip"). A
-   textually-similar but temporally-wrong summary could in principle
-   outrank the correct one even with perfect, non-contradictory
-   consolidation. Still unobserved — every real failure traced this
-   session happened to be explained by Gap 1 or a retrieval-admission
-   gap first, so this mechanism has never been isolated. Not designed or
-   built; would need a real example before doing either, per this
-   document's own discipline.
+1. **Retrieval has no temporal-relevance signal — ✅ confirmed real,
+   fixed (Phase E).** Ranking was pure embedding/keyword similarity to
+   the question's words; nothing boosted a candidate because its
+   `period` label actually overlapped a timeframe the question implied
+   ("last month," "since my trip"). Confirmed via a deliberately
+   adversarial synthetic test, not assumed: a textually-similar but
+   temporally-wrong summary did outrank the correct one (fused 1.0 vs.
+   0.667) for exactly this reason. See Phase E's own status writeup
+   below for the fix (`internal/store/temporal.go`) and a second, real
+   bug its verification exposed and fixed along the way (`mmrSelect`
+   silently discarding relevance order whenever nothing needed to be
+   discarded).
 2. **Raw aggregation errors at answer time — ✅ confirmed real** (not
    merely plausible). Real-verified against the charity-events case
    once Phase D items 1-2 made both needed facts reliably present in
@@ -780,15 +781,141 @@ belonging here:
   Phase C on the already-rolled-up day) — every level of the resulting
   hierarchy (`2023-01-02` daily, `2023-W01` weekly, `2023-01` monthly)
   came back consistently correct, all stating $300,000 with zero trace
-  of the stale $250,000 value anywhere. This is the last item Phase B's
-  original follow-up list flagged; the consolidation-completeness
-  investigation this whole document tracks is now fully closed except
-  for Phase E (gated, still no real example) and per-episode fact
-  extraction (Ibotta's own open follow-up).
-- Phase E: not started — gated on Phases B/C/D, per its own section.
-- Per-episode fact extraction (Phase B's second design option): not
-  started — confirmed necessary for the Ibotta case specifically (see
-  Phase D item 3 above), not yet designed in detail.
+  of the stale $250,000 value anywhere. This was the last item Phase B's
+  original follow-up list flagged before per-episode fact extraction and
+  Phase E (both written up next) closed out the rest of this document's
+  scope.
+- **Per-episode fact extraction (Phase B's second design option): ✅
+  implemented, real-verified.** `internal/consolidation/perepisode.go` —
+  one independent, narrow LLM call per episode on days already past
+  `clusterEpisodeThreshold`, appended to whatever clustering separately
+  produces (`generateDailySummary`'s busy-day branch). 3 unit tests
+  (`perepisode_test.go`: attribution to the episode's own id, best-effort
+  skip on a failed/malformed call, empty input).
+
+  Real verification against the Ibotta case (the exact scenario Phase D
+  item 3 found clustering alone can't reach): the first prompt version
+  extracted a fact from the target episode but consistently missed the
+  one specific fact the LongMemEval question actually needed — 3 real
+  GPT-4.1 calls against the exact episode text all reported "Ibotta
+  partnered with Thrive Market for cashback," 0/3 ever mentioning "the
+  user just downloaded Ibotta" (the temporal anchor the question's answer
+  depends on), even though both statements are in the same episode. Root
+  cause, not guessed: the prompt's examples ("a purchase, a decision...")
+  didn't cue the model that an incidental scene-setting remark early in a
+  long exchange counts too. Fixed by naming that pattern explicitly and
+  telling the model to be exhaustive, not selective, within one episode.
+  Re-tested against the identical real episode text: 5/5 real GPT-4.1
+  calls now include "The user has just downloaded Ibotta" as its own
+  fact. Real end-to-end re-consolidation of the actual Ibotta day
+  confirmed the same fact lands in the stored summary.
+
+  This surfaced two further real, previously-invisible problems, both
+  found and fixed in the same verification pass (see their own writeups
+  below): more facts per busy day pushed an existing grounding-check
+  weakness from occasional to near-total failure, and — once grounding
+  was fixed and the fact was live in the database — the specific
+  LongMemEval question ("how many weeks ago did I start using Ibotta?")
+  still came back wrong ("9 weeks ago" vs. gold "3 weeks ago") because
+  the answering model got the date arithmetic wrong even with the
+  correct fact in front of it. That residual failure is the same
+  already-confirmed Gap 4 mechanism 2 (answer-time reasoning, not
+  retrieval) documented above for the charity-events case — not a new
+  gap, and not chased further here for the same reason that one wasn't.
+- **Grounding-check batching: ✅ implemented, real-verified (a fix this
+  session's own per-episode verification made necessary, not originally
+  scoped).** `groundingCheck` sent every fact for a whole summary in one
+  LLM call, asking for an exact 1:1 boolean-per-fact JSON array; on any
+  count mismatch it safe-degrades *every* fact in that call to
+  ungrounded (a deliberate, pre-existing design — an ungrounded fact is
+  still stored, just excluded from retrieval, so this was always meant
+  to fail safe rather than destroy information). Real, measured
+  discovery: on the Ibotta day specifically (26 sources, 6 clusters,
+  worse once per-episode extraction adds more facts on top), 2 fresh,
+  independent full real-GPT-4.1 re-consolidation runs both hit this
+  mismatch on **every one of 3 scopes sharing that calendar date**,
+  every single retry — not a rare fluke, and getting *worse* with more
+  facts, exactly the volume per-episode extraction is designed to add.
+  One run's final, persisted summary had 81 facts, 0 grounded — the
+  Ibotta fact my prompt fix had just successfully recovered was
+  completely invisible to retrieval anyway.
+
+  Fixed with `groundingCheckBatchSize = 20`: `groundingCheck` now splits
+  any fact list above that size into fixed-size batches, each its own
+  grounding call, concatenating results — confining any remaining
+  mismatch to the one miscounted batch instead of discarding the whole
+  summary's grounding. 5 new unit tests (`grounding_test.go`), including
+  one that specifically confirms a mismatch on one batch leaves an
+  adjacent, correctly-matched batch's real results untouched. Real
+  re-verification: a third fresh full real-GPT-4.1 re-consolidation of
+  the same Ibotta day came back with only one small mismatch (one batch
+  of 20, off by 1, in a *different* scope) instead of 3/3 scopes fully
+  failing — the target scope's summary landed with **85/85 facts
+  grounded**, including the Ibotta fact.
+- **Phase E (retrieval date-relevance boosting): ✅ implemented,
+  real-verified.** Confirmed genuinely needed first, not assumed: a
+  deliberately adversarial synthetic scenario (a January "AI conference"
+  session about neural networks, a May session about robotics, a
+  question asking what was learned "at the AI conference... last month")
+  showed via `HUPI_DEBUG_FUSION` that both candidates were retrieved
+  (ruling out a candidate-pool gap, Gap 4 mechanism 1) but the
+  temporally-wrong January summary's fused score (1.0, pure lexical
+  match on "AI conference") beat the correct May one (0.667) purely
+  because nothing in ranking was aware of either summary's own period.
+
+  Implemented `internal/store/temporal.go`: `resolveQueryTimeframe`
+  detects a small set of relative-time phrases ("last month," "this
+  week," etc.) against the caller's own `now`, `parsePeriodRange` parses
+  a summary's stored period string (all 4 real formats: daily/weekly/
+  monthly/yearly) into a concrete range, `periodsOverlap` checks the two
+  against each other. `fusedSearchSummaries` adds a flat
+  `temporalRelevanceBoost = 1.0` (a full reciprocal-rank-0 contribution)
+  to any candidate whose period overlaps the resolved timeframe. Since
+  benchmark/synthetic testing fabricates historical "now" values (see
+  `gateway.Handler.Now`'s own doc comment), a real `time.Now()` call
+  inside retrieval would have been silently wrong under exactly the
+  testing this whole document relies on — `now time.Time` was threaded
+  through the `Retriever` interface, `Store.Retrieve`, `retrieve()`, and
+  `fusedSearchSummaries` instead, with `h.now()` the one real call site.
+  7 new unit tests (`temporal_test.go`), including a self-consistency
+  check of `isoWeekStart` against `time.Time.ISOWeek()`'s own reverse
+  mapping across a year boundary (`2020-W53`).
+
+  Real re-verification against the adversarial scenario confirmed the
+  fused score itself was fixed exactly as designed: May's candidate now
+  scores 1.667 (0.667 + the boost) against January's unchanged 1.0.
+  But capturing the actual assembled context (via
+  `-retrieved-context-out-file`) surfaced a second, real, previously
+  invisible bug this fix's own verification exposed: **`mmrSelect`'s
+  "pool fits within k" shortcut returned candidates in raw insertion
+  order, not sorted by relevance, whenever nothing needed to be
+  discarded** — exactly the common case (most queries retrieve fewer
+  candidates than the widened `summaryMaxResults`), and exactly the case
+  this adversarial test hit. The fused-score fix was real, but the
+  context the model actually saw still put January first, because
+  nothing after fusion ever re-sorted a "select everything" pool. This
+  had been silently undermining Phase D item 2's own retrieval-breadth
+  widening the same way, for any query where the widened threshold
+  didn't produce a surplus over `maxResults` — an existing unit test
+  (`TestMMRSelectIsNoOpWhenPoolFitsWithinK`) had encoded this as
+  intentional, using a pool that happened to already be in descending-
+  relevance order, so nothing caught it.
+
+  Fixed by sorting the "return everything" branch by relevance
+  descending — a "no discard" guarantee, not a "no reorder" one.
+  Rewrote the masking unit test with an out-of-order pool so a
+  regression back to raw insertion order would be caught. Re-verified
+  against the adversarial scenario: the assembled context now correctly
+  presents May's (correct) summary first. The final answer is still
+  wrong ("Neural networks, deep learning" instead of gold "Robotics,
+  actuators, and control systems") — with both the fused ranking and the
+  actual context order now fully correct, this is squarely the same
+  already-confirmed Gap 4 mechanism 2 (a real model-reasoning limit at
+  answer time: the model matched the literal phrase "AI conference" in
+  the question to January's content over the "last month" temporal cue,
+  even with the right content presented first) — not a retrieval defect,
+  and not chased further here for the same reason mechanism 2's other
+  instance wasn't.
 - Category 1 (`single-session-preference`) work is separate, already
   shipped (PR #11), and unaffected by this document — see
   `docs/LONGMEMEVAL_ACCURACY_PLAN.md` for its own status and the
@@ -800,29 +927,30 @@ belonging here:
   re-ranking, is still needed there and is out of scope for this
   document).
 
-### Remaining real, unstarted work
+### Status: every phase in this document's original scope is now done
 
-Everything below is real and confirmed-needed (not speculative), just
-not yet built:
+All five phases (A revert, B, C, D, E) plus both of Phase B's own
+follow-up options (per-episode fact extraction) are implemented and
+real-verified against real GPT-4.1. What's left is not new phases but
+real, honestly-documented residual gaps outside this document's own
+scope boundary (answer-time model reasoning, not consolidation or
+retrieval):
 
-- **Phase C — fully done**, both sub-problems, real-verified end to end
-  with real GPT-4.1: entity attribute key-aliasing (sub-problem 1), and
-  cross-period `key_fact` supersession including both of its own
-  initially-found follow-up gaps (re-grounding scope, prose rewriting —
-  sub-problem 2). See Phase C's own writeup for full detail on all of
-  it.
-- **Phase D item 4 — fully done**, real-verified end to end with real
-  GPT-4.1: a synthetic scenario spanning a real weekly and monthly
-  rollup boundary confirmed daily → weekly → monthly all correctly
-  reflect a Phase-C-triggered correction, with zero stale values left
-  anywhere in the hierarchy.
-- **Phase E** (retrieval date-relevance, if it turns out to still
-  matter) — gated on Phases B/C/D, all now done; the next real
-  candidate, still with no confirmed real example driving it.
-- **Per-episode fact extraction** (Phase B's second design option) —
-  confirmed necessary for the Ibotta case specifically (Phase D item 3
-  found cap-raising hits a real ceiling on especially topic-diverse
-  days); not yet designed in detail.
+- **Gap 4 mechanism 2 (answer-time reasoning/arithmetic)** — confirmed
+  real in three independent instances now (charity-events aggregation,
+  the Ibotta "weeks ago" computation, the Phase E adversarial
+  "AI conference" case), all with retrieval fully correct and the needed
+  fact(s) demonstrably present in the assembled context. Three separate
+  prompt-only fix attempts across these cases all showed zero or
+  negligible measured effect. This looks like a genuine model-capability
+  limit on multi-step reasoning over retrieved context, not something
+  this document's own toolkit (consolidation completeness, retrieval
+  ranking) can address — the honest next step, if this is worth
+  pursuing further, is a dedicated answer-time reasoning mechanism (e.g.
+  a structured multi-step reasoning pass), out of scope here.
+- **Category 1 (`single-session-preference`) multi-candidate ranking** —
+  tracked separately in `docs/LONGMEMEVAL_ACCURACY_PLAN.md`, already
+  noted below.
 
 ## Non-goals
 
