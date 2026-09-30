@@ -28,6 +28,8 @@ const aggregationExtractionSystemPrompt = `You will be given a question that req
 
 {"facts": [{"description": "<a single concrete, self-contained fact>", "date": "YYYY-MM-DD"}, ...]}
 
+Be exhaustive, not selective: the context may mention several similar-sounding events on different dates, and the question may depend on a specific pair or subset of them — list every one you find, even ones that seem redundant or only mentioned in passing, rather than stopping once you've found one or two. Missing a relevant date here means the question can't be answered correctly later, so err toward including a borderline case rather than omitting it.
+
 Only include a fact if the context actually states a specific calendar date for it — do not infer, guess, or resolve a relative date ("last week") yourself. If fewer than two such facts exist, respond with {"facts": []}.`
 
 func buildAggregationExtractionPrompt(question, contextMessage string) string {
