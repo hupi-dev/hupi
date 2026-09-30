@@ -435,7 +435,8 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 
 	summarySimilarityThreshold := vectorSimilarityThreshold
 	summaryMaxResults := maxVectorResults()
-	if looksLikeOrderingRequest(query) {
+	isOrderingQuery := looksLikeOrderingRequest(query)
+	if isOrderingQuery {
 		summarySimilarityThreshold = orderingSummarySimilarityThreshold
 		summaryMaxResults = orderingSummaryMaxResults
 	}
@@ -520,10 +521,11 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	}
 
 	return gateway.RetrievalResult{
-		Gate:           gate,
-		ContextMessage: truncateToBudget(sb.String(), contextCharBudget()),
-		Refs:           refs,
-		Citations:      citations,
+		Gate:                 gate,
+		ContextMessage:       truncateToBudget(sb.String(), contextCharBudget()),
+		Refs:                 refs,
+		Citations:            citations,
+		NeedsAggregationPass: isOrderingQuery,
 	}, nil
 }
 
