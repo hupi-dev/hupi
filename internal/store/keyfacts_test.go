@@ -60,3 +60,32 @@ func TestMostRelevantFactIndexNoOpWithoutQueryTerms(t *testing.T) {
 		t.Errorf("mostRelevantFactIndex() = %d, want -1 (no query terms to rank against)", got)
 	}
 }
+
+// TestSummaryCitationSnippetIncludesMostRelevantFact confirms the
+// citation snippet (docs/ANSWER_CITATIONS_PLAN.md) reuses the same
+// mostRelevantFactIndex ranking appendKeyFacts already applies to the
+// injected context — a citation should never disagree with what was
+// actually promoted for the model to see.
+func TestSummaryCitationSnippetIncludesMostRelevantFact(t *testing.T) {
+	facts := []string{
+		"Melanie enjoys painting landscapes in her free time.",
+		"Melanie has camped at the beach, in the mountains, and in the forest.",
+	}
+	queryTerms := []string{"where", "has", "melanie", "camped"}
+	got := summaryCitationSnippet("Melanie's hobbies and travels.", facts, queryTerms)
+	want := "Melanie's hobbies and travels.\n  - (most relevant) Melanie has camped at the beach, in the mountains, and in the forest."
+	if got != want {
+		t.Errorf("summaryCitationSnippet() = %q, want %q", got, want)
+	}
+}
+
+// TestSummaryCitationSnippetIsProseOnlyWithoutAClearWinner confirms no
+// fabricated "(most relevant)" label when nothing actually stands out —
+// mirrors appendKeyFacts' own no-reordering behavior in that case.
+func TestSummaryCitationSnippetIsProseOnlyWithoutAClearWinner(t *testing.T) {
+	got := summaryCitationSnippet("Melanie's hobbies and travels.", nil, []string{"melanie"})
+	want := "Melanie's hobbies and travels."
+	if got != want {
+		t.Errorf("summaryCitationSnippet() = %q, want %q", got, want)
+	}
+}

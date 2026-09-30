@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { createClient, streamChat, type ChatMessage } from './hupiClient';
+import { createClient, streamChat, type ChatMessage, type Citation } from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
 
@@ -8,10 +8,13 @@ import { promptSignInRequired } from './oidcAuth';
 // rather than a shared module import, since the webview side (src/webview/chat.ts)
 // is a separate esbuild bundle that must never import `vscode` — duplicating
 // these few lines is cheaper than wiring a shared non-vscode types module.
+// Citation itself (hupiClient.ts) has no `vscode` dependency, so it's
+// imported directly rather than re-duplicated field-by-field here.
 type FromWebview = { type: 'send'; text: string } | { type: 'clear' };
 type ToWebview =
   | { type: 'userEcho'; text: string }
   | { type: 'delta'; text: string }
+  | { type: 'citations'; items: Citation[] }
   | { type: 'done' }
   | { type: 'error'; message: string };
 
@@ -100,6 +103,10 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    const settings = vscode.workspace.getConfiguration('hupi');
+    const citationsEnabled = settings.get<boolean>('citations.enabled', true);
+    const deepCitations = settings.get<boolean>('citations.deep', false);
+
     const controller = new AbortController();
     this.inFlight = controller;
     const client = createClient(cfg);
@@ -110,6 +117,8 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
         messages: this.history,
         signal: controller.signal,
         onDelta: (delta) => this.post(webview, { type: 'delta', text: delta }),
+        explain: citationsEnabled ? (deepCitations ? 'deep' : 'on') : undefined,
+        onCitations: (items) => this.post(webview, { type: 'citations', items }),
       });
       this.post(webview, { type: 'done' });
     } catch (err) {
@@ -203,6 +212,19 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     .msg p:last-child { margin-bottom: 0; }
     .msg pre { background: var(--vscode-textCodeBlock-background); padding: 8px; overflow-x: auto; border-radius: 4px; }
     .msg code { font-family: var(--vscode-editor-font-family, monospace); }
+    .citations {
+      margin-top: 8px; padding-top: 6px;
+      border-top: 1px solid var(--hupi-border);
+      font-size: 11.5px; color: var(--vscode-descriptionForeground);
+    }
+    .citations .citationsTitle {
+      font-weight: 600; font-size: 10.5px; letter-spacing: 0.06em;
+      text-transform: uppercase; margin-bottom: 4px;
+    }
+    .citations ul { margin: 0; padding-left: 16px; }
+    .citations li { margin-bottom: 3px; }
+    .citations .used { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); }
+    .citations .unused { opacity: 0.7; }
     #inputRow { display: flex; border-top: 1px solid var(--hupi-border); padding: 8px; gap: 6px; flex-shrink: 0; }
     #input {
       flex: 1; resize: none;

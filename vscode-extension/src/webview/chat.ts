@@ -8,9 +8,22 @@ declare function acquireVsCodeApi(): {
   postMessage: (message: unknown) => void;
 };
 
+interface CitationRef {
+  kind: string;
+  scope: { kind: string; owner: string };
+  id: string;
+}
+
+interface Citation {
+  ref: CitationRef;
+  snippet: string;
+  used?: boolean;
+}
+
 type ToWebview =
   | { type: 'userEcho'; text: string }
   | { type: 'delta'; text: string }
+  | { type: 'citations'; items: Citation[] }
   | { type: 'done' }
   | { type: 'error'; message: string };
 
@@ -23,6 +36,36 @@ const newChatButton = document.getElementById('newChat') as HTMLButtonElement;
 
 let currentAssistantContent: HTMLDivElement | null = null;
 let currentAssistantRaw = '';
+// Held separately from currentAssistantRaw rather than folded into the
+// streamed markdown text: the 'done' handler's final render replaces
+// currentAssistantContent's whole innerHTML from currentAssistantRaw, so
+// anything appended earlier (e.g. during a 'citations' message, which
+// always arrives before 'done' — see hupiClient.ts's streamChat, whose
+// onCitations only ever fires on the terminal chunk) would just get
+// wiped out again by that re-render if it lived in the same string.
+let currentCitations: Citation[] = [];
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderCitationsHtml(citations: Citation[]): string {
+  if (citations.length === 0) {
+    return '';
+  }
+  const items = citations
+    .map((c) => {
+      const used = c.used === true ? ' <span class="used">✓ used</span>' : c.used === false ? ' <span class="unused">(not relied on)</span>' : '';
+      const snippet = c.snippet.length > 200 ? c.snippet.slice(0, 200) + '…' : c.snippet;
+      return `<li><strong>${escapeHtml(c.ref.kind)}</strong>${used}: ${escapeHtml(snippet)}</li>`;
+    })
+    .join('');
+  return `<div class="citations"><div class="citationsTitle">Sources</div><ul>${items}</ul></div>`;
+}
 
 // Streaming deltas can arrive faster than every animation frame (bursts
 // after a network hiccup, or just a fast model) — re-parsing the whole
@@ -100,6 +143,7 @@ function newChat(): void {
   empty.style.display = '';
   currentAssistantContent = null;
   currentAssistantRaw = '';
+  currentCitations = [];
   setStreaming(false);
   vscode.postMessage({ type: 'clear' });
 }
@@ -121,6 +165,10 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       scheduleRender();
       break;
     }
+    case 'citations': {
+      currentCitations = message.items;
+      break;
+    }
     case 'done': {
       // A render may still be scheduled for this frame with the final
       // text already in currentAssistantRaw — let it run rather than
@@ -129,10 +177,12 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       // even if no frame was pending.
       if (currentAssistantContent) {
         currentAssistantContent.innerHTML = marked.parse(currentAssistantRaw) as string;
+        currentAssistantContent.insertAdjacentHTML('beforeend', renderCitationsHtml(currentCitations));
         log.scrollTop = log.scrollHeight;
       }
       currentAssistantContent = null;
       currentAssistantRaw = '';
+      currentCitations = [];
       setStreaming(false);
       break;
     }
@@ -145,6 +195,7 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       appendMessage(message.message, 'error');
       currentAssistantContent = null;
       currentAssistantRaw = '';
+      currentCitations = [];
       setStreaming(false);
       break;
     }

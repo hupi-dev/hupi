@@ -39,6 +39,29 @@ type RetrievalResult struct {
 	Gate           MemoryGate
 	ContextMessage string
 	Refs           []identity.Ref // scope-qualified — see identity.Ref and docs/TIER3_PLAN.md D2
+	// Citations mirrors Refs one-for-one with a human-readable snippet
+	// per reference — see docs/ANSWER_CITATIONS_PLAN.md. This is
+	// retrieval-level ("what was available"), not generation-level
+	// ("what the answer actually relied on") — that distinction is the
+	// plan doc's own Phase 1 vs Phase 2 split.
+	Citations []Citation
+}
+
+// Citation pairs a Ref with the exact text that was injected into
+// context for it, so a caller can see not just *that* a summary/entity/
+// episode fed an answer but *what it said*, without re-fetching and
+// re-decrypting the underlying record.
+type Citation struct {
+	Ref     identity.Ref `json:"ref"`
+	Snippet string       `json:"snippet"`
+	// Used is nil unless X-Hupi-Explain: deep ran attributionCheck
+	// (attribution.go, Phase 2 of docs/ANSWER_CITATIONS_PLAN.md) — the
+	// retrieval-level Citation above only shows what was *available*;
+	// this is the generation-level verdict on what the answer actually
+	// *relied on*. Left nil (omitted) rather than false when not
+	// checked, so a caller can't mistake "not checked" for "checked and
+	// found unused."
+	Used *bool `json:"used,omitempty"`
 }
 
 // Retriever is implemented by the retrieval engine — not sketched in this
@@ -232,6 +255,16 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// unconditionally regardless of how trivial the turn was.
 	skipCapture := r.Header.Get("X-Hupi-Capture") == "off"
 
+	// Opt-in citations (docs/ANSWER_CITATIONS_PLAN.md): retrieval already
+	// computes Citations unconditionally (cheap — no extra LLM call, see
+	// RetrievalResult's own doc comment), so this header only controls
+	// whether the response includes them, not whether they're computed.
+	// Two levels, deliberately not one bool: "on" is retrieval-level only
+	// (Phase 1, free); "deep" additionally runs attributionCheck (Phase
+	// 2, one extra real LLM call) — a caller who only wants "what was
+	// available" shouldn't pay for "what was actually used" by default.
+	explainMode := r.Header.Get("X-Hupi-Explain")
+
 	// Step 3: context injection.
 	augmented := messages
 	if result.ContextMessage != "" {
@@ -246,10 +279,10 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	inputText := lastUserMessage(messages)
 
 	if req.Stream {
-		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture)
+		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode)
 		return
 	}
-	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture)
+	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode)
 }
 
 // resolveIdentity authenticates a request. With h.Auth nil (Tier 1/2
@@ -383,6 +416,7 @@ func (h *Handler) handleNonStream(
 	inputText string,
 	actor string,
 	skipCapture bool,
+	explainMode string,
 ) {
 	// Model is left blank here on purpose: req.Model was used above only
 	// to pick a provider profile (resolveProvider) and may well be a
@@ -440,6 +474,25 @@ func (h *Handler) handleNonStream(
 			TotalTokens:      resp.Usage.TotalTokens,
 		},
 	}
+	if explainMode != "" {
+		citations := append([]Citation{}, result.Citations...)
+		if explainMode == "deep" && len(citations) > 0 {
+			used, attrErr := attributionCheck(ctx, target, resp.Message.Content, citations)
+			if attrErr != nil {
+				// Same availability-over-durability call as capture above:
+				// a failed attribution check degrades to Phase 1's plain
+				// citation list (Used left nil, i.e. "not checked"), not a
+				// failed response — the user's answer is already in hand.
+				h.log().Error("attribution check failed, returning citations without Used", "error", attrErr)
+			} else {
+				for i := range citations {
+					u := used[i]
+					citations[i].Used = &u
+				}
+			}
+		}
+		out.Citations = citations
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
@@ -455,6 +508,7 @@ func (h *Handler) handleStream(
 	inputText string,
 	actor string,
 	skipCapture bool,
+	explainMode string,
 ) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -541,10 +595,26 @@ drain:
 	// the client is *told* the turn is done, not merely before the content
 	// finishes arriving — the content itself was already streamed above.
 	finish := "stop"
-	writeSSEChunk(w, chatCompletionChunk{
+	terminal := chatCompletionChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: target.Model(),
 		Choices: []chatCompletionChunkChoice{{Index: 0, Delta: chatCompletionChunkDelta{}, FinishReason: &finish}},
-	})
+	}
+	if explainMode != "" {
+		citations := append([]Citation{}, result.Citations...)
+		if explainMode == "deep" && len(citations) > 0 {
+			used, attrErr := attributionCheck(ctx, target, buf.String(), citations)
+			if attrErr != nil {
+				h.log().Error("attribution check failed, returning citations without Used", "error", attrErr)
+			} else {
+				for i := range citations {
+					u := used[i]
+					citations[i].Used = &u
+				}
+			}
+		}
+		terminal.Citations = citations
+	}
+	writeSSEChunk(w, terminal)
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }

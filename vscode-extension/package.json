@@ -2,7 +2,7 @@
   "name": "hupi-vscode",
   "displayName": "HUPI",
   "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "hupi",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
@@ -70,6 +70,16 @@
           "type": "string",
           "default": "",
           "description": "Profile name (from your HUPI deployment's providers.yaml) to use for ghost-text completions specifically — independent of hupi.model. Since completions fire on every typing pause, pointing this at a smaller/cheaper/local model avoids paying full chat-model cost per keystroke pause. Leave blank to reuse hupi.model/the default chat provider (the old behavior)."
+        },
+        "hupi.citations.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show which stored memories (summaries/entities/past exchanges) fed each chat answer, as a Sources list under the response. Free — adds no extra request, just asks the gateway to include what it already computed during retrieval."
+        },
+        "hupi.citations.deep": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also verify which cited sources the answer actually relied on (vs. merely had available), marking each Source as used or not. Off by default: this costs one extra real LLM call per answer. No effect unless hupi.citations.enabled is also on."
         }
       }
     },

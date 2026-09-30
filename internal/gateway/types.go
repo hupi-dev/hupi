@@ -38,6 +38,11 @@ type chatCompletionResponse struct {
 	Model   string                 `json:"model"`
 	Choices []chatCompletionChoice `json:"choices"`
 	Usage   chatCompletionUsage    `json:"usage"`
+	// Citations is only populated when the request set X-Hupi-Explain: on
+	// (docs/ANSWER_CITATIONS_PLAN.md) — an additive field a strict OpenAI
+	// client simply never looks for, so its absence changes nothing for
+	// existing callers.
+	Citations []Citation `json:"hupi_citations,omitempty"`
 }
 
 type chatCompletionChunkDelta struct {
@@ -69,4 +74,10 @@ type chatCompletionChunk struct {
 	Created int64                       `json:"created"`
 	Model   string                      `json:"model"`
 	Choices []chatCompletionChunkChoice `json:"choices"`
+	// Citations is only set on the terminal chunk (the one carrying
+	// FinishReason), and only when X-Hupi-Explain was set — same
+	// additive, omitempty field as chatCompletionResponse.Citations, for
+	// clients that stream instead of using the non-streamed response
+	// shape (docs/ANSWER_CITATIONS_PLAN.md).
+	Citations []Citation `json:"hupi_citations,omitempty"`
 }

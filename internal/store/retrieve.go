@@ -205,6 +205,7 @@ func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Sco
 func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (gateway.RetrievalResult, error) {
 	var anchor string
 	var anchorRefs []identity.Ref
+	var anchorCitations []gateway.Citation
 	var matchedEntityIDs []string
 	var entityLines []string
 
@@ -212,7 +213,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 
 	err := dbscope.Run(ctx, s.db, actingUser, workspace, func(tx *sql.Tx) error {
 		var err error
-		anchor, anchorRefs, err = s.buildAnchor(ctx, tx, actingUser, workspace)
+		anchor, anchorRefs, anchorCitations, err = s.buildAnchor(ctx, tx, actingUser, workspace)
 		if err != nil {
 			return fmt.Errorf("build anchor: %w", err)
 		}
@@ -237,14 +238,14 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	}
 
 	if query == "" {
-		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs}, nil
+		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs, Citations: anchorCitations}, nil
 	}
 
 	hasSignal := stage1KeywordSignal(query) || stage1QuestionSignal(query)
 
 	// Stage 1 found nothing at all: skipped, no search ever ran.
 	if len(matchedEntityIDs) == 0 && !hasSignal {
-		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs}, nil
+		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs, Citations: anchorCitations}, nil
 	}
 
 	// Stage 2: something looked worth searching for.
@@ -252,11 +253,14 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	sb.WriteString(anchor)
 
 	refs := append([]identity.Ref{}, anchorRefs...)
+	citations := append([]gateway.Citation{}, anchorCitations...)
 	strongHit := false
 
 	for i, id := range matchedEntityIDs {
 		sb.WriteString("\n" + entityLines[i])
-		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: workspace, ID: id})
+		ref := identity.Ref{Kind: identity.RefKindEntity, Scope: workspace, ID: id}
+		refs = append(refs, ref)
+		citations = append(citations, gateway.Citation{Ref: ref, Snippet: entityLines[i]})
 		strongHit = true // an exact entity-key match is always a strong hit
 	}
 
@@ -282,19 +286,19 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// searches (vector picks first, keyword only adds what's left
 		// over) for now. See fusedSearchSummaries' own doc comment for
 		// why summaries specifically.
-		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit)
+		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations)
 		if err != nil {
 			return fmt.Errorf("fused search summaries: %w", err)
 		}
 		refs = append(refs, summaryRefs...)
 
-		episodeRefs, err := s.vectorSearchEpisodes(ctx, tx, workspace, queryVector, &sb, &strongHit)
+		episodeRefs, err := s.vectorSearchEpisodes(ctx, tx, workspace, queryVector, &sb, &strongHit, &citations)
 		if err != nil {
 			return fmt.Errorf("vector search episodes: %w", err)
 		}
 		refs = append(refs, episodeRefs...)
 
-		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit)
+		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit, &citations)
 		if err != nil {
 			return fmt.Errorf("vector search entities: %w", err)
 		}
@@ -306,13 +310,13 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// vectorSearchEntities already uses for stage 1's own matches.
 		// Summaries are handled above instead, by fusedSearchSummaries.
 		if len(queryTerms) > 0 && keywordSearchEnabled() {
-			episodeKeywordRefs, err := s.keywordSearchEpisodes(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEpisode), &sb, &strongHit)
+			episodeKeywordRefs, err := s.keywordSearchEpisodes(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEpisode), &sb, &strongHit, &citations)
 			if err != nil {
 				return fmt.Errorf("keyword search episodes: %w", err)
 			}
 			refs = append(refs, episodeKeywordRefs...)
 
-			entityKeywordRefs, err := s.keywordSearchEntities(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEntity), &sb, &strongHit)
+			entityKeywordRefs, err := s.keywordSearchEntities(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEntity), &sb, &strongHit, &citations)
 			if err != nil {
 				return fmt.Errorf("keyword search entities: %w", err)
 			}
@@ -324,7 +328,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// search combined) — a relationship connects two entities
 		// regardless of *how* one of them was found, so this needs the
 		// full set, not just one search's own results.
-		graphRefs, err := s.graphWalkRelationships(ctx, tx, workspace, refIDsOfKind(refs, identity.RefKindEntity), &sb, &strongHit)
+		graphRefs, err := s.graphWalkRelationships(ctx, tx, workspace, refIDsOfKind(refs, identity.RefKindEntity), &sb, &strongHit, &citations)
 		if err != nil {
 			return fmt.Errorf("graph walk relationships: %w", err)
 		}
@@ -344,6 +348,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		Gate:           gate,
 		ContextMessage: truncateToBudget(sb.String(), contextCharBudget()),
 		Refs:           refs,
+		Citations:      citations,
 	}, nil
 }
 
@@ -355,9 +360,10 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 // with both scope-variable pairs already set (dbscope.SetSession) — this
 // is the one place in this package that genuinely reads two different
 // scopes in one call.
-func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, workspace identity.Scope) (string, []identity.Ref, error) {
+func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, workspace identity.Scope) (string, []identity.Ref, []gateway.Citation, error) {
 	var sb strings.Builder
 	var refs []identity.Ref
+	var citations []gateway.Citation
 
 	var selfID, attrs string
 	var attrsCT []byte
@@ -371,18 +377,20 @@ func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, 
 	case errors.Is(err, sql.ErrNoRows):
 		// no self_model configured yet — anchor is just the summary pointer
 	case err != nil:
-		return "", nil, fmt.Errorf("load self_model: %w", err)
+		return "", nil, nil, fmt.Errorf("load self_model: %w", err)
 	default:
 		actingEnc, keyErr := s.keys.GetVersion(ctx, actingUser, keyVersion)
 		if keyErr != nil {
-			return "", nil, fmt.Errorf("resolve encryption key for self_model: %w", keyErr)
+			return "", nil, nil, fmt.Errorf("resolve encryption key for self_model: %w", keyErr)
 		}
 		attrs, err = actingEnc.Decrypt(attrsCT)
 		if err != nil {
-			return "", nil, fmt.Errorf("decrypt self_model attributes: %w", err)
+			return "", nil, nil, fmt.Errorf("decrypt self_model attributes: %w", err)
 		}
 		sb.WriteString("self_model: " + attrs + "\n")
-		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: actingUser, ID: selfID})
+		ref := identity.Ref{Kind: identity.RefKindEntity, Scope: actingUser, ID: selfID}
+		refs = append(refs, ref)
+		citations = append(citations, gateway.Citation{Ref: ref, Snippet: "self_model: " + attrs})
 	}
 
 	var latestPeriod string
@@ -396,12 +404,12 @@ func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, 
 	case errors.Is(err, sql.ErrNoRows):
 		// day one: no summaries exist yet, nothing to point at
 	case err != nil:
-		return "", nil, fmt.Errorf("load latest daily summary period: %w", err)
+		return "", nil, nil, fmt.Errorf("load latest daily summary period: %w", err)
 	default:
 		sb.WriteString("(latest daily summary: " + latestPeriod + ")\n")
 	}
 
-	return sb.String(), refs, nil
+	return sb.String(), refs, citations, nil
 }
 
 // stage1EntityMatches does a cheap, local (no LLM call) scan for known
@@ -624,7 +632,7 @@ func reciprocalRank(rank int) float64 {
 // separates a true positive from a same-topic near-miss in practice, on
 // top of that cutoff. Re-measure if the tokenizer's stopword list or the
 // BM25 k1/b constants ever change.
-func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
 	type candidate struct {
 		id          string
 		text        string
@@ -825,10 +833,15 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 			label = ", keyword match"
 		}
 		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s): %s", c.id, label, c.text))
-		if err := appendKeyFacts(ctx, q, c.id, c.enc, queryTerms, sb); err != nil {
+		facts, err := appendKeyFacts(ctx, q, c.id, c.enc, queryTerms, sb)
+		if err != nil {
 			return nil, err
 		}
 		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: c.id})
+		*citations = append(*citations, gateway.Citation{
+			Ref:     identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: c.id},
+			Snippet: summaryCitationSnippet(c.text, facts, queryTerms),
+		})
 		*strongHit = true
 	}
 	return refs, nil
@@ -866,14 +879,18 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 // unmarked, whenever nothing actually stands out (every fact scores 0,
 // or ties for the top score) — a fabricated "most relevant" label on an
 // arbitrary pick would be worse than no reordering at all.
-func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryTerms []string, sb *strings.Builder) error {
+// appendKeyFacts returns the grounded facts it wrote, in original order
+// (not reordered to match what it wrote to sb) — callers building a
+// citation snippet re-run mostRelevantFactIndex themselves rather than
+// have this function encode two different orderings in one return.
+func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryTerms []string, sb *strings.Builder) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		select fact from summary_key_facts
 		where summary_id = $1 and grounded = true
 		order by id
 	`, summaryID)
 	if err != nil {
-		return fmt.Errorf("load key facts for summary %s: %w", summaryID, err)
+		return nil, fmt.Errorf("load key facts for summary %s: %w", summaryID, err)
 	}
 	defer rows.Close()
 
@@ -881,16 +898,16 @@ func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, en
 	for rows.Next() {
 		var factCT []byte
 		if err := rows.Scan(&factCT); err != nil {
-			return err
+			return nil, err
 		}
 		fact, err := enc.Decrypt(factCT)
 		if err != nil {
-			return fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
+			return nil, fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
 		}
 		facts = append(facts, fact)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
@@ -900,12 +917,24 @@ func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, en
 				sb.WriteString(fmt.Sprintf("\n  - %s", fact))
 			}
 		}
-		return nil
+		return facts, nil
 	}
 	for _, fact := range facts {
 		sb.WriteString(fmt.Sprintf("\n  - %s", fact))
 	}
-	return nil
+	return facts, nil
+}
+
+// summaryCitationSnippet builds a citation's Snippet for a summary: its
+// prose plus, when one stands out, its most query-relevant fact —
+// reuses mostRelevantFactIndex rather than a second ranking scheme, so
+// the citation always agrees with what appendKeyFacts actually promoted
+// in the injected context.
+func summaryCitationSnippet(prose string, facts []string, queryTerms []string) string {
+	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
+		return prose + "\n  - (most relevant) " + facts[best]
+	}
+	return prose
 }
 
 // mostRelevantFactIndex returns the index (within facts, in its original
@@ -957,7 +986,7 @@ func mostRelevantFactIndex(facts []string, queryTerms []string) int {
 // excluded the same way stage1EntityMatches excludes it: it's handled
 // unconditionally by buildAnchor regardless of query content, not
 // something that should ever compete for a vector-search slot.
-func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, name, attributes, key_version, (embedding <=> $1::vector) as distance
 		from entities
@@ -995,6 +1024,10 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 		}
 		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s, %s): %s", id, name, attrs))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
+		*citations = append(*citations, gateway.Citation{
+			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id},
+			Snippet: fmt.Sprintf("entity %s (%s): %s", id, name, attrs),
+		})
 		*strongHit = true
 	}
 	return refs, rows.Err()
@@ -1011,7 +1044,7 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 // episodeVectorSimilarityThreshold, not vectorSimilarityThreshold — see
 // that constant's own doc comment for the real measurement showing they
 // need to differ.
-func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, input_text, output_text, key_version, (embedding <=> $1::vector) as distance
 		from episodes
@@ -1052,6 +1085,10 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 		}
 		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s): USER: %s ASSISTANT: %s", id, input, output))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: id})
+		*citations = append(*citations, gateway.Citation{
+			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: id},
+			Snippet: fmt.Sprintf("USER: %s ASSISTANT: %s", input, output),
+		})
 		*strongHit = true
 	}
 	return refs, rows.Err()
@@ -1297,7 +1334,7 @@ const (
 // including it here would surface a stale connection as if it still
 // held. A future "what was true as of date X" retrieval mode would need
 // to relax this, but nothing today asks that question.
-func (s *Store) graphWalkRelationships(ctx context.Context, q dbscope.Querier, scope identity.Scope, seedEntityIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+func (s *Store) graphWalkRelationships(ctx context.Context, q dbscope.Querier, scope identity.Scope, seedEntityIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
 	if len(seedEntityIDs) == 0 || !graphWalkEnabled() {
 		return nil, nil
 	}
@@ -1358,6 +1395,10 @@ func (s *Store) graphWalkRelationships(ctx context.Context, q dbscope.Querier, s
 		// alone whether the graph walk actually contributed anything.
 		sb.WriteString("\n" + line + ", relationship graph")
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
+		*citations = append(*citations, gateway.Citation{
+			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id},
+			Snippet: line + ", relationship graph",
+		})
 		*strongHit = true // a graph-connected entity is as strong a signal as a directly-matched one
 	}
 	return refs, nil
@@ -1402,7 +1443,7 @@ func refIDsOfKind(refs []identity.Ref, kind string) []string {
 // (same trade-off stage1EntityMatches already makes elsewhere in this
 // file), but the first mechanism in this file where that scale
 // assumption is worth re-checking if it ever stops holding.
-func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, input_text, output_text, key_version
 		from episodes
@@ -1451,6 +1492,10 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 		ex := byID[m]
 		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s, keyword match): USER: %s ASSISTANT: %s", m, ex.input, ex.output))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m})
+		*citations = append(*citations, gateway.Citation{
+			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m},
+			Snippet: fmt.Sprintf("USER: %s ASSISTANT: %s", ex.input, ex.output),
+		})
 		*strongHit = true
 	}
 	return refs, nil
@@ -1472,7 +1517,7 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 // matches it directly with no decryption step), so including it costs
 // nothing and lets a query matching an entity's name but not its stored
 // attribute values still score.
-func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool) ([]identity.Ref, error) {
+func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, name, attributes, key_version
 		from entities
@@ -1517,6 +1562,10 @@ func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, sc
 		e := byID[m]
 		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s, %s, keyword match): %s", m, e.name, e.attrs))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: m})
+		*citations = append(*citations, gateway.Citation{
+			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: m},
+			Snippet: fmt.Sprintf("entity %s (%s): %s", m, e.name, e.attrs),
+		})
 		*strongHit = true
 	}
 	return refs, nil
