@@ -54,6 +54,14 @@ type RetrievalResult struct {
 type Citation struct {
 	Ref     identity.Ref `json:"ref"`
 	Snippet string       `json:"snippet"`
+	// Used is nil unless X-Hupi-Explain: deep ran attributionCheck
+	// (attribution.go, Phase 2 of docs/ANSWER_CITATIONS_PLAN.md) — the
+	// retrieval-level Citation above only shows what was *available*;
+	// this is the generation-level verdict on what the answer actually
+	// *relied on*. Left nil (omitted) rather than false when not
+	// checked, so a caller can't mistake "not checked" for "checked and
+	// found unused."
+	Used *bool `json:"used,omitempty"`
 }
 
 // Retriever is implemented by the retrieval engine — not sketched in this
@@ -251,7 +259,11 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// computes Citations unconditionally (cheap — no extra LLM call, see
 	// RetrievalResult's own doc comment), so this header only controls
 	// whether the response includes them, not whether they're computed.
-	explain := r.Header.Get("X-Hupi-Explain") == "on"
+	// Two levels, deliberately not one bool: "on" is retrieval-level only
+	// (Phase 1, free); "deep" additionally runs attributionCheck (Phase
+	// 2, one extra real LLM call) — a caller who only wants "what was
+	// available" shouldn't pay for "what was actually used" by default.
+	explainMode := r.Header.Get("X-Hupi-Explain")
 
 	// Step 3: context injection.
 	augmented := messages
@@ -270,7 +282,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture)
 		return
 	}
-	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explain)
+	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode)
 }
 
 // resolveIdentity authenticates a request. With h.Auth nil (Tier 1/2
@@ -404,7 +416,7 @@ func (h *Handler) handleNonStream(
 	inputText string,
 	actor string,
 	skipCapture bool,
-	explain bool,
+	explainMode string,
 ) {
 	// Model is left blank here on purpose: req.Model was used above only
 	// to pick a provider profile (resolveProvider) and may well be a
@@ -462,8 +474,24 @@ func (h *Handler) handleNonStream(
 			TotalTokens:      resp.Usage.TotalTokens,
 		},
 	}
-	if explain {
-		out.Citations = result.Citations
+	if explainMode != "" {
+		citations := append([]Citation{}, result.Citations...)
+		if explainMode == "deep" && len(citations) > 0 {
+			used, attrErr := attributionCheck(ctx, target, resp.Message.Content, citations)
+			if attrErr != nil {
+				// Same availability-over-durability call as capture above:
+				// a failed attribution check degrades to Phase 1's plain
+				// citation list (Used left nil, i.e. "not checked"), not a
+				// failed response — the user's answer is already in hand.
+				h.log().Error("attribution check failed, returning citations without Used", "error", attrErr)
+			} else {
+				for i := range citations {
+					u := used[i]
+					citations[i].Used = &u
+				}
+			}
+		}
+		out.Citations = citations
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

@@ -272,3 +272,119 @@ func TestHandleChatCompletions_NoExplainHeaderOmitsCitations(t *testing.T) {
 		t.Errorf("response included hupi_citations without X-Hupi-Explain: %s", w.Body.String())
 	}
 }
+
+// TestHandleChatCompletions_DeepExplainRunsAttributionCheck confirms
+// X-Hupi-Explain: deep makes a real second LLM call (attributionCheck)
+// and populates Citation.Used from its verdict — Phase 2 of
+// docs/ANSWER_CITATIONS_PLAN.md, distinct from plain "on" (Phase 1,
+// asserted not to make this extra call, since it costs a real request).
+func TestHandleChatCompletions_DeepExplainRunsAttributionCheck(t *testing.T) {
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		msgs, _ := body["messages"].([]any)
+		isAttribution := false
+		for _, m := range msgs {
+			msg, _ := m.(map[string]any)
+			if content, _ := msg["content"].(string); strings.Contains(content, "Candidate memory snippets") {
+				isAttribution = true
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		content := "hello from upstream"
+		if isAttribution {
+			content = `{"used": [true]}`
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "fake-model",
+			"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": content}}},
+			"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	defer upstream.Close()
+
+	reg, err := provider.NewRegistry(provider.Config{
+		ActiveChatProvider:          "test",
+		ActiveConsolidationProvider: "test",
+		ActiveEmbeddingProvider:     "test",
+		Providers: map[string]provider.ProfileConfig{
+			"test": {Kind: provider.KindOpenAICompat, Vendor: "test", BaseURL: upstream.URL, Model: "fake-model"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("provider.NewRegistry: %v", err)
+	}
+
+	citation := Citation{Ref: identity.Ref{Kind: identity.RefKindSummary, ID: "sum_test"}, Snippet: "the source text"}
+	retriever := &fakeRetriever{result: RetrievalResult{Gate: GateFull, Citations: []Citation{citation}}}
+	h := &Handler{Registry: reg, Retriever: retriever, Capturer: &fakeCapturer{}}
+
+	w := postChatCompletion(t, h, map[string]string{"X-Hupi-Explain": "deep"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if upstreamCalls != 2 {
+		t.Fatalf("upstreamCalls = %d, want 2 (answer + attribution)", upstreamCalls)
+	}
+
+	var resp chatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Citations) != 1 || resp.Citations[0].Used == nil || !*resp.Citations[0].Used {
+		t.Fatalf("Citations = %+v, want one citation with Used = true", resp.Citations)
+	}
+}
+
+// TestHandleChatCompletions_PlainExplainDoesNotRunAttributionCheck
+// confirms "on" (Phase 1 only) never triggers the extra LLM call "deep"
+// does — the cost-control distinction docs/ANSWER_CITATIONS_PLAN.md's
+// two-level design exists for.
+func TestHandleChatCompletions_PlainExplainDoesNotRunAttributionCheck(t *testing.T) {
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "fake-model",
+			"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": "hello from upstream"}}},
+			"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	defer upstream.Close()
+
+	reg, err := provider.NewRegistry(provider.Config{
+		ActiveChatProvider:          "test",
+		ActiveConsolidationProvider: "test",
+		ActiveEmbeddingProvider:     "test",
+		Providers: map[string]provider.ProfileConfig{
+			"test": {Kind: provider.KindOpenAICompat, Vendor: "test", BaseURL: upstream.URL, Model: "fake-model"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("provider.NewRegistry: %v", err)
+	}
+
+	citation := Citation{Ref: identity.Ref{Kind: identity.RefKindSummary, ID: "sum_test"}, Snippet: "the source text"}
+	retriever := &fakeRetriever{result: RetrievalResult{Gate: GateFull, Citations: []Citation{citation}}}
+	h := &Handler{Registry: reg, Retriever: retriever, Capturer: &fakeCapturer{}}
+
+	w := postChatCompletion(t, h, map[string]string{"X-Hupi-Explain": "on"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("upstreamCalls = %d, want 1 (answer only, no attribution call)", upstreamCalls)
+	}
+
+	var resp chatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Citations) != 1 || resp.Citations[0].Used != nil {
+		t.Fatalf("Citations = %+v, want one citation with Used == nil (not checked)", resp.Citations)
+	}
+}
