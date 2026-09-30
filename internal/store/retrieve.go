@@ -881,7 +881,12 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		}
 	}
 
-	var refs []identity.Ref
+	type pickedSummary struct {
+		c     *candidate
+		label string
+		facts []string
+	}
+	picks := make([]pickedSummary, 0, len(picked))
 	for _, idx := range picked {
 		c := byID[ids[idx]]
 		// Real, deliberate observability, same reasoning as the
@@ -895,15 +900,40 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		case c.keywordRank >= 0:
 			label = ", keyword match"
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s): %s", c.id, label, c.text))
-		facts, err := appendKeyFacts(ctx, q, c.id, c.enc, queryTerms, sb)
+		facts, err := loadKeyFacts(ctx, q, c.id, c.enc)
 		if err != nil {
 			return nil, err
 		}
-		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: c.id})
+		picks = append(picks, pickedSummary{c: c, label: label, facts: facts})
+	}
+
+	// Two real passes over picks, not one interleaved loop — see
+	// docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 1. An
+	// earlier, interleaved version (guaranteed content + that same
+	// summary's own depth, then the next summary's guaranteed content +
+	// depth, and so on) still let one busy summary's depth section push
+	// a *later* summary's guarantee past the truncation point once
+	// several summaries were picked — real-verified against the
+	// charity-events LongMemEval case. Writing every picked summary's
+	// guarantee first, before any summary's depth, means a global
+	// truncateToBudget cut (still the final backstop) can only ever
+	// land on depth, never on a guarantee that hasn't been written yet.
+	//
+	// Pass 2 doesn't repeat "related memory (summary %s...)" — just the
+	// depth content itself — so each summary's id still appears exactly
+	// once in the assembled context
+	// (TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms).
+	for _, p := range picks {
+		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s): %s", p.c.id, p.label, guaranteedFact(p.c.text, p.facts, queryTerms)))
+	}
+
+	var refs []identity.Ref
+	for _, p := range picks {
+		sb.WriteString("\n" + depthText(p.c.text, p.facts, queryTerms))
+		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id})
 		*citations = append(*citations, gateway.Citation{
-			Ref:     identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: c.id},
-			Snippet: summaryCitationSnippet(c.text, facts, queryTerms),
+			Ref:     identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id},
+			Snippet: summaryCitationSnippet(p.c.text, p.facts, queryTerms),
 		})
 		*strongHit = true
 	}
@@ -942,11 +972,13 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 // unmarked, whenever nothing actually stands out (every fact scores 0,
 // or ties for the top score) — a fabricated "most relevant" label on an
 // arbitrary pick would be worse than no reordering at all.
-// appendKeyFacts returns the grounded facts it wrote, in original order
-// (not reordered to match what it wrote to sb) — callers building a
-// citation snippet re-run mostRelevantFactIndex themselves rather than
-// have this function encode two different orderings in one return.
-func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryTerms []string, sb *strings.Builder) ([]string, error) {
+// loadKeyFacts is appendKeyFacts' original DB-loading half, split out
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 1) so
+// fusedSearchSummaries can decide what to do with a summary's facts —
+// guarantee one, then bound the rest — before anything gets written to
+// sb, instead of appendKeyFacts writing everything the moment it's
+// loaded.
+func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		select fact from summary_key_facts
 		where summary_id = $1 and grounded = true
@@ -969,10 +1001,13 @@ func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, en
 		}
 		facts = append(facts, fact)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+	return facts, rows.Err()
+}
 
+// writeKeyFacts is appendKeyFacts' original writing half — one bullet
+// per fact, the most query-relevant one (if any stands out) promoted to
+// the front and marked, same behavior as before the loadKeyFacts split.
+func writeKeyFacts(sb *strings.Builder, facts []string, queryTerms []string) {
 	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
 		sb.WriteString(fmt.Sprintf("\n  - (most relevant) %s", facts[best]))
 		for i, fact := range facts {
@@ -980,12 +1015,74 @@ func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, en
 				sb.WriteString(fmt.Sprintf("\n  - %s", fact))
 			}
 		}
-		return facts, nil
+		return
 	}
 	for _, fact := range facts {
 		sb.WriteString(fmt.Sprintf("\n  - %s", fact))
 	}
-	return facts, nil
+}
+
+// guaranteedFact returns the one piece of text worth protecting for a
+// summary ahead of every picked summary's depth section (see
+// fusedSearchSummaries' two-pass doc comment for why a guarantee, ahead
+// of any depth, is needed at all). Prefers the fact sharing the most
+// query vocabulary (mostRelevantFactIndex); falls back to the first fact
+// if none stands out but at least one exists; falls back to a short
+// prose snippet only when the summary has no grounded key facts at all
+// (rare — see loadKeyFacts/writeKeyFacts' own doc comment on why only
+// grounded facts are ever surfaced).
+//
+// This ranking isn't perfect — real-verified against the charity-events
+// LongMemEval case that mostRelevantFactIndex's plain lexical-overlap
+// scoring can promote the wrong fact on a summary with many candidates,
+// the same real limitation that sank the preference-ranking "1b"
+// attempt elsewhere in this file — which is exactly why depthText's own
+// (uncapped) facts are real insurance beyond this one guaranteed pick,
+// not a redundant duplicate of it.
+func guaranteedFact(prose string, facts []string, queryTerms []string) string {
+	if len(facts) == 0 {
+		return truncateToBudget(prose, guaranteedProseFallbackChars)
+	}
+	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
+		return facts[best]
+	}
+	return facts[0]
+}
+
+// guaranteedProseFallbackChars caps guaranteedFact's no-facts fallback —
+// small on purpose, a fallback for a summary with nothing grounded to
+// guarantee, not meant to substitute for real prose depth.
+const guaranteedProseFallbackChars = 300
+
+// proseDepthCap bounds only a summary's full PROSE contribution to its
+// depth section — key facts (writeKeyFacts) are deliberately NOT capped
+// here. Facts are already engineered to be short and atomic
+// (summarySystemPrompt asks for "a single concrete, checkable fact" per
+// entry), and a Phase B (topic-clustered) busy day can legitimately have
+// 20+ of them, each individually cheap; prose is where the real bulk
+// lives (Phase B's multi-paragraph merged summaries) and is "for human
+// skimming only, not treated as fact" per that same prompt — the right
+// place to spend a tight cap when something has to give. Real-verified
+// against the charity-events LongMemEval case: capping facts and prose
+// together (the original version of this fix) let prose alone exhaust
+// the cap before ever reaching a fact several bullets down the list,
+// even though every fact was individually far cheaper than the prose
+// that crowded it out.
+const proseDepthCap = 500
+
+// depthText is every picked summary's "extra depth," written in pass 2
+// of fusedSearchSummaries' two-pass render (see that function's own doc
+// comment) — every key fact, uncapped, followed by a capped prose
+// snippet. The eventual global truncateToBudget call is still the final
+// backstop if the combined depth across every picked summary is too
+// large; this function's job is only to make sure that cut lands on the
+// least valuable content (verbose prose) as late as possible, not on a
+// fact several bullets into a busy day's summary.
+func depthText(prose string, facts []string, queryTerms []string) string {
+	var sb strings.Builder
+	writeKeyFacts(&sb, facts, queryTerms)
+	sb.WriteString("\n" + truncateToBudget(prose, proseDepthCap))
+	return sb.String()
 }
 
 // summaryCitationSnippet builds a citation's Snippet for a summary: its

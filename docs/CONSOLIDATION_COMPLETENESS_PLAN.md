@@ -315,18 +315,53 @@ phase is necessary, not speculative — recovering the previously-missing
 facts exposed three concrete, distinct follow-ups, the first two
 belonging here:
 
-1. **Budget-aware context assembly, not naive tail-truncation.**
-   `internal/store/retrieve.go`'s context builder currently appends
-   selected summaries in relevance order and truncates whatever doesn't
-   fit at the end (`truncateToBudget`) — real-verified against the
-   charity-events case: both needed daily summaries are correctly
-   retrieved and selected, but the lower-ranked one gets cut off
-   mid-sentence, one sentence before the fact the question needs, even
-   at `HUPI_CONTEXT_CHAR_BUDGET=20000`. The fix: guarantee at least the
-   single most-relevant key_fact from every *selected* summary before
-   spending remaining budget on additional depth from higher-ranked
-   ones — a fixed small reservation per summary, then fill the rest
-   greedily by rank, rather than one global ordered append-then-cut.
+1. **Budget-aware context assembly, not naive tail-truncation. ✅
+   Implemented and real-verified.** `fusedSearchSummaries` now renders
+   in two real passes over every picked summary — every summary's one
+   guaranteed fact (`guaranteedFact`) is written first, across all
+   picked summaries, before any summary's "extra depth" (`depthText`);
+   depth itself writes every key fact uncapped (they're already short
+   and atomic by design) followed by a tightly-capped prose snippet
+   (`proseDepthCap=500`), not the other way around. Getting there took
+   two real, disproven intermediate designs, both found by testing
+   against the actual charity-events scope rather than trusting the
+   design on paper:
+   - First attempt interleaved each summary's guarantee immediately
+     followed by its own depth, one summary at a time — still let an
+     earlier summary's depth section push a *later* summary's guarantee
+     past the truncation point once several summaries were picked.
+     Fixed by making guarantee and depth two genuinely separate passes
+     (`loadKeyFacts`/`writeKeyFacts` split out of the old
+     `appendKeyFacts` to make this possible without querying twice; pass
+     2 doesn't repeat the "related memory (summary id...)" header, so
+     `TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms`'s
+     exactly-once invariant still holds).
+   - Second attempt capped prose+facts together per summary
+     (`summaryDepthCap`) — still let prose alone exhaust the cap before
+     ever reaching a fact several bullets down a Phase-B-clustered day's
+     20+-fact list, even though every fact was individually far cheaper
+     than the prose crowding it out. Fixed by uncapping facts entirely
+     and only capping prose.
+
+   Real re-verification against the charity-events case (`HUPI_CONTEXT_CHAR_BUDGET=20000`,
+   `HUPI_MAX_VECTOR_RESULTS=12` so both needed daily summaries are even
+   candidates — see item 2 below for why the widened pick count itself
+   is still a separate, unfixed gap): both previously-truncated facts
+   (the Feb 14 and Feb 15 charity events) are now confirmed present in
+   the assembled context, verified by locating their exact text and
+   surrounding position in the retrieved string, not just a final
+   answer check. The NFL-playoffs case (a single-summary question,
+   default settings) remains fully fixed, confirming no regression.
+
+   **This exposed a new, final-stage, genuinely different gap**: with
+   both facts now reliably in context, the answer is still "No
+   information available" — a real answer-time reasoning/aggregation
+   failure (recognizing two facts as "the two consecutive-day events"
+   and computing the month difference), not a retrieval or
+   context-assembly problem anymore. Not yet designed or fixed — this
+   is Gap 4's "raw aggregation/arithmetic errors at answer time"
+   mechanism, now confirmed real (previously only flagged as plausible
+   but unobserved) rather than a new item.
 2. **Re-test retrieval breadth widening for detected multi-event/
    cross-day query shapes** — the same mechanism
    `docs/LONGMEMEVAL_ACCURACY_PLAN.md` already tried and reverted for
