@@ -121,7 +121,15 @@ func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope,
 		}
 		outputs = append(outputs, out)
 	}
-	return mergeConsolidationOutputs(outputs), nil
+	merged := mergeConsolidationOutputs(outputs)
+
+	// Phase B option 2 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md),
+	// confirmed necessary by Phase D item 3's real finding that
+	// clustering alone has a ceiling on especially topic-diverse days:
+	// an independent, per-episode insurance pass over the *same* full
+	// day's sources, appended to whatever clustering already produced.
+	merged.KeyFacts = append(merged.KeyFacts, r.extractPerEpisodeFacts(ctx, sources)...)
+	return merged, nil
 }
 
 // mergeConsolidationOutputs combines several clusters' independently-
