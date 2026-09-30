@@ -304,37 +304,85 @@ consolidation-side one the way the original Category 2 diagnosis did.
 
 ### Phase C — Gap 3's real fix: contradiction detection at consolidation time
 
-Two sub-problems, matching the two root causes found:
+The most invasive item in this document — both sub-problems below now
+have a concrete, grounded design (verified against the actual schema
+and `Runner` code, not just described in the abstract), but neither is
+built yet. Detection precision is the real risk in both: a false
+positive silently hides a real, valid fact from retrieval by marking it
+superseded; a false negative leaves Gap 3 unfixed. Both designs
+deliberately reuse the *same* detection mechanism — asking the
+consolidation LLM, which already has the right context loaded, rather
+than a standalone heuristic — because this session's own "1b"
+re-ranking attempt already showed plain lexical/heuristic scoring
+doesn't reliably judge semantic sameness.
 
 1. **Same-fact-different-key-name detection for entity attributes.**
-   Before merging a new extraction's attributes over existing ones,
-   check whether an incoming key plausibly restates an existing key
-   under different naming (semantic similarity between key names,
-   possibly combined with checking whether the *values* are consistent
-   with "an update to the same fact" vs. "a genuinely different fact").
-   High false-positive risk if done naively — needs its own design pass
-   specifically on the detection heuristic, not just the mechanical
-   "supersede when detected" plumbing, which can mostly reuse
-   `upsertEntities`'s existing `replace` path.
-2. **Cross-period summary supersession.** Extend `RunDaily`'s
-   supersession check beyond the exact same `(level, period)` pair —
-   when a new day's consolidation produces a key_fact that plausibly
-   contradicts a key_fact in a *different* day's current summary
-   (same entity/topic, conflicting value), mark that relationship
-   explicitly, the same `supersedes`/`correction_reason` mechanism
-   `Runner.Correct` already uses for human corrections, but system-
-   triggered. This needs a definition of "plausibly contradicts" that's
-   specific enough not to false-positive on two summaries that just
-   happen to both mention the same entity without conflicting (e.g. two
-   different, both-true facts about the same person, exactly the
-   multi-candidate problem already flagged in Category 1's own
-   ranking gap) — likely the same underlying detection mechanism as
-   (1), applied to `key_facts` instead of entity attributes.
+   `upsertEntities` (`internal/consolidation/store.go`) already loads an
+   entity's *existing* attributes before merging in a new extraction's
+   — that read is already exactly the context a human would need to
+   judge "is this key restating an existing one under a different
+   name." The design: extend the consolidation LLM's own structured
+   output schema (`EntityUpdate`, `internal/consolidation/types.go`)
+   with an optional `supersedes_keys: []string` field per entity update,
+   and pass the entity's *current* attributes into the consolidation
+   prompt (`buildSummaryPrompt`) the same way `establishedRecord`
+   already gives the model the day's own current draft for continuity —
+   instructed to populate `supersedes_keys` only when confident a new
+   attribute is an update to a specifically-named existing key, not a
+   new, different fact. `upsertEntities`'s merge step then deletes each
+   named superseded key before adding the new one, instead of the
+   current flat overlay that lets both sit side by side forever.
+   Bounded, self-contained, no new LLM call (folds into the existing
+   consolidation call) — the lower-risk of the two sub-problems.
+2. **Cross-period summary key_fact supersession.** Real schema check:
+   `summaries.entities_touched` is already a stored, queryable column,
+   so "which other current summaries touch the same entities as today's
+   new one" is a real, existing query (`entities_touched && $1::text[]
+   and supersedes is null`), not something needing a migration. Real
+   mechanism check: `internal/store/retrieve.go`'s current-summary
+   filter (`not exists (select 1 from summaries newer where
+   newer.supersedes = s.id)`) never actually constrains the superseding
+   row to the *same* period as what it supersedes — that constraint
+   only exists in `RunDaily`'s own same-period lookup
+   (`currentSummaryID`), not in the schema or in retrieval. Cross-period
+   supersession is already structurally supported; nothing has ever
+   exercised it.
 
-This phase is explicitly the most invasive in this document — both
-sub-problems need a real design pass on detection precision before any
-code, matching this document's own "verify before design, design before
-code" discipline. Not scoped down to a concrete implementation here.
+   Design: after `RunDaily` stores a new day's summary, look up other
+   current summaries (any level/period) sharing at least one touched
+   entity. For each, decrypt its key_facts and make one focused,
+   separate LLM call: "here are today's new facts about these shared
+   entities; here are that other period's existing facts about the same
+   entities; do any of today's facts directly state a different,
+   incompatible value for the same specific real-world attribute as an
+   existing fact (not just relate to the same entity/topic)?" If yes,
+   for each contradicted old summary, build a corrected
+   `ConsolidationOutput` (its own content, with the contradicted fact
+   removed or updated) and call `storeSummary` directly (not through
+   `Runner.Correct`, which is shaped for a human operator supplying the
+   full corrected output by hand) with `period`/`level` = the *old*
+   summary's own values, `supersedes` = its ID, `actor = systemActor`,
+   and a correction reason that marks it as system-detected, not a human
+   correction — mirroring `RunDaily`'s own existing
+   "automatic re-consolidation, not a human correction" pattern for
+   same-day re-runs. A real, separate LLM call per new day with
+   entity overlap (real, bounded added cost — only runs when today's
+   summary actually shares an entity with something else already on
+   record, not on every consolidation).
+
+   The explicit "not just relate to the same entity/topic" instruction
+   is the real guard against Category 1's already-known false-positive
+   shape (two different, both-true facts about the same person aren't a
+   contradiction) — asking the model to distinguish "update" from
+   "unrelated additional fact," the same judgment `establishedRecord`'s
+   existing prompt already asks it to make for same-period continuity,
+   just extended across periods.
+
+Sequencing: (1) first — lower risk, no new LLM call, fully
+self-contained. (2) only after (1) is real-verified working, since (2)
+depends on the same underlying "is this really the same fact updated"
+judgment being trustworthy, and is the more invasive, higher-cost, more
+consequential (marks historical data superseded) of the two.
 
 ### Phase D — Gap 2's real fix: cross-day stitching, now confirmed needed
 
