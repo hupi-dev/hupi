@@ -143,3 +143,48 @@ func TestPeriodsOverlap(t *testing.T) {
 		}
 	}
 }
+
+// TestRelativeDateLabelRoundsToNearestNotFloor is the real, measured
+// case this function exists to fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md
+// answer-time reasoning follow-up): the Ibotta LongMemEval question's gold
+// answer is "3 weeks ago" for a 20-day gap (2023-04-16 to 2023-05-06).
+// Floor(20/7) = 2, which is wrong — this must round to the nearest week.
+func TestRelativeDateLabelRoundsToNearestNotFloor(t *testing.T) {
+	start := time.Date(2023, 4, 16, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2023, 5, 6, 9, 18, 0, 0, time.UTC)
+	got := relativeDateLabel(start, now)
+	if got != "3 weeks before now" {
+		t.Errorf("relativeDateLabel(20 days) = %q, want %q", got, "3 weeks before now")
+	}
+}
+
+func TestRelativeDateLabelTiers(t *testing.T) {
+	now := time.Date(2024, 6, 5, 0, 0, 0, 0, time.UTC)
+	day := func(y, m, d int) time.Time { return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC) }
+	cases := []struct {
+		start time.Time
+		want  string
+	}{
+		{day(2024, 6, 5), "today"},
+		{day(2024, 6, 4), "1 day before now"},
+		{day(2024, 6, 1), "4 days before now"},
+		{day(2024, 5, 29), "1 week before now"},   // 7 days
+		{day(2024, 5, 15), "3 weeks before now"},  // 21 days
+		{day(2024, 4, 1), "2 months before now"},  // 65 days -> ~2.1 months
+		{day(2023, 6, 5), "1 year before now"},    // 366 days
+		{day(2022, 6, 5), "2 years before now"},   // 731 days
+	}
+	for _, tc := range cases {
+		if got := relativeDateLabel(tc.start, now); got != tc.want {
+			t.Errorf("relativeDateLabel(%v) = %q, want %q", tc.start, got, tc.want)
+		}
+	}
+}
+
+func TestRelativeDateLabelFutureStartReturnsEmpty(t *testing.T) {
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	start := time.Date(2024, 6, 5, 0, 0, 0, 0, time.UTC)
+	if got := relativeDateLabel(start, now); got != "" {
+		t.Errorf("relativeDateLabel(future start) = %q, want empty string (not a negative delta)", got)
+	}
+}

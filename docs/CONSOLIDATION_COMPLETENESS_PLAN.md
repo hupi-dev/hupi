@@ -931,23 +931,169 @@ belonging here:
 
 All five phases (A revert, B, C, D, E) plus both of Phase B's own
 follow-up options (per-episode fact extraction) are implemented and
-real-verified against real GPT-4.1. What's left is not new phases but
-real, honestly-documented residual gaps outside this document's own
-scope boundary (answer-time model reasoning, not consolidation or
-retrieval):
+real-verified against real GPT-4.1. Two deterministic follow-ups to the
+previously-documented answer-time reasoning gap have since been
+implemented and real-verified too (below) — one of the three original
+reasoning-limit instances is now genuinely fixed, not just
+better-understood.
 
-- **Gap 4 mechanism 2 (answer-time reasoning/arithmetic)** — confirmed
-  real in three independent instances now (charity-events aggregation,
-  the Ibotta "weeks ago" computation, the Phase E adversarial
-  "AI conference" case), all with retrieval fully correct and the needed
-  fact(s) demonstrably present in the assembled context. Three separate
-  prompt-only fix attempts across these cases all showed zero or
-  negligible measured effect. This looks like a genuine model-capability
-  limit on multi-step reasoning over retrieved context, not something
-  this document's own toolkit (consolidation completeness, retrieval
-  ranking) can address — the honest next step, if this is worth
-  pursuing further, is a dedicated answer-time reasoning mechanism (e.g.
-  a structured multi-step reasoning pass), out of scope here.
+- **Deterministic date-delta labels: ✅ implemented, real-verified —
+  fully closes the Ibotta case.** Root cause behind two of the three
+  answer-time reasoning failures (Ibotta's "weeks ago" computation, and
+  part of the Phase E case): the model had the right fact and the right
+  date and still did the subtraction wrong (answered "9 weeks ago"
+  against a gold "3 weeks ago" for a 20-day gap). Fix moves the
+  arithmetic out of the model entirely: `relativeDateLabel`
+  (`internal/store/temporal.go`) computes an already-correct
+  "N weeks/days/months/years before now" string from a summary's period
+  or an episode's own `ts` against the query's own `now`, rounding to
+  the nearest unit (not floor — 20 days rounds to "3 weeks," matching
+  how LongMemEval's own gold answers phrase this), and
+  `fusedSearchSummaries`/`keywordSearchEpisodes` inject it directly into
+  each picked item's context line. 8 new unit tests plus 2 new
+  DB-integration tests.
+
+  Real re-verification against the actual Ibotta LongMemEval question,
+  under `HUPI_CONTEXT_CHAR_BUDGET=20000` (the already-documented
+  recommended setting for cloud-model deployments — the tiny 2000-char
+  default truncates this specific low-ranked-but-needed fact's context
+  line regardless of this fix, a real, pre-existing, already-documented
+  budget limitation, not something this fix caused): the model now
+  answers **"3 weeks ago"** — the gold answer, exactly. This is the
+  first time in this document's entire investigation that the Ibotta
+  case has been fully closed end to end, not just retrieval-complete.
+- **Timeframe hard filter for summaries and episodes: ✅ implemented,
+  real-verified — partial fix for the Phase E adversarial case, and a
+  new, distinct residual gap found in the process.** Root cause behind
+  the rest of the Phase E case and the general "disambiguate between a
+  temporally-correct and a lexically-closer candidate" shape: Phase E's
+  own boost (a soft ranking nudge) correctly reordered candidates, but
+  a same-topic distractor sitting right next to the correct answer in
+  context was still enough to pull the model's answer toward it. Fix:
+  when `resolveQueryTimeframe` confidently resolves a timeframe,
+  candidates whose own period/`ts` provably doesn't overlap it are
+  *excluded* from context entirely, not merely deprioritized — in both
+  `fusedSearchSummaries` (summaries) and `keywordSearchEpisodes` (raw
+  episode keyword search, a separate, previously-untouched retrieval
+  path this investigation found also needed the same fix). Backs off to
+  the unfiltered set if excluding would leave nothing, matching
+  `groundingCheck`'s own established safe-degrade direction. 2 new
+  DB-integration tests confirm both the exclusion and the backoff.
+
+  Real re-verification against the Phase E adversarial scenario: both
+  fixed paths now correctly exclude the January content —
+  `HUPI_DEBUG_FUSION` shows the January summary as
+  `fused=excluded(timeframe)`, and the January episode no longer appears
+  as a raw keyword-matched "related exchange" at all. But the answer
+  changed to **"No information available"** rather than the gold
+  "Robotics, actuators, and control systems" — an honest abstention
+  instead of a confidently wrong answer, but still not correct. Tracing
+  the actual assembled context found why: a **third, previously
+  untouched retrieval path** — `stage1EntityMatches`, a direct
+  substring/name match against the query, unconditionally rendered with
+  no date awareness at all — still surfaces an entity literally named
+  "AI conference (2024-01-15)" (an artifact of consolidation's own
+  entity-naming), asserting a January date for the one thing in context
+  labeled "AI conference." The model appears to reasonably (if
+  incorrectly, for this benchmark) conclude no May "AI conference"
+  exists rather than inferring that the May robotics event *is* what
+  the question's phrasing refers to.
+
+  Entities turned out to have a real, general date-scoping signal after
+  all — `entities.last_updated` (schema/0001_init.sql), not just a
+  one-off naming artifact — closing what first looked like a genuinely
+  different, harder problem. **✅ Fixed for two of what turned out to be
+  three separate entity-touching retrieval paths**: `stage1EntityMatches`
+  (direct substring/name pre-check) and `keywordSearchEntities` (BM25
+  over the whole entity corpus) both now apply the same hard filter
+  using each entity's own `last_updated`, and inject the same computed
+  date label. Both deliberately do **not** back off when excluding would
+  leave nothing — unlike the summary/episode paths — because the real
+  motivating case for both is exactly one coarsely-matched entity whose
+  only date is wrong, and a backoff there would restore precisely the
+  match the fix exists to remove; entities are a supplementary signal
+  either way, with the real facts and dates living in summaries/episodes
+  (where the backoff guarantee still applies). 4 new DB-integration
+  tests, including one confirming a match can now correctly be excluded
+  down to zero.
+
+  **Real re-verification found this doesn't yet close the adversarial
+  case, for two further reasons — one now fixed, one still open:**
+  1. **`entities.last_updated` never reflected a simulated historical
+     date: ✅ fixed, real-verified.** Direct inspection of the real
+     database found every entity in the Phase E adversarial scope — the
+     January-dated "AI conference" *and* the May-dated "robotics event"
+     alike — had the identical real value `2026-09-30`, the actual
+     wall-clock day the benchmark happened to run, not either entity's
+     own simulated historical date. Root cause: `upsertEntities`
+     (`internal/consolidation/store.go`) set `last_updated = current_date`
+     — Postgres's own real clock — never wired to the date actually being
+     consolidated, the way a summary's `period` column and an episode's
+     `ts` column already were. Fixed with a new `periodAsOfDate(level,
+     period)` (`internal/consolidation/period.go`) resolving any
+     level/period into the one real calendar date it represents (the
+     period's *last* day for weekly/monthly/yearly, matching how "as of"
+     naturally reads), threaded into `upsertEntities`'s insert/update
+     for both `first_seen` (new entities) and `last_updated` (every
+     touch). 5 new unit tests plus a real DB-integration regression test
+     using a date years in the past specifically so a real regression
+     back to `current_date` can't pass by coincidence.
+
+     Real re-verification: re-ran real consolidation for both the
+     January and May dates in the actual Phase E scope; the "AI
+     conference" entity's `last_updated` in the real database changed
+     from `2026-09-30` to the correct `2024-01-15`. The two entity
+     retrieval fixes above are now genuinely load-bearing for backdated
+     benchmark/import scenarios, not just day-by-day production use as
+     originally scoped.
+  2. **`vectorSearchEntities` (the fifth and final entity path): ✅
+     fixed, real-verified.** Confirmed by re-running the adversarial case
+     after fix #1 above that this embedding-similarity path — the query's
+     semantic similarity to "AI conference" matches even without a
+     literal substring/keyword hit — was the one actually still
+     surfacing the wrong entity, bypassing both already-fixed entity
+     paths entirely. Fixed with the same pattern as those two (hard
+     filter using `last_updated`, no backoff, same computed date label),
+     now genuinely effective because fix #1 made the underlying date
+     data correct. 2 new DB-integration tests, deliberately phrasing the
+     query without either entity's literal name so only this path's own
+     (fake-but-uniform, for test purposes) embedding similarity can find
+     them — isolating it from the other two, already-separately-tested
+     paths.
+
+     **Real re-verification: the January entity is now completely absent
+     from the assembled context** — all five retrieval paths
+     (`fusedSearchSummaries`, `keywordSearchEpisodes`,
+     `stage1EntityMatches`, `keywordSearchEntities`,
+     `vectorSearchEntities`) correctly exclude it, confirmed by
+     inspecting the exact context sent to the model. The final answer is
+     still wrong ("Not mentioned" vs. gold "Robotics, actuators, and
+     control systems") — but this is now the cleanest possible
+     demonstration of Gap 4 mechanism 2: with retrieval and consolidation
+     both confirmed fully correct and zero distractors present anywhere
+     in context, the model still doesn't infer that a "downtown robotics
+     event" is what the question's "AI conference... last month" phrase
+     refers to. Nothing left in this document's own toolkit
+     (consolidation completeness, retrieval ranking) can move this
+     further; the answer-time reasoning gap below is the only remaining
+     lever.
+- **Gap 4 mechanism 2 (answer-time reasoning/arithmetic), remaining
+  scope** — two real, distinct instances remain fully open. The
+  charity-events aggregation case (find which two of several mentions
+  are "the pair," then compute the gap) doesn't reduce to a single date
+  computation or a timeframe-based exclusion, since there's no implied
+  timeframe to filter by and no single date to compute against — it
+  needs to first identify *which* two facts are the relevant pair. The
+  Phase E adversarial case, now retrieval-clean end to end (see above),
+  needs the model to bridge a literal phrase ("AI conference") to a
+  semantically-equivalent but differently-worded fact — a pure inference
+  gap, not a retrieval one. Two earlier prompt-only fix attempts against
+  the charity-events case showed zero measured effect. The honest next
+  step, if this is worth pursuing further, remains a dedicated
+  multi-step reasoning pass with visible intermediate steps (matching
+  the pattern that's worked everywhere else in this document: narrow,
+  single-purpose LLM calls, not one call doing everything) — a real,
+  separate piece of work, not scoped here.
 - **Category 1 (`single-session-preference`) multi-candidate ranking** —
   tracked separately in `docs/LONGMEMEVAL_ACCURACY_PLAN.md`, already
   noted below.

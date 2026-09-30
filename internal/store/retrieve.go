@@ -304,7 +304,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	var anchor string
 	var anchorRefs []identity.Ref
 	var anchorCitations []gateway.Citation
-	var matchedEntityIDs []string
+	var matchedEntities []entityMatch
 	var entityLines []string
 
 	query := lastUserMessage(messages)
@@ -318,14 +318,54 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		if query == "" {
 			return nil
 		}
-		matchedEntityIDs, err = s.stage1EntityMatches(ctx, tx, workspace, query)
+		matchedEntities, err = s.stage1EntityMatches(ctx, tx, workspace, query)
 		if err != nil {
 			return fmt.Errorf("stage1 entity scan: %w", err)
 		}
-		for _, id := range matchedEntityIDs {
-			line, err := s.formatEntity(ctx, tx, workspace, id)
+
+		// Same answer-time-reasoning hard filter fusedSearchSummaries/
+		// keywordSearchEpisodes already apply
+		// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md) — real, confirmed
+		// necessary here too: a directly name-matched entity is rendered
+		// unconditionally, with no date awareness at all, and this exact
+		// path (an entity literally named "AI conference (2024-01-15)")
+		// kept asserting a temporally-wrong date in the Phase E
+		// adversarial case even after the other two paths were fixed.
+		// Uses each entity's own last_updated (schema/0001_init.sql) as
+		// its date — the most recent day any fact about it was touched,
+		// the same recency signal a summary's period or an episode's ts
+		// already provide.
+		//
+		// Deliberately NOT backed off to the unfiltered set when
+		// excluding would leave nothing, unlike the other two paths: the
+		// real adversarial case that motivated this fix is exactly a
+		// single stage-1 match whose only date is wrong, and a backoff
+		// would restore precisely that match, defeating the fix for its
+		// own primary case. This is a safe asymmetry, not an
+		// inconsistency — stage-1 entity matches are a cheap, coarse
+		// substring pre-check, not this call's main retrieval surface;
+		// fusedSearchSummaries, keywordSearchEpisodes, and
+		// vectorSearchEntities all still run afterward regardless and can
+		// surface the same or related content through a more robust
+		// signal than a bare name/slug substring hit.
+		if tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now); hasTimeframe {
+			kept := make([]entityMatch, 0, len(matchedEntities))
+			for _, m := range matchedEntities {
+				if periodsOverlap(m.lastUpdated, m.lastUpdated.AddDate(0, 0, 1), tfStart, tfEnd) {
+					kept = append(kept, m)
+				}
+			}
+			matchedEntities = kept
+		}
+
+		for _, m := range matchedEntities {
+			dateLabel := ""
+			if rel := relativeDateLabel(m.lastUpdated, now); rel != "" {
+				dateLabel = fmt.Sprintf(", last updated %s (%s)", m.lastUpdated.Format("2006-01-02"), rel)
+			}
+			line, err := s.formatEntity(ctx, tx, workspace, m.id, dateLabel)
 			if err != nil {
-				return fmt.Errorf("load matched entity %s: %w", id, err)
+				return fmt.Errorf("load matched entity %s: %w", m.id, err)
 			}
 			entityLines = append(entityLines, line)
 		}
@@ -342,7 +382,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	hasSignal := stage1KeywordSignal(query) || stage1QuestionSignal(query)
 
 	// Stage 1 found nothing at all: skipped, no search ever ran.
-	if len(matchedEntityIDs) == 0 && !hasSignal {
+	if len(matchedEntities) == 0 && !hasSignal {
 		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs, Citations: anchorCitations}, nil
 	}
 
@@ -354,9 +394,11 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	citations := append([]gateway.Citation{}, anchorCitations...)
 	strongHit := false
 
-	for i, id := range matchedEntityIDs {
+	matchedEntityIDs := make([]string, len(matchedEntities))
+	for i, m := range matchedEntities {
+		matchedEntityIDs[i] = m.id
 		sb.WriteString("\n" + entityLines[i])
-		ref := identity.Ref{Kind: identity.RefKindEntity, Scope: workspace, ID: id}
+		ref := identity.Ref{Kind: identity.RefKindEntity, Scope: workspace, ID: m.id}
 		refs = append(refs, ref)
 		citations = append(citations, gateway.Citation{Ref: ref, Snippet: entityLines[i]})
 		strongHit = true // an exact entity-key match is always a strong hit
@@ -431,7 +473,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		}
 		refs = append(refs, episodeRefs...)
 
-		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit, &citations, entitySimilarityThreshold, entityMaxResults)
+		entityRefs, err := s.vectorSearchEntities(ctx, tx, workspace, queryVector, matchedEntityIDs, &sb, &strongHit, &citations, entitySimilarityThreshold, entityMaxResults, query, now)
 		if err != nil {
 			return fmt.Errorf("vector search entities: %w", err)
 		}
@@ -443,13 +485,13 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// vectorSearchEntities already uses for stage 1's own matches.
 		// Summaries are handled above instead, by fusedSearchSummaries.
 		if len(queryTerms) > 0 && keywordSearchEnabled() {
-			episodeKeywordRefs, err := s.keywordSearchEpisodes(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEpisode), &sb, &strongHit, &citations)
+			episodeKeywordRefs, err := s.keywordSearchEpisodes(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEpisode), &sb, &strongHit, &citations, query, now)
 			if err != nil {
 				return fmt.Errorf("keyword search episodes: %w", err)
 			}
 			refs = append(refs, episodeKeywordRefs...)
 
-			entityKeywordRefs, err := s.keywordSearchEntities(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEntity), &sb, &strongHit, &citations)
+			entityKeywordRefs, err := s.keywordSearchEntities(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEntity), &sb, &strongHit, &citations, query, now)
 			if err != nil {
 				return fmt.Errorf("keyword search entities: %w", err)
 			}
@@ -545,6 +587,17 @@ func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, 
 	return sb.String(), refs, citations, nil
 }
 
+// entityMatch is stage1EntityMatches' own result shape — id plus
+// last_updated (schema/0001_init.sql), needed by retrieve()'s own
+// timeframe hard filter and date-label injection
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md answer-time reasoning
+// follow-up). Kept local to this concern rather than widened into a
+// general "entity summary" struct other callers might expect more from.
+type entityMatch struct {
+	id          string
+	lastUpdated time.Time
+}
+
 // stage1EntityMatches does a cheap, local (no LLM call) scan for known
 // entity names/id-slugs appearing in the message, restricted to the given
 // scope — the "known entity names" half of ARCHITECTURE.md's stage-1
@@ -552,9 +605,9 @@ func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, 
 // personal-history scale; a higher-volume deployment should cache this
 // list in memory and invalidate it on entity writes rather than query it
 // on every turn.
-func (s *Store) stage1EntityMatches(ctx context.Context, q dbscope.Querier, scope identity.Scope, query string) ([]string, error) {
+func (s *Store) stage1EntityMatches(ctx context.Context, q dbscope.Querier, scope identity.Scope, query string) ([]entityMatch, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, name from entities
+		select id, name, last_updated from entities
 		where kind != 'self_model' and scope_kind = $1 and scope_owner = $2
 	`, scope.Kind, scope.Owner)
 	if err != nil {
@@ -563,18 +616,19 @@ func (s *Store) stage1EntityMatches(ctx context.Context, q dbscope.Querier, scop
 	defer rows.Close()
 
 	lowerQuery := strings.ToLower(query)
-	var matches []string
+	var matches []entityMatch
 	for rows.Next() {
 		var id, name string
-		if err := rows.Scan(&id, &name); err != nil {
+		var lastUpdated time.Time
+		if err := rows.Scan(&id, &name, &lastUpdated); err != nil {
 			return nil, err
 		}
 		if name != "" && strings.Contains(lowerQuery, strings.ToLower(name)) {
-			matches = append(matches, id)
+			matches = append(matches, entityMatch{id: id, lastUpdated: lastUpdated})
 			continue
 		}
 		if slug := slugPart(id); slug != "" && strings.Contains(lowerQuery, strings.ToLower(slug)) {
-			matches = append(matches, id)
+			matches = append(matches, entityMatch{id: id, lastUpdated: lastUpdated})
 		}
 	}
 	return matches, rows.Err()
@@ -648,7 +702,7 @@ func stage1QuestionSignal(query string) bool {
 	return false
 }
 
-func (s *Store) formatEntity(ctx context.Context, q dbscope.Querier, scope identity.Scope, id string) (string, error) {
+func (s *Store) formatEntity(ctx context.Context, q dbscope.Querier, scope identity.Scope, id string, dateLabel string) (string, error) {
 	var name string
 	var attrsCT []byte
 	var keyVersion int
@@ -666,7 +720,7 @@ func (s *Store) formatEntity(ctx context.Context, q dbscope.Querier, scope ident
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("entity %s (%s): %s", id, name, attrs), nil
+	return fmt.Sprintf("entity %s%s (%s): %s", id, dateLabel, name, attrs), nil
 }
 
 // vectorSearchSummaries searches the current (non-superseded) summaries
@@ -932,8 +986,49 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// period at all.
 	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
 
-	pool := make([]mmrCandidate, len(ids))
-	for i, id := range ids {
+	// poolIDs is ids, filtered to only the candidates whose period
+	// overlaps a confidently-resolved timeframe — the answer-time
+	// reasoning follow-up to Phase E's own boost
+	// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): real-verified that the
+	// boost alone wasn't enough. Even after it correctly raised the
+	// temporally-right candidate's fused score *and* the mmrSelect
+	// ordering fix correctly put it first in context, the answering
+	// model still picked the temporally-wrong one on pure lexical match
+	// ("AI conference" literally in the wrong summary's text). A
+	// same-topic distractor sitting right next to the correct answer in
+	// context is exactly the shape of error a ranking boost can't fully
+	// prevent — removing it from context entirely is the stronger fix.
+	//
+	// Excluded rather than merely deprioritized only for candidates with
+	// a *parseable* period that provably doesn't overlap — a candidate
+	// with no parseable period is kept (can't judge it, and Phase C/D's
+	// own precedent throughout this codebase is to never destroy
+	// information on an unclear signal). And if excluding would leave
+	// nothing at all (e.g. consolidation simply never ran for the
+	// implied period), the filter backs off entirely rather than
+	// returning an empty context — the same safe-degrade direction
+	// groundingCheck's own count-mismatch handling already uses.
+	poolIDs := ids
+	excludedByTimeframe := make(map[string]bool)
+	if hasTimeframe {
+		kept := make([]string, 0, len(ids))
+		for _, id := range ids {
+			c := byID[id]
+			if pStart, pEnd, ok := parsePeriodRange(c.period); ok && !periodsOverlap(pStart, pEnd, tfStart, tfEnd) {
+				excludedByTimeframe[id] = true
+				continue
+			}
+			kept = append(kept, id)
+		}
+		if len(kept) > 0 {
+			poolIDs = kept
+		} else {
+			excludedByTimeframe = make(map[string]bool)
+		}
+	}
+
+	pool := make([]mmrCandidate, len(poolIDs))
+	for i, id := range poolIDs {
 		c := byID[id]
 		var fused float64
 		if c.vectorRank >= 0 {
@@ -950,7 +1045,11 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				// adversarial case above, without being an unconditional
 				// override: a candidate with a much stronger textual
 				// match can still win if its own fused score clears this
-				// margin some other way.
+				// margin some other way. Still applied on top of the
+				// hard filter above (redundant once every remaining
+				// candidate already overlaps, but harmless, and keeps
+				// this branch correct on its own if the filter above
+				// ever changes).
 				fused += temporalRelevanceBoost
 			}
 		}
@@ -971,7 +1070,17 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		for _, idx := range picked {
 			pickedSet[idx] = true
 		}
-		for i, id := range ids {
+		poolIndex := make(map[string]int, len(poolIDs))
+		for i, id := range poolIDs {
+			poolIndex[id] = i
+		}
+		for _, id := range ids {
+			if excludedByTimeframe[id] {
+				fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d fused=excluded(timeframe) picked=false\n",
+					id, byID[id].vectorRank, byID[id].keywordRank)
+				continue
+			}
+			i := poolIndex[id]
 			fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d fused=%.4f picked=%v\n",
 				id, byID[id].vectorRank, byID[id].keywordRank, pool[i].relevance, pickedSet[i])
 		}
@@ -984,7 +1093,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	}
 	picks := make([]pickedSummary, 0, len(picked))
 	for _, idx := range picked {
-		c := byID[ids[idx]]
+		c := byID[poolIDs[idx]]
 		// Real, deliberate observability, same reasoning as the
 		// graph-walk match marker: a candidate two independent signals
 		// agree on is worth being able to tell apart from one only a
@@ -1020,7 +1129,20 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// once in the assembled context
 	// (TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms).
 	for _, p := range picks {
-		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s): %s", p.c.id, p.label, guaranteedFact(p.c.text, p.facts, queryTerms)))
+		// dateLabel hands the answering model an already-computed
+		// relative date, not just a raw one (docs/CONSOLIDATION_COMPLETENESS_PLAN.md
+		// answer-time reasoning follow-up) — real-verified that even with
+		// the correct fact and its date both present in context, the
+		// model can still get date arithmetic wrong (e.g. "9 weeks ago"
+		// against a gold "3 weeks ago" for a 20-day gap). Computing it
+		// here removes that arithmetic from the model's task entirely.
+		dateLabel := ""
+		if pStart, _, ok := parsePeriodRange(p.c.period); ok {
+			if rel := relativeDateLabel(pStart, now); rel != "" {
+				dateLabel = fmt.Sprintf(", dated %s (%s)", p.c.period, rel)
+			}
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s%s): %s", p.c.id, dateLabel, p.label, guaranteedFact(p.c.text, p.facts, queryTerms)))
 	}
 
 	var refs []identity.Ref
@@ -1242,9 +1364,9 @@ func mostRelevantFactIndex(facts []string, queryTerms []string) int {
 // excluded the same way stage1EntityMatches excludes it: it's handled
 // unconditionally by buildAnchor regardless of query content, not
 // something that should ever compete for a vector-search slot.
-func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int) ([]identity.Ref, error) {
+func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, name, attributes, key_version, (embedding <=> $1::vector) as distance
+		select id, name, attributes, key_version, last_updated, (embedding <=> $1::vector) as distance
 		from entities
 		where embedding is not null and kind != 'self_model'
 		  and not (id = any($2::text[]))
@@ -1257,17 +1379,36 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 	}
 	defer rows.Close()
 
+	// Same answer-time-reasoning hard filter stage1EntityMatches/
+	// keywordSearchEntities already apply
+	// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md) — a fifth, separate
+	// retrieval path this investigation found also needed it: once
+	// entities.last_updated was fixed to actually reflect the
+	// consolidated date instead of real current_date, re-verifying the
+	// Phase E adversarial case found this embedding-similarity path is
+	// the one actually surfacing the wrong entity now, bypassing the
+	// other two entity paths' own fixes entirely (a semantic match needs
+	// no literal substring/keyword hit). Same no-backoff choice as those
+	// two, for the same reason: the real motivating case is exactly one
+	// semantically-matched entity whose only date is wrong, and a
+	// backoff would restore precisely that match.
+	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
+
 	var refs []identity.Ref
 	for rows.Next() {
 		var id, name string
 		var attrsCT []byte
 		var keyVersion int
+		var lastUpdated time.Time
 		var distance float64
-		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion, &distance); err != nil {
+		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion, &lastUpdated, &distance); err != nil {
 			return nil, err
 		}
 		similarity := 1 - distance
 		if similarity < similarityThreshold {
+			continue
+		}
+		if hasTimeframe && !periodsOverlap(lastUpdated, lastUpdated.AddDate(0, 0, 1), tfStart, tfEnd) {
 			continue
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
@@ -1278,7 +1419,11 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 		if err != nil {
 			return nil, err
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s, %s): %s", id, name, attrs))
+		dateLabel := ""
+		if rel := relativeDateLabel(lastUpdated, now); rel != "" {
+			dateLabel = fmt.Sprintf(", last updated %s (%s)", lastUpdated.Format("2006-01-02"), rel)
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s%s, %s): %s", id, dateLabel, name, attrs))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id},
@@ -1649,7 +1794,7 @@ func (s *Store) graphWalkRelationships(ctx context.Context, q dbscope.Querier, s
 
 	refs := make([]identity.Ref, 0, len(discovered))
 	for _, id := range discovered {
-		line, err := s.formatEntity(ctx, q, scope, id)
+		line, err := s.formatEntity(ctx, q, scope, id, "")
 		if err != nil {
 			return nil, fmt.Errorf("load graph-walked entity %s: %w", id, err)
 		}
@@ -1709,9 +1854,9 @@ func refIDsOfKind(refs []identity.Ref, kind string) []string {
 // (same trade-off stage1EntityMatches already makes elsewhere in this
 // file), but the first mechanism in this file where that scale
 // assumption is worth re-checking if it ever stops holding.
-func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
+func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, query string, now time.Time) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, input_text, output_text, key_version
+		select id, input_text, output_text, key_version, ts
 		from episodes
 		where type = 'interaction'
 		  and not (id = any($1::text[]))
@@ -1722,14 +1867,18 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 	}
 	defer rows.Close()
 
-	type exchange struct{ input, output string }
+	type exchange struct {
+		input, output string
+		ts            time.Time
+	}
 	byID := make(map[string]exchange)
 	var docs []bm25Document
 	for rows.Next() {
 		var id string
 		var inputCT, outputCT []byte
 		var keyVersion int
-		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion); err != nil {
+		var ts time.Time
+		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion, &ts); err != nil {
 			return nil, err
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
@@ -1744,7 +1893,7 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 		if err != nil {
 			return nil, err
 		}
-		byID[id] = exchange{input: input, output: output}
+		byID[id] = exchange{input: input, output: output, ts: ts}
 		docs = append(docs, newBM25Document(id, input+" "+output))
 	}
 	if err := rows.Err(); err != nil {
@@ -1753,10 +1902,44 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 
 	matches := rankBM25(docs, queryTerms)
 
+	// Same answer-time-reasoning hard filter fusedSearchSummaries applies
+	// to summaries (docs/CONSOLIDATION_COMPLETENESS_PLAN.md) — real,
+	// confirmed necessary here too, not just there: a raw episode
+	// keyword-matched directly (bypassing consolidation/summaries
+	// entirely) is exactly what surfaced a temporally-wrong exchange
+	// verbatim in the adversarial "AI conference" test, even after
+	// summaries' own filter correctly excluded the equivalent summary —
+	// this path has its own separate route into context and needs its
+	// own separate fix. Excludes only matches with a confidently-resolved
+	// timeframe whose own exact ts clearly falls outside it; backs off to
+	// the unfiltered set if excluding would leave nothing, same
+	// safe-degrade direction used everywhere else this pattern appears.
+	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
+	if hasTimeframe {
+		kept := make([]string, 0, len(matches))
+		for _, m := range matches {
+			ts := byID[m].ts
+			if ts.Before(tfStart) || !ts.Before(tfEnd) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		if len(kept) > 0 {
+			matches = kept
+		}
+	}
+
 	var refs []identity.Ref
 	for _, m := range matches {
 		ex := byID[m]
-		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s, keyword match): USER: %s ASSISTANT: %s", m, ex.input, ex.output))
+		// Same computed-not-raw date label fusedSearchSummaries writes
+		// for summaries — an episode's own ts is even more precise than
+		// a summary's period, so this is at least as reliable.
+		dateLabel := ""
+		if rel := relativeDateLabel(ex.ts, now); rel != "" {
+			dateLabel = fmt.Sprintf(", dated %s (%s)", ex.ts.Format("2006-01-02"), rel)
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s%s, keyword match): USER: %s ASSISTANT: %s", m, dateLabel, ex.input, ex.output))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m},
@@ -1783,9 +1966,9 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 // matches it directly with no decryption step), so including it costs
 // nothing and lets a query matching an entity's name but not its stored
 // attribute values still score.
-func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
+func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, query string, now time.Time) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, name, attributes, key_version
+		select id, name, attributes, key_version, last_updated
 		from entities
 		where attributes is not null and kind != 'self_model'
 		  and not (id = any($1::text[]))
@@ -1796,14 +1979,18 @@ func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, sc
 	}
 	defer rows.Close()
 
-	type entity struct{ name, attrs string }
+	type entity struct {
+		name, attrs string
+		lastUpdated time.Time
+	}
 	byID := make(map[string]entity)
 	var docs []bm25Document
 	for rows.Next() {
 		var id, name string
 		var attrsCT []byte
 		var keyVersion int
-		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion); err != nil {
+		var lastUpdated time.Time
+		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion, &lastUpdated); err != nil {
 			return nil, err
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
@@ -1814,7 +2001,7 @@ func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, sc
 		if err != nil {
 			return nil, err
 		}
-		byID[id] = entity{name: name, attrs: attrs}
+		byID[id] = entity{name: name, attrs: attrs, lastUpdated: lastUpdated}
 		docs = append(docs, newBM25Document(id, name+" "+attrs))
 	}
 	if err := rows.Err(); err != nil {
@@ -1823,10 +2010,43 @@ func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, sc
 
 	matches := rankBM25(docs, queryTerms)
 
+	// Same answer-time-reasoning hard filter fusedSearchSummaries/
+	// keywordSearchEpisodes/stage1EntityMatches already apply
+	// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): a fourth, separate
+	// retrieval path this investigation found also needed it — BM25
+	// keyword ranking over the whole entity corpus, distinct from
+	// stage1EntityMatches' narrow substring pre-check, and unaffected by
+	// that path's own fix. Deliberately does NOT back off when excluding
+	// would leave nothing, matching stage1EntityMatches' own choice, not
+	// fusedSearchSummaries/keywordSearchEpisodes': the real adversarial
+	// case that motivated this had exactly one keyword-matched entity
+	// (the same single "AI conference" entity stage1 also matched, once
+	// stage1's own filter has already excluded it from excludeIDs), so a
+	// backoff here would restore the exact match the fix exists to
+	// remove — the same trap a backoff would spring for stage1. Entities
+	// are a supplementary signal either way; the actual facts and dates
+	// live in summaries/episodes, where the backoff guarantee still
+	// applies.
+	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
+	if hasTimeframe {
+		kept := make([]string, 0, len(matches))
+		for _, m := range matches {
+			lu := byID[m].lastUpdated
+			if periodsOverlap(lu, lu.AddDate(0, 0, 1), tfStart, tfEnd) {
+				kept = append(kept, m)
+			}
+		}
+		matches = kept
+	}
+
 	var refs []identity.Ref
 	for _, m := range matches {
 		e := byID[m]
-		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s, %s, keyword match): %s", m, e.name, e.attrs))
+		dateLabel := ""
+		if rel := relativeDateLabel(e.lastUpdated, now); rel != "" {
+			dateLabel = fmt.Sprintf(", last updated %s (%s)", e.lastUpdated.Format("2006-01-02"), rel)
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s%s, %s, keyword match): %s", m, dateLabel, e.name, e.attrs))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: m})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: m},

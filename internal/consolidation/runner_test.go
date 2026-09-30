@@ -193,6 +193,74 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 	}
 }
 
+// TestRunDaily_SetsEntityDatesToTheSimulatedDateNotRealNow is the real,
+// confirmed fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): upsertEntities
+// previously stamped every touched entity's first_seen/last_updated with
+// Postgres's own current_date — the real wall-clock day this test
+// actually runs on, not the (deliberately backdated, far in the past)
+// date RunDaily is asked to consolidate. Uses a date years in the past
+// specifically so a real regression back to current_date can't pass by
+// coincidence.
+func TestRunDaily_SetsEntityDatesToTheSimulatedDateNotRealNow(t *testing.T) {
+	consolidationJSON := `{
+		"summary": "Attended an AI conference.",
+		"key_facts": [{"fact": "The user attended an AI conference.", "source_episode_ids": ["ep_test_entity_date"]}],
+		"entities_touched": [{"id": "project:ai-conference", "kind": "project", "name": "AI conference", "attributes": {"topic": "neural networks"}}]
+	}`
+	groundingJSON := `{"grounded": [true]}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-entity-date"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	inputCT, _ := enc.Encrypt("I learned so much at the AI conference today")
+	outputCT, _ := enc.Encrypt("That sounds fantastic!")
+	simulatedDate := time.Date(2024, 1, 15, 12, 0, 0, 0, time.UTC)
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+			values ('ep_test_entity_date', $1, 'interaction', $2, $3, 'sha256:test', 0.5, $4, $5)
+		`, simulatedDate, inputCT, outputCT, scope.Kind, scope.Owner)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
+
+	if err := runner.RunDaily(ctx, scope, simulatedDate); err != nil {
+		t.Fatalf("RunDaily: %v", err)
+	}
+
+	var firstSeen, lastUpdated time.Time
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select first_seen, last_updated from entities where id = 'project:ai-conference' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&firstSeen, &lastUpdated)
+	})
+	if err != nil {
+		t.Fatalf("expected the touched entity to be upserted: %v", err)
+	}
+	wantDate := time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC)
+	if !firstSeen.Equal(wantDate) {
+		t.Errorf("entity first_seen = %v, want %v (the simulated date, not real today)", firstSeen, wantDate)
+	}
+	if !lastUpdated.Equal(wantDate) {
+		t.Errorf("entity last_updated = %v, want %v (the simulated date, not real today)", lastUpdated, wantDate)
+	}
+}
+
 // TestRunDaily_EmbedsHighImportanceEpisode is a real regression test for
 // a bug docs/BENCHMARK_IMPROVEMENT_PLAN.md step 5's textSource.date
 // change introduced but no existing test caught: embedHighImportanceEpisodes
