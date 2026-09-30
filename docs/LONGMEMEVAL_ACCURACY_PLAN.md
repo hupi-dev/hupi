@@ -111,9 +111,11 @@ doesn't help once several true facts about the same person are all in
 reach; that needs picking the *right* one, not finding *a* one. Not
 designed in this pass.
 
-## Category 2: `temporal-reasoning` — three distinct causes, not one
+## Category 2: `temporal-reasoning` — originally 3 hypothesized causes, real re-verification found 1
 
-**Real finding**, from inspecting all 5 failures together:
+**Real finding**, from inspecting all 5 failures together (initial
+surface-level diagnosis, before the deeper per-example re-verification
+below corrected it):
 
 1. **Multi-event recall gap** (3 of 5 failures: "which came first,"
    "what's the order of three events," "how many months since two
@@ -134,18 +136,62 @@ designed in this pass.
    source date, then computed the wrong duration from it (a raw
    reasoning error, not a retrieval one).
 
-**Design (original, for causes 2 and 3 — unchanged)**:
-- For (2): a targeted addition to `qaConcisenessPrompt`, mirroring its
-  existing "double-check WHO the information is about" instruction with
-  a new "double-check WHAT was actually asked" one: if the question
-  requires comparing, counting, or ordering multiple distinct things and
-  evidence was only found for some of them, say so explicitly rather
-  than answering as if the comparison were fully resolved.
-- For (3): a smaller prompt addition asking the model to show its date
-  arithmetic explicitly (state both dates, then compute the
-  difference) rather than estimating — a cheap intervention, lower
-  confidence than (2) since this is partly a raw-model-arithmetic
-  reliability limit no prompt fully closes.
+**Design (original, for causes 2 and 3): superseded — see corrected
+findings below.** The original plan was a targeted `qaConcisenessPrompt`
+addition for each: a "double-check WHAT was actually asked" instruction
+for (2), an explicit show-your-math instruction for (3). Neither was
+built, because real re-verification (below) found no genuine example of
+either failure mode left to fix.
+
+**Causes (2) and (3) — corrected: not real, independent causes.** Before
+writing either prompt addition, each cause's original example question
+was re-run from a completely fresh, uncontaminated scope (new scope
+owner, full real replay + consolidation, current code) rather than
+trusting the original diagnosis at face value — the same discipline
+cause (1) below is built on.
+
+- **Cause (2)'s example** ("how many months since two charity events in
+  a row, on consecutive days") still answered "no information
+  available" from the clean scope. Direct inspection of the real
+  haystack confirmed the two consecutive-day charity sessions genuinely
+  exist (2023-02-14 and 2023-02-15), but neither date's consolidated
+  daily summary mentions charity at all — both were busy multi-session
+  days whose summaries cover unrelated topics instead. The model isn't
+  failing to recognize an unresolved comparison; it correctly reports
+  finding nothing, because consolidation never wrote the fact down. Not
+  a prompt bug — the exact same consolidation completeness gap as cause
+  (1) below.
+- **Cause (3)'s example** ("how many weeks ago did I start using
+  Ibotta") turned out to be worse than first thought: the *original*
+  scope this diagnosis was based on had a daily summary dated
+  2023-05-06 that doesn't correspond to any real haystack session at
+  all — a near-certain leftover from the QA-capture-contamination bug
+  fixed alongside category 1 (a pre-fix benchmark run's own answer,
+  captured as a fake episode at the question's fabricated query time,
+  then consolidated into a bogus summary). Re-run from a clean scope,
+  the real 2023-04-16 session (where the user says "I've just
+  downloaded Ibotta") exists in the haystack, but that day's actual
+  consolidated summary is entirely about an unrelated word problem
+  ("Jacob has $30...") — the Ibotta content was dropped, not
+  misremembered. The clean answer is "No information available," a
+  correct abstention given what consolidation actually preserved, not a
+  date-arithmetic error. There was never a real arithmetic bug here —
+  the original diagnosis was itself an artifact of the contamination
+  bug, and the underlying gap is, again, consolidation completeness.
+
+Net effect: this pass found **zero real, distinct examples** of a
+compound-question-abstention bug or a date-arithmetic bug in this
+sample. Both of the original diagnoses reduce, under clean
+re-verification, to the same mechanism as cause (1). Steps 3 and 4 (the
+two prompt additions) are **not being implemented** — there's no real
+failure they'd fix, and shipping a speculative prompt change with no
+verified target repeats exactly the mistake cause (1)'s own
+retrieval-widening attempt made before it was reverted. If a genuine
+compound-question or date-arithmetic failure surfaces in a future,
+larger sample (with consolidation completeness already fixed), revisit
+these two prompt additions then — the designs above are still
+reasonable, they just don't currently have a real bug to justify
+shipping them.
 
 **Cause (1) — corrected root cause, real fix scoped differently.**
 The original hypothesis (widen retrieval selection for detected
@@ -253,34 +299,48 @@ in code comments as previously-observed production issues:
    own "Cause (1) — corrected root cause" block. The code
    (`looksLikeOrderingRequest`, the widened `fusedSearchSummaries` params)
    has been fully removed rather than left in place unproven.
-3. Category 2 fix (2): compound-question abstention prompt addition.
-4. Category 2 fix (3): date-arithmetic prompt addition.
+3. ~~Category 2 fix (2): compound-question abstention prompt
+   addition.~~ **Investigated, not implemented.** Real re-verification
+   from a clean scope found no genuine example of this failure mode —
+   the one question originally diagnosed this way is the same
+   consolidation-completeness gap as step 2/cause (1), not a prompt
+   issue. See Category 2's corrected causes (2)/(3) block.
+4. ~~Category 2 fix (3): date-arithmetic prompt addition.~~
+   **Investigated, not implemented.** The original example turned out
+   to be sitting on a scope contaminated by the pre-fix QA-capture bug;
+   re-verified clean, it's also the consolidation-completeness gap, not
+   a raw arithmetic error. See the same corrected block.
 5. Category 3 Phase 1: recency-preference prompt addition (reuses
    existing date labels).
 6. Category 3 Phase 2 / Category 2 cause (1): consolidation-time
    contradiction detection **and** consolidation completeness (busy-day
    summary dilution) — flagged as needing its own design pass before
-   implementation, not bundled into this same sequence. These two are
-   now understood to be the same underlying class of gap (consolidation
-   not preserving enough of the source material), not two separate
-   problems.
+   implementation, not bundled into this same sequence. This is now the
+   real, dominant cause behind Category 2 as a whole (causes 1, 2, and 3
+   all traced back to it under clean re-verification), not one of three
+   equally-weighted causes — raising its priority relative to the
+   original sequencing.
 
-Steps 1, 3, 4, 5 are real, bounded, independently testable changes to
+Steps 1 and 5 are real, bounded, independently testable changes to
 existing mechanisms (query-shape detection already has a precedent in
 `stage1KeywordSignal`; prompt additions follow the exact pattern
-`qaConcisenessPrompt`'s own WHO-check already established). Step 2
-turned out to belong in this same "cheap, retrieval-side" category by
-design but not by result — it's kept here only as a record of what was
-tried and disproven. Step 6 is explicitly sequenced last and separately,
-matching this session's own established discipline of not bundling a
-deep, higher-risk redesign into the same pass as cheaper, well-understood
-fixes.
+`qaConcisenessPrompt`'s own WHO-check already established). Steps 2, 3,
+and 4 all turned out, under real re-verification, to target a failure
+mode that isn't actually present as a distinct bug — kept here only as
+a record of what was tried/investigated and why each was set aside
+rather than shipped speculatively. Step 6 is explicitly sequenced last
+and separately, matching this session's own established discipline of
+not bundling a deep, higher-risk redesign into the same pass as cheaper,
+well-understood fixes — and is now the step doing most of the real
+remaining work for this category.
 
 ## Non-goals for this pass
 
 - Step 6 (consolidation-time contradiction detection and completeness)
   is not being designed in detail yet — flagged for its own follow-up
-  plan once steps 1, 3, 4, 5 are verified, not scoped further here.
+  plan once steps 1 and 5 are verified, not scoped further here. (Steps
+  3 and 4 were investigated and set aside, not verified-then-shipped —
+  see the Sequenced steps entries above.)
 - Not attempting a general-purpose "resolve any factual contradiction"
   system — scoped specifically to the same-entity/same-topic,
   different-day case actually observed.
@@ -297,5 +357,6 @@ fixes.
   already identified in this plan — not the full 48-instance benchmark
   again per step, matching the established "cheap re-verification before
   a full run" discipline.
-- A full LongMemEval re-run only once all of steps 1-5 are individually
-  verified, to get a real, final combined number.
+- A full LongMemEval re-run only once steps 1, 5, and 6 are individually
+  verified (3 and 4 no longer need this — they were never shipped), to
+  get a real, final combined number.
