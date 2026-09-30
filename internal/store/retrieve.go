@@ -101,6 +101,35 @@ const (
 	// flagged for real calibration once this is verified to help at all.
 	recommendationEntitySimilarityThreshold = 0.25
 	recommendationEntityMaxResults          = 10
+	// orderingSummarySimilarityThreshold/-MaxResults widen SUMMARY
+	// retrieval specifically for a detected multi-event/ordering-shaped
+	// question (looksLikeOrderingRequest,
+	// docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 2) — the same
+	// widening idea Category 2 cause 1 tried once already
+	// (docs/LONGMEMEVAL_ACCURACY_PLAN.md) and reverted, but that attempt
+	// only widened mmrSelect's final pick count, not the vector fetch's
+	// own similarity threshold — real tracing (HUPI_DEBUG_FUSION) showed
+	// every candidate in that case had vectorRank=-1: the vector search
+	// itself never admitted a single summary above
+	// vectorSimilarityThreshold (0.40) for that query, so widening how
+	// many get *picked* from an empty vector pool did nothing. This
+	// widens the threshold and fetch/keyword caps themselves — mirroring
+	// recommendationEntitySimilarityThreshold's exact pattern, applied to
+	// summaries instead of entities — real-verified need: the
+	// sports-order LongMemEval case's needed summaries ("Spring Sprint
+	// Triathlon," "Midsummer 5K Run") share no literal vocabulary with a
+	// generic query like "order of sports events," so they score zero on
+	// both BM25 keyword matching and (at the normal threshold) vector
+	// similarity, and never enter the candidate pool at all — confirmed
+	// via hupi-export-memory that the facts genuinely exist in
+	// consolidated summaries; this is a pure retrieval-admission gap, not
+	// a consolidation or context-budget one (see Phase D item 1, already
+	// fixed separately). Not yet measured against real embedding
+	// distances the way the thresholds above were — a reasoned starting
+	// point (same 0.25/wider-cap shape as the entity case), flagged for
+	// calibration once verified to help at all.
+	orderingSummarySimilarityThreshold = 0.25
+	orderingSummaryMaxResults          = 15
 	// episodeVectorSimilarityThreshold is vectorSimilarityThreshold's
 	// counterpart for individual episodes (vectorSearchEpisodes) — used
 	// to reuse vectorSimilarityThreshold outright, which real measurement
@@ -182,6 +211,34 @@ var recommendationKeywords = []string{
 func looksLikeRecommendationRequest(query string) bool {
 	lower := strings.ToLower(query)
 	for _, kw := range recommendationKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// orderingKeywords backs looksLikeOrderingRequest
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 2), grounded in
+// the actual real LongMemEval questions that failed this way (see
+// orderingSummarySimilarityThreshold's own doc comment) — same cheap,
+// deliberately generous substring-match pattern as recommendationKeywords.
+var orderingKeywords = []string{
+	"order of", "which came first", "came first", "first or", "or first",
+	"which task did i", "which item did i", "which did i",
+	"how many months", "how many weeks", "how many days",
+	"in a row", "consecutive", "earliest to latest", "earliest",
+}
+
+// looksLikeOrderingRequest detects a question asking about the sequence,
+// count, or elapsed time between multiple distinct events — the shape
+// that needs several different summaries recalled and combined, not just
+// the single best match, and whose specific event names (e.g. "Spring
+// Sprint Triathlon") often share no vocabulary with a generic question
+// about "sports events" or "which came first."
+func looksLikeOrderingRequest(query string) bool {
+	lower := strings.ToLower(query)
+	for _, kw := range orderingKeywords {
 		if strings.Contains(lower, kw) {
 			return true
 		}
@@ -333,6 +390,13 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		entityMaxResults = recommendationEntityMaxResults
 	}
 
+	summarySimilarityThreshold := vectorSimilarityThreshold
+	summaryMaxResults := maxVectorResults()
+	if looksLikeOrderingRequest(query) {
+		summarySimilarityThreshold = orderingSummarySimilarityThreshold
+		summaryMaxResults = orderingSummaryMaxResults
+	}
+
 	err = dbscope.Run(ctx, s.db, workspace, workspace, func(tx *sql.Tx) error {
 		// Summaries fuse their vector and keyword rankings into one MMR
 		// selection (docs/BENCHMARK_IMPROVEMENT_PLAN.md step 4) — unlike
@@ -344,12 +408,17 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// docs/LONGMEMEVAL_ACCURACY_PLAN.md category 2 originally
 		// threaded an explicit finalK/lambda through this call to widen
 		// it for detected ordering/counting questions — reverted after
-		// real verification showed zero effect: the actual bottleneck
-		// for those failures was upstream (consolidation never wrote the
-		// fact down, or buried it beyond recognition), not the
-		// final-selection stage this call controls. See that doc's own
-		// corrected root cause.
-		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations)
+		// real verification showed zero effect, because that attempt
+		// only widened the final-selection stage, not the vector fetch's
+		// own similarity threshold (every candidate had vectorRank=-1 —
+		// nothing to select from). This second attempt
+		// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 2) widens
+		// the threshold and fetch caps themselves, the same pattern
+		// already proven for recommendationEntitySimilarityThreshold —
+		// see orderingSummarySimilarityThreshold's own doc comment for
+		// the real evidence this stage, not final-selection, was the
+		// actual bottleneck.
+		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, summarySimilarityThreshold, summaryMaxResults)
 		if err != nil {
 			return fmt.Errorf("fused search summaries: %w", err)
 		}
@@ -695,7 +764,7 @@ func reciprocalRank(rank int) float64 {
 // separates a true positive from a same-topic near-miss in practice, on
 // top of that cutoff. Re-measure if the tokenizer's stopword list or the
 // BM25 k1/b constants ever change.
-func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
+func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int) ([]identity.Ref, error) {
 	type candidate struct {
 		id          string
 		text        string
@@ -716,7 +785,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxVectorResults()*summaryOverfetchFactor)
+	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor)
 	if err != nil {
 		return nil, err
 	}
@@ -733,7 +802,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		// Cosine distance -> similarity for a normalized embedding space;
 		// see vectorSimilarityThreshold's doc comment for the cutoff.
 		similarity := 1 - distance
-		if similarity < vectorSimilarityThreshold {
+		if similarity < similarityThreshold {
 			continue
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
@@ -822,7 +891,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 			}
 		}
 		sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
-		kwCap := maxVectorResults() * summaryOverfetchFactor
+		kwCap := maxResults * summaryOverfetchFactor
 		if len(matches) > kwCap {
 			matches = matches[:kwCap]
 		}
@@ -860,7 +929,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		}
 		pool[i] = mmrCandidate{relevance: fused, tokens: tokenSet(c.text)}
 	}
-	picked := mmrSelect(pool, maxVectorResults(), mmrLambda())
+	picked := mmrSelect(pool, maxResults, mmrLambda())
 
 	// HUPI_DEBUG_FUSION is a real, permanent diagnostic escape hatch, not
 	// throwaway debug code -- added while investigating a real multi-hop

@@ -363,17 +363,45 @@ belonging here:
    mechanism, now confirmed real (previously only flagged as plausible
    but unobserved) rather than a new item.
 2. **Re-test retrieval breadth widening for detected multi-event/
-   cross-day query shapes** — the same mechanism
-   `docs/LONGMEMEVAL_ACCURACY_PLAN.md` already tried and reverted for
-   Category 2 cause 1. Real-verified this is now genuinely needed: the
-   sports-order case's `HUPI_DEBUG_FUSION` trace showed 2 of 3 needed
-   summaries never entering the candidate pool at all, regardless of
-   context budget — a real retrieval-selection miss, not a truncation
-   problem. The original revert is still correct for *why it failed
-   then* (the candidate pool was empty, nothing to widen into); Phase B
-   now supplies real candidates, so this needs a fresh, real
-   re-verification, not a reuse of the old (now-obsolete) negative
-   result.
+   cross-day query shapes. ✅ Implemented and real-verified.** The
+   original Category 2 cause 1 attempt widened the wrong stage —
+   `mmrSelect`'s final pick count — when the real bottleneck (confirmed
+   by `HUPI_DEBUG_FUSION`: every candidate had `vectorRank=-1`) was
+   upstream: the vector fetch's own `similarityThreshold` filter, and to
+   a lesser extent the keyword/fetch caps, discarding candidates before
+   they ever became eligible to be picked. This attempt widens the
+   threshold and caps themselves, mirroring
+   `recommendationEntitySimilarityThreshold`'s exact, already-proven
+   pattern but applied to summaries: `fusedSearchSummaries` now takes
+   explicit `similarityThreshold`/`maxResults` params (default
+   `vectorSimilarityThreshold`/`maxVectorResults()`, unchanged for every
+   ordinary query); a new `looksLikeOrderingRequest` detector
+   (`orderingKeywords`, same cheap substring-match pattern as
+   `looksLikeRecommendationRequest`, grounded in the real failing
+   questions) switches in `orderingSummarySimilarityThreshold=0.25` /
+   `orderingSummaryMaxResults=15` when a multi-event/ordering-shaped
+   question is detected. 3 new unit tests (`ordering_test.go`).
+
+   Real verification against the sports-order case: `HUPI_DEBUG_FUSION`
+   confirmed both previously-invisible summaries (`2023-06-02`, the
+   triathlon; `2023-06-10`, the 5K) now enter the candidate pool via
+   vector search (`vectorRank=0` and `1` respectively — meaningfully
+   similar to the query in embedding space all along, just below the
+   normal 0.40 threshold) and get picked. **The final answer is now
+   fully correct**: all 3 events, in the right chronological order,
+   matching the gold answer exactly. Re-checked the NFL-playoffs and
+   charity-events cases for regressions — both unchanged (NFL still
+   fully fixed; charity still blocked purely by the separate,
+   already-documented answer-time reasoning gap, confirmed via
+   `HUPI_DEBUG_FUSION` that this item's widening now engages
+   automatically for that query too, without needing the manual
+   `HUPI_MAX_VECTOR_RESULTS` override item 1's verification used).
+
+   **Phase D items 1 and 2 together now fully resolve 2 of the original
+   4 Phase B follow-up cases** (NFL playoffs, sports-order) end to end;
+   the charity-events case is retrieval-complete but blocked on
+   answer-time reasoning (Gap 4); Ibotta (item 3, `maxClustersPerDay`)
+   remains unaddressed.
 3. **Calibrate or redesign `maxClustersPerDay`.** The Ibotta case's day
    has more genuinely distinct topics than the current cap of 6 allows,
    so its fact still landed in an under-cap, still-diluted cluster —
