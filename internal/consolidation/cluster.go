@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
+	"strconv"
 	"strings"
 
 	"hupi/internal/identity"
@@ -34,14 +36,35 @@ const clusterEpisodeThreshold = 8
 // posture as internal/store/retrieve.go's own threshold comments).
 const clusterSimilarityThreshold = 0.60
 
-// maxClustersPerDay bounds real LLM-call cost on a pathological day
-// with many genuinely distinct topics: each cluster is its own
+// defaultMaxClustersPerDay bounds real LLM-call cost on a pathological
+// day with many genuinely distinct topics: each cluster is its own
 // generateSummary call, so an unbounded cluster count could turn one
 // busy day into dozens of consolidation calls. When grouping produces
 // more clusters than this, the two most similar clusters (by centroid)
 // are merged together until at or under the cap, rather than an
 // arbitrary cluster being dropped or forced smaller.
-const maxClustersPerDay = 6
+//
+// Real, measured limitation at the original default of 6
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 3): the Ibotta
+// LongMemEval case's day genuinely has more than 6 distinct topics (its
+// surviving key_facts, even after merging, clearly spanned at least 6-7
+// unrelated subjects — Osprey vocalizations, Sikh meditation, GPU
+// software, content-moderation policy, Ayn Rand, a math word problem —
+// meaning the true topic count was already at or past the cap before
+// Ibotta's own topic got merged into one of them and diluted out).
+// Configurable via HUPI_MAX_CLUSTERS_PER_DAY (same override pattern as
+// contextCharBudget/maxVectorResults in internal/store/retrieve.go) so
+// real calibration against further examples doesn't need a rebuild.
+const defaultMaxClustersPerDay = 6
+
+func maxClustersPerDay() int {
+	if v := os.Getenv("HUPI_MAX_CLUSTERS_PER_DAY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxClustersPerDay
+}
 
 // generateDailySummary is RunDaily's entry point into generateSummary,
 // adding Gap 1's real fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase
@@ -192,7 +215,7 @@ func clusterSources(sources []textSource, vectors [][]float32) [][]textSource {
 		centroids = append(centroids, centroidOf(vectors, idxs))
 	}
 
-	for len(clusters) > maxClustersPerDay {
+	for len(clusters) > maxClustersPerDay() {
 		bi, bj, best := 0, 1, -2.0
 		for i := 0; i < len(centroids); i++ {
 			for j := i + 1; j < len(centroids); j++ {

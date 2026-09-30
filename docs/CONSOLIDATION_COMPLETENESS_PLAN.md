@@ -255,15 +255,21 @@ not just what it's told. Two candidate designs, cheaper first:
    further LLM compression pass (a mechanical concatenation, not
    another summarization call, so this step doesn't reintroduce the
    same dilution risk it's fixing).
-2. **Decoupled per-episode fact extraction**, only if (1) proves
-   insufficient. A lightweight pass per episode — not per day — asking
-   "does this contain anything a future question might need," entirely
-   independent of whatever the day's narrative summary becomes. Most
-   robust against dilution by construction (every episode gets its own
-   dedicated consideration regardless of how busy its day was), but
+2. **Decoupled per-episode fact extraction. Confirmed needed, not yet
+   built.** (1)'s cap-based clustering was real-verified to recover 3 of
+   4 known cases cheaply, but hit a real, confirmed ceiling on the
+   Ibotta case specifically — see Phase D item 3's own status for the
+   real evidence (raising the cap from 6 to 10 still wasn't enough; that
+   day's real topic diversity exceeds even the raised cap). A
+   lightweight pass per episode — not per day, not per cluster —
+   asking "does this contain anything a future question might need,"
+   entirely independent of whatever the day's narrative summary
+   becomes. Most robust against dilution by construction (every episode
+   gets its own dedicated consideration regardless of how busy its day
+   was, or how many genuinely distinct topics that day held), but
    doubles episode-processing cost across every day, not just busy
    ones, and is a bigger structural change to how `key_facts` get
-   produced.
+   produced. Not started.
 
 Verification: re-run the exact same 4 real examples this document's Gap
 1 section documents as failing (`gpt4_45189cb4`, `gpt4_e072b769`,
@@ -402,15 +408,46 @@ belonging here:
    the charity-events case is retrieval-complete but blocked on
    answer-time reasoning (Gap 4); Ibotta (item 3, `maxClustersPerDay`)
    remains unaddressed.
-3. **Calibrate or redesign `maxClustersPerDay`.** The Ibotta case's day
-   has more genuinely distinct topics than the current cap of 6 allows,
-   so its fact still landed in an under-cap, still-diluted cluster —
-   confirmed via `hupi-export-memory`, the one Phase B example that
-   didn't recover. Cheapest first step: measure whether raising the cap
-   (real cost tradeoff — more LLM calls on already-expensive busy days)
-   recovers it; if a higher cap still doesn't fully separate every real
-   topic on especially diverse days, the cap itself may need to scale
-   with a day's real topic diversity rather than being a fixed constant.
+3. **Calibrate `maxClustersPerDay`. ✅ Investigated — real ceiling found,
+   not a simple tuning fix.** Made configurable
+   (`HUPI_MAX_CLUSTERS_PER_DAY`, same override pattern as
+   `contextCharBudget`/`maxVectorResults`) so calibration doesn't need a
+   rebuild — real re-verification against the Ibotta case at
+   `HUPI_MAX_CLUSTERS_PER_DAY=10` (up from the default 6) confirmed the
+   cap change took effect (10 real clusters fired, one grounding-check
+   hiccup on the larger fact batch — 42 facts extracted against 40
+   expected — self-corrected by consolidation's existing retry, all 40
+   facts landed grounded) — but **the Ibotta fact was still completely
+   absent from all 40 surviving key facts.** Counting the topics that
+   *did* survive (Camille Claudel/Rodin, the user's daily schedule,
+   Sikhism, a birthday party, Osprey vocalizations, bike maintenance,
+   a content-moderation prompt, NYC photography, GPU hardware, BBQ/hot
+   sauce, a math word problem — roughly 11 distinct topics), this
+   specific day's real topic diversity is higher than even the raised
+   cap, not just higher than the original default.
+
+   **Conclusion: fixed-cap clustering has a real ceiling on extremely
+   topic-diverse days, and this is one of them** — not a case where the
+   right constant just hasn't been found yet. This LongMemEval day looks
+   structurally different from the charity/NFL/sports-order days
+   clustering already fixed: it's ~26 sessions that are each genuinely
+   about a *different* single topic (LongMemEval's own "needle in
+   haystack" design deliberately piles up many single-topic distractor
+   sessions onto a handful of real calendar dates), not a few recurring
+   themes repeated across many sessions. Clustering's core assumption —
+   group by topic because a few themes repeat — doesn't hold when there's
+   little-to-no real repetition to exploit; pushing the cap higher for a
+   day like this converges toward "one cluster per source," which stops
+   being clustering at all and just becomes Phase B's other, not-yet-built
+   alternative below. Not chasing a specific cap value further — the
+   plan doc's own Phase B design already named the real next step for
+   exactly this failure mode (decoupled per-episode fact extraction),
+   and that's where this should go, not into more calibration attempts
+   on a mechanism that's shown its ceiling. Left `HUPI_MAX_CLUSTERS_PER_DAY`'s
+   default at 6 (the value already real-verified to recover 3 of 4 cases
+   cheaply); the override exists for whoever wants to trade real cost for
+   a somewhat higher ceiling, with this finding on record that it isn't a
+   full fix for the most extreme days.
 4. **Make rollups re-run-aware, not write-once.** `RunRollup`'s
    `summaryExists` early-return means a week's rollup, once generated,
    never incorporates a later correction to one of its source days.
