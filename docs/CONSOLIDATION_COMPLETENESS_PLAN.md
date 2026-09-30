@@ -613,6 +613,23 @@ belonging here:
   re-ranking, is still needed there and is out of scope for this
   document).
 
+### Remaining real, unstarted work
+
+Everything below is real and confirmed-needed (not speculative), just
+not yet built:
+
+- **Phase C** (contradiction detection, the Wells Fargo case) — needs a
+  real design pass on detection precision before any code; the most
+  invasive item in this document.
+- **Phase D item 4** (rollup re-run-awareness) — explicitly gated on
+  Phase C existing first.
+- **Phase E** (retrieval date-relevance, if it turns out to still
+  matter) — gated on Phases B/C/D.
+- **Per-episode fact extraction** (Phase B's second design option) —
+  confirmed necessary for the Ibotta case specifically (Phase D item 3
+  found cap-raising hits a real ceiling on especially topic-diverse
+  days); not yet designed in detail.
+
 ## Non-goals
 
 - A general-purpose "detect and resolve any factual contradiction"
