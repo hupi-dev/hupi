@@ -38,6 +38,11 @@ type chatCompletionResponse struct {
 	Model   string                 `json:"model"`
 	Choices []chatCompletionChoice `json:"choices"`
 	Usage   chatCompletionUsage    `json:"usage"`
+	// Citations is only populated when the request set X-Hupi-Explain: on
+	// (docs/ANSWER_CITATIONS_PLAN.md) — an additive field a strict OpenAI
+	// client simply never looks for, so its absence changes nothing for
+	// existing callers.
+	Citations []Citation `json:"hupi_citations,omitempty"`
 }
 
 type chatCompletionChunkDelta struct {

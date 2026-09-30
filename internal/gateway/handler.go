@@ -39,6 +39,21 @@ type RetrievalResult struct {
 	Gate           MemoryGate
 	ContextMessage string
 	Refs           []identity.Ref // scope-qualified — see identity.Ref and docs/TIER3_PLAN.md D2
+	// Citations mirrors Refs one-for-one with a human-readable snippet
+	// per reference — see docs/ANSWER_CITATIONS_PLAN.md. This is
+	// retrieval-level ("what was available"), not generation-level
+	// ("what the answer actually relied on") — that distinction is the
+	// plan doc's own Phase 1 vs Phase 2 split.
+	Citations []Citation
+}
+
+// Citation pairs a Ref with the exact text that was injected into
+// context for it, so a caller can see not just *that* a summary/entity/
+// episode fed an answer but *what it said*, without re-fetching and
+// re-decrypting the underlying record.
+type Citation struct {
+	Ref     identity.Ref `json:"ref"`
+	Snippet string       `json:"snippet"`
 }
 
 // Retriever is implemented by the retrieval engine — not sketched in this
@@ -232,6 +247,12 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// unconditionally regardless of how trivial the turn was.
 	skipCapture := r.Header.Get("X-Hupi-Capture") == "off"
 
+	// Opt-in citations (docs/ANSWER_CITATIONS_PLAN.md): retrieval already
+	// computes Citations unconditionally (cheap — no extra LLM call, see
+	// RetrievalResult's own doc comment), so this header only controls
+	// whether the response includes them, not whether they're computed.
+	explain := r.Header.Get("X-Hupi-Explain") == "on"
+
 	// Step 3: context injection.
 	augmented := messages
 	if result.ContextMessage != "" {
@@ -249,7 +270,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture)
 		return
 	}
-	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture)
+	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explain)
 }
 
 // resolveIdentity authenticates a request. With h.Auth nil (Tier 1/2
@@ -383,6 +404,7 @@ func (h *Handler) handleNonStream(
 	inputText string,
 	actor string,
 	skipCapture bool,
+	explain bool,
 ) {
 	// Model is left blank here on purpose: req.Model was used above only
 	// to pick a provider profile (resolveProvider) and may well be a
@@ -439,6 +461,9 @@ func (h *Handler) handleNonStream(
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
 		},
+	}
+	if explain {
+		out.Citations = result.Citations
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

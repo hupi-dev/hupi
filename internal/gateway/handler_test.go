@@ -216,3 +216,59 @@ func TestHandleChatCompletions_OnRetrieveNilIsNoOp(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 }
+
+// TestHandleChatCompletions_ExplainHeaderIncludesCitations confirms
+// X-Hupi-Explain: on surfaces RetrievalResult.Citations in the response
+// (docs/ANSWER_CITATIONS_PLAN.md) — opt-in, not the default shape.
+func TestHandleChatCompletions_ExplainHeaderIncludesCitations(t *testing.T) {
+	want := RetrievalResult{
+		Gate:           GateFull,
+		ContextMessage: "the exact context this request actually used",
+		Refs:           []identity.Ref{{Kind: identity.RefKindSummary, ID: "sum_test"}},
+		Citations:      []Citation{{Ref: identity.Ref{Kind: identity.RefKindSummary, ID: "sum_test"}, Snippet: "the source text"}},
+	}
+	retriever := &fakeRetriever{result: want}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+
+	w := postChatCompletion(t, h, map[string]string{"X-Hupi-Explain": "on"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var resp chatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Citations) != 1 {
+		t.Fatalf("Citations = %v, want 1 entry", resp.Citations)
+	}
+	if resp.Citations[0].Snippet != "the source text" {
+		t.Errorf("Citations[0].Snippet = %q, want %q", resp.Citations[0].Snippet, "the source text")
+	}
+	if resp.Citations[0].Ref.ID != "sum_test" {
+		t.Errorf("Citations[0].Ref.ID = %q, want %q", resp.Citations[0].Ref.ID, "sum_test")
+	}
+}
+
+// TestHandleChatCompletions_NoExplainHeaderOmitsCitations confirms the
+// default (no X-Hupi-Explain header) response shape is unchanged even
+// when the retriever did compute citations — omitted, not just empty,
+// via json:"...,omitempty" so existing/strict clients see nothing new.
+func TestHandleChatCompletions_NoExplainHeaderOmitsCitations(t *testing.T) {
+	want := RetrievalResult{
+		Gate:      GateFull,
+		Citations: []Citation{{Ref: identity.Ref{Kind: identity.RefKindSummary, ID: "sum_test"}, Snippet: "the source text"}},
+	}
+	retriever := &fakeRetriever{result: want}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+
+	w := postChatCompletion(t, h, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "hupi_citations") {
+		t.Errorf("response included hupi_citations without X-Hupi-Explain: %s", w.Body.String())
+	}
+}
