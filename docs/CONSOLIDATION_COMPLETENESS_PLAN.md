@@ -1077,23 +1077,63 @@ better-understood.
      (consolidation completeness, retrieval ranking) can move this
      further; the answer-time reasoning gap below is the only remaining
      lever.
-- **Gap 4 mechanism 2 (answer-time reasoning/arithmetic), remaining
-  scope** — two real, distinct instances remain fully open. The
-  charity-events aggregation case (find which two of several mentions
-  are "the pair," then compute the gap) doesn't reduce to a single date
-  computation or a timeframe-based exclusion, since there's no implied
-  timeframe to filter by and no single date to compute against — it
-  needs to first identify *which* two facts are the relevant pair. The
-  Phase E adversarial case, now retrieval-clean end to end (see above),
+- **Gap 4 mechanism 2 (answer-time reasoning/arithmetic) — aggregation
+  sub-case: ✅ dedicated reasoning pass designed, implemented, and
+  real-verified correct; blocked on a separate, newly-identified
+  retrieval-completeness gap, not a flaw in the pass itself.** The
+  charity-events case (find which two of several mentions are "the
+  pair," then compute the gap) doesn't reduce to a single date
+  computation or a timeframe exclusion — there's no implied timeframe to
+  filter by, and no single date to compute against, since it needs to
+  first identify *which* two facts are the relevant pair. Two earlier
+  prompt-only fix attempts against it both showed zero measured effect.
+
+  Built as a new, narrow, best-effort pass
+  (`internal/gateway/aggregation.go`), gated on the same cheap
+  `looksLikeOrderingRequest` check retrieval already uses (surfaced via
+  a new `RetrievalResult.NeedsAggregationPass` field — zero cost for any
+  other query): one real LLM call extracts every dated fact relevant to
+  the question from the already-assembled context, then pure Go code
+  (no LLM judgment) pairs/orders the extracted facts and computes the
+  actual elapsed time or sequence, reusing the same "shift arithmetic
+  into code" approach `relativeDateLabel` already proved. The computed
+  result is injected as an additional system message — the existing,
+  already-tuned answer-generation call is otherwise untouched, and any
+  failure anywhere in the pass degrades to no hint at all, never a
+  blocked turn. 19 new unit/wiring tests, including a real regression
+  test for a bug real-verification caught: the first version reported
+  whatever pair was numerically closest regardless of the actual gap,
+  once surfacing a genuine 16-day-apart pair as if it satisfied a
+  question that explicitly said "consecutive days" — fixed with a
+  plausibility cap (`maxConsecutivePairGapDays`), an honest "no hint" now
+  preferred over a confidently-wrong one.
+
+  Real re-verification against the actual charity-events LongMemEval
+  question (`b46e15ed`), via `-answer-only` against its real,
+  already-consolidated scope: the pass correctly declined to produce a
+  hint (`HUPI_DEBUG_AGGREGATION` confirms extraction found real dated
+  charity facts, but none within the plausibility cap), and the model
+  answered exactly as honestly as before — no regression, no
+  misleading hint. Tracing *why* no valid pair surfaced led to a further
+  real finding: direct inspection of the raw haystack sessions shows the
+  actual, genuine consecutive-day pair the question refers to really
+  does exist in the source conversation — a "24-Hour Bike Ride" charity
+  event on 2023-02-14 and a "Ride to Cure Cancer" charity bike ride on
+  2023-02-15 — but neither fact survived into any summary the current
+  retrieval layer can reach. Manually computing the intended answer from
+  this real pair (Feb 15 to the question's real 2023-04-18 date is 62
+  days ≈ 2 months) **exactly matches the gold answer ("2")** — confirming
+  the reasoning pass's own arithmetic is correct and would resolve this
+  exact case if the right two facts were retrievable. This is Gap 1
+  (single-day dilution) territory, not Gap 4 — a separate, real,
+  not-yet-investigated retrieval-completeness question, left open rather
+  than folded into this pass.
+- **Gap 4 mechanism 2 — semantic-bridging sub-case, still fully open.**
+  The Phase E adversarial case, retrieval-clean end to end (see above),
   needs the model to bridge a literal phrase ("AI conference") to a
-  semantically-equivalent but differently-worded fact — a pure inference
-  gap, not a retrieval one. Two earlier prompt-only fix attempts against
-  the charity-events case showed zero measured effect. The honest next
-  step, if this is worth pursuing further, remains a dedicated
-  multi-step reasoning pass with visible intermediate steps (matching
-  the pattern that's worked everywhere else in this document: narrow,
-  single-purpose LLM calls, not one call doing everything) — a real,
-  separate piece of work, not scoped here.
+  semantically-equivalent but differently-worded fact ("downtown robotics
+  event") — a pure inference gap, not an aggregation problem the pass
+  above addresses. Not attempted here; a real, separate design question.
 - **Category 1 (`single-session-preference`) multi-candidate ranking** —
   tracked separately in `docs/LONGMEMEVAL_ACCURACY_PLAN.md`, already
   noted below.
