@@ -1046,30 +1046,54 @@ better-understood.
      retrieval fixes above are now genuinely load-bearing for backdated
      benchmark/import scenarios, not just day-by-day production use as
      originally scoped.
-  2. **A third, still-untouched entity path: `vectorSearchEntities`**
-     (embedding-similarity search) is a fifth retrieval mechanism
-     overall, and — confirmed by re-running the adversarial case again
-     after fix #1 above — the actual one surfacing this entity in the
-     live benchmark now that `last_updated` is correct: the query's
+  2. **`vectorSearchEntities` (the fifth and final entity path): ✅
+     fixed, real-verified.** Confirmed by re-running the adversarial case
+     after fix #1 above that this embedding-similarity path — the query's
      semantic similarity to "AI conference" matches even without a
-     literal substring/keyword hit, bypassing both already-fixed entity
-     paths entirely, and carries no date label or timeframe filter of
-     its own at all. Same fix pattern would now apply cleanly (the
-     underlying date data finally being correct is exactly what was
-     blocking it from being worth doing before); not yet done.
+     literal substring/keyword hit — was the one actually still
+     surfacing the wrong entity, bypassing both already-fixed entity
+     paths entirely. Fixed with the same pattern as those two (hard
+     filter using `last_updated`, no backoff, same computed date label),
+     now genuinely effective because fix #1 made the underlying date
+     data correct. 2 new DB-integration tests, deliberately phrasing the
+     query without either entity's literal name so only this path's own
+     (fake-but-uniform, for test purposes) embedding similarity can find
+     them — isolating it from the other two, already-separately-tested
+     paths.
+
+     **Real re-verification: the January entity is now completely absent
+     from the assembled context** — all five retrieval paths
+     (`fusedSearchSummaries`, `keywordSearchEpisodes`,
+     `stage1EntityMatches`, `keywordSearchEntities`,
+     `vectorSearchEntities`) correctly exclude it, confirmed by
+     inspecting the exact context sent to the model. The final answer is
+     still wrong ("Not mentioned" vs. gold "Robotics, actuators, and
+     control systems") — but this is now the cleanest possible
+     demonstration of Gap 4 mechanism 2: with retrieval and consolidation
+     both confirmed fully correct and zero distractors present anywhere
+     in context, the model still doesn't infer that a "downtown robotics
+     event" is what the question's "AI conference... last month" phrase
+     refers to. Nothing left in this document's own toolkit
+     (consolidation completeness, retrieval ranking) can move this
+     further; the answer-time reasoning gap below is the only remaining
+     lever.
 - **Gap 4 mechanism 2 (answer-time reasoning/arithmetic), remaining
-  scope** — the charity-events aggregation case (find which two of
-  several mentions are "the pair," then compute the gap) is not
-  addressed by either fix above; it doesn't reduce to a single date
+  scope** — two real, distinct instances remain fully open. The
+  charity-events aggregation case (find which two of several mentions
+  are "the pair," then compute the gap) doesn't reduce to a single date
   computation or a timeframe-based exclusion, since there's no implied
   timeframe to filter by and no single date to compute against — it
-  needs to first identify *which* two facts are the relevant pair. Two
-  earlier prompt-only fix attempts against this case showed zero
-  measured effect. The honest next step, if this is worth pursuing
-  further, remains a dedicated multi-step reasoning pass with visible
-  intermediate steps (matching the pattern that's worked everywhere
-  else in this document: narrow, single-purpose LLM calls, not one call
-  doing everything) — a real, separate piece of work, not scoped here.
+  needs to first identify *which* two facts are the relevant pair. The
+  Phase E adversarial case, now retrieval-clean end to end (see above),
+  needs the model to bridge a literal phrase ("AI conference") to a
+  semantically-equivalent but differently-worded fact — a pure inference
+  gap, not a retrieval one. Two earlier prompt-only fix attempts against
+  the charity-events case showed zero measured effect. The honest next
+  step, if this is worth pursuing further, remains a dedicated
+  multi-step reasoning pass with visible intermediate steps (matching
+  the pattern that's worked everywhere else in this document: narrow,
+  single-purpose LLM calls, not one call doing everything) — a real,
+  separate piece of work, not scoped here.
 - **Category 1 (`single-session-preference`) multi-candidate ranking** —
   tracked separately in `docs/LONGMEMEVAL_ACCURACY_PLAN.md`, already
   noted below.
