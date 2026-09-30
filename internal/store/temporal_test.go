@@ -143,3 +143,51 @@ func TestPeriodsOverlap(t *testing.T) {
 		}
 	}
 }
+
+// TestRelativeDateLabelRoundsToNearestNotFloor is the real, measured
+// case this function exists to fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md
+// answer-time reasoning follow-up): the Ibotta LongMemEval question's gold
+// answer is "3 weeks ago" for a 20-day gap (2023-04-16 to 2023-05-06).
+// Floor(20/7) = 2, which is wrong — this must round to the nearest week.
+func TestRelativeDateLabelRoundsToNearestNotFloor(t *testing.T) {
+	now := time.Date(2023, 5, 6, 9, 18, 0, 0, time.UTC)
+	got := relativeDateLabel("2023-04-16", now)
+	if got != "3 weeks before now" {
+		t.Errorf("relativeDateLabel(20 days) = %q, want %q", got, "3 weeks before now")
+	}
+}
+
+func TestRelativeDateLabelTiers(t *testing.T) {
+	now := time.Date(2024, 6, 5, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		period string
+		want   string
+	}{
+		{"2024-06-05", "today"},
+		{"2024-06-04", "1 day before now"},
+		{"2024-06-01", "4 days before now"},
+		{"2024-05-29", "1 week before now"},          // 7 days
+		{"2024-05-15", "3 weeks before now"},         // 21 days
+		{"2024-04-01", "2 months before now"},        // 65 days -> ~2.1 months
+		{"2023-06-05", "1 year before now"},          // 366 days
+		{"2022-06-05", "2 years before now"},         // 731 days
+	}
+	for _, tc := range cases {
+		if got := relativeDateLabel(tc.period, now); got != tc.want {
+			t.Errorf("relativeDateLabel(%q) = %q, want %q", tc.period, got, tc.want)
+		}
+	}
+}
+
+func TestRelativeDateLabelUnparseablePeriodReturnsEmpty(t *testing.T) {
+	if got := relativeDateLabel("not-a-period", time.Now()); got != "" {
+		t.Errorf("relativeDateLabel(unparseable) = %q, want empty string", got)
+	}
+}
+
+func TestRelativeDateLabelFuturePeriodReturnsEmpty(t *testing.T) {
+	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	if got := relativeDateLabel("2024-06-05", now); got != "" {
+		t.Errorf("relativeDateLabel(future period) = %q, want empty string (not a negative delta)", got)
+	}
+}

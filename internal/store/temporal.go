@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -137,4 +138,70 @@ func parsePeriodRange(period string) (start, end time.Time, ok bool) {
 // share any real time — the standard half-open-interval overlap check.
 func periodsOverlap(aStart, aEnd, bStart, bEnd time.Time) bool {
 	return aStart.Before(bEnd) && bStart.Before(aEnd)
+}
+
+// relativeDateLabel turns a summary's own period string into a
+// human-readable "N weeks before now"-style phrase, or "" if period
+// doesn't parse or is somehow in the future. Real, deliberate fix for
+// answer-time reasoning failures (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
+// three separate real cases this document tracked all had the correct
+// facts and dates present in context, with the model still getting the
+// arithmetic wrong (e.g. answering "9 weeks ago" against a gold "3 weeks
+// ago"). Computing the delta here, in code, and handing the model the
+// already-correct answer removes that arithmetic from its plate entirely
+// — the same "shift work out of the LLM and into deterministic code"
+// approach that already worked for resolveQueryTimeframe/parsePeriodRange
+// themselves.
+//
+// Rounds to the nearest unit, not floor — 20 days rounds to "3 weeks",
+// matching how LongMemEval's own gold answers phrase this (20/7 = 2.86,
+// a human says "about 3 weeks," not "2 weeks" truncated). Tiers roughly
+// match everyday phrasing: days below a week, weeks below ~2 months,
+// months below ~2 years, years beyond that — a summary's own period
+// granularity (daily/weekly/monthly/yearly) already bounds how precise
+// the *input* date is, so there's no value in offering sub-day precision
+// output for something derived from a monthly summary's period start.
+func relativeDateLabel(period string, now time.Time) string {
+	start, _, ok := parsePeriodRange(period)
+	if !ok {
+		return ""
+	}
+	days := int(now.Sub(start).Hours() / 24)
+	switch {
+	case days < 0:
+		return ""
+	case days == 0:
+		return "today"
+	case days == 1:
+		return "1 day before now"
+	case days < 7:
+		return fmt.Sprintf("%d days before now", days)
+	case days < 60:
+		return pluralUnit(math.Round(float64(days)/7), "week")
+	default:
+		// Decided by the rounded unit count, not a fixed day threshold —
+		// a fixed cutover (e.g. "months below 730 days") would render a
+		// 366-day gap as "12 months before now" instead of the more
+		// natural "1 year before now" right at the boundary where it
+		// matters most.
+		if months := math.Round(float64(days) / 30.44); months < 12 {
+			return pluralUnit(months, "month")
+		}
+		return pluralUnit(math.Round(float64(days)/365.25), "year")
+	}
+}
+
+// pluralUnit renders a rounded count with its unit, singular at exactly
+// one — n is never <= 0 in practice (every tier above only reaches this
+// with at least one full unit elapsed), but clamps to 1 defensively
+// rather than emitting a nonsensical "0 weeks before now".
+func pluralUnit(n float64, unit string) string {
+	count := int(n)
+	if count <= 0 {
+		count = 1
+	}
+	if count == 1 {
+		return fmt.Sprintf("1 %s before now", unit)
+	}
+	return fmt.Sprintf("%d %ss before now", count, unit)
 }
