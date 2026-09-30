@@ -140,18 +140,22 @@ func periodsOverlap(aStart, aEnd, bStart, bEnd time.Time) bool {
 	return aStart.Before(bEnd) && bStart.Before(aEnd)
 }
 
-// relativeDateLabel turns a summary's own period string into a
-// human-readable "N weeks before now"-style phrase, or "" if period
-// doesn't parse or is somehow in the future. Real, deliberate fix for
-// answer-time reasoning failures (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
-// three separate real cases this document tracked all had the correct
-// facts and dates present in context, with the model still getting the
-// arithmetic wrong (e.g. answering "9 weeks ago" against a gold "3 weeks
-// ago"). Computing the delta here, in code, and handing the model the
-// already-correct answer removes that arithmetic from its plate entirely
-// — the same "shift work out of the LLM and into deterministic code"
-// approach that already worked for resolveQueryTimeframe/parsePeriodRange
-// themselves.
+// relativeDateLabel turns a start date into a human-readable "N weeks
+// before now"-style phrase, or "" if start is somehow in the future.
+// Real, deliberate fix for answer-time reasoning failures
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): three separate real cases
+// this document tracked all had the correct facts and dates present in
+// context, with the model still getting the arithmetic wrong (e.g.
+// answering "9 weeks ago" against a gold "3 weeks ago"). Computing the
+// delta here, in code, and handing the model the already-correct answer
+// removes that arithmetic from its plate entirely — the same "shift work
+// out of the LLM and into deterministic code" approach that already
+// worked for resolveQueryTimeframe/parsePeriodRange themselves.
+//
+// Takes an already-resolved time.Time, not a period string — callers
+// with a summary's period parse it via parsePeriodRange first; callers
+// with an exact timestamp (an episode's ts, an entity's last_updated)
+// pass it directly, no format-then-reparse round trip needed.
 //
 // Rounds to the nearest unit, not floor — 20 days rounds to "3 weeks",
 // matching how LongMemEval's own gold answers phrase this (20/7 = 2.86,
@@ -161,11 +165,7 @@ func periodsOverlap(aStart, aEnd, bStart, bEnd time.Time) bool {
 // granularity (daily/weekly/monthly/yearly) already bounds how precise
 // the *input* date is, so there's no value in offering sub-day precision
 // output for something derived from a monthly summary's period start.
-func relativeDateLabel(period string, now time.Time) string {
-	start, _, ok := parsePeriodRange(period)
-	if !ok {
-		return ""
-	}
+func relativeDateLabel(start, now time.Time) string {
 	days := int(now.Sub(start).Hours() / 24)
 	switch {
 	case days < 0:
