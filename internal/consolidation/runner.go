@@ -193,6 +193,28 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		return err
 	}
 
+	// Phase C sub-problem 2 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
+	// best-effort, after the day's own summary is durably stored — see
+	// checkCrossPeriodContradictions' own doc comment for why a failure
+	// here must never fail RunDaily itself. Needs the *canonical* entity
+	// ids storeSummary just wrote (not output.EntitiesTouched's raw,
+	// pre-canonicalization ones), so this re-reads the row it just
+	// stored rather than trying to thread canonicalization's result back
+	// out of storeSummary.
+	var newSummaryID string
+	var entitiesTouchedLit string
+	if err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select id, entities_touched from summaries
+			where level = 'daily' and period = $1 and scope_kind = $2 and scope_owner = $3
+			  and not exists (select 1 from summaries newer where newer.supersedes = summaries.id)
+		`, period, scope.Kind, scope.Owner).Scan(&newSummaryID, &entitiesTouchedLit)
+	}); err != nil {
+		slog.Warn("consolidation: reload stored summary for contradiction check failed", "period", period, "error", err)
+	} else {
+		r.checkCrossPeriodContradictions(ctx, scope, newSummaryID, period, pgfmt.ParseTextArray(entitiesTouchedLit))
+	}
+
 	// Runs after the summary is durably stored, not before: a failure
 	// here shouldn't block the summary itself, since summaries are the
 	// primary retrieval surface and this is a supplementary one (see

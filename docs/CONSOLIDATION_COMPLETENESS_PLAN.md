@@ -353,7 +353,9 @@ doesn't reliably judge semantic sameness.
    stale duplicate key sitting alongside it. This is a real, live
    confirmation of the exact failure mode Wells Fargo demonstrated, not
    a synthetic pass against hand-fed JSON.
-2. **Cross-period summary key_fact supersession.** Real schema check:
+2. **Cross-period summary key_fact supersession. ✅ Core mechanism
+   implemented and real-verified; two real follow-up gaps found by that
+   same verification.** Real schema check:
    `summaries.entities_touched` is already a stored, queryable column,
    so "which other current summaries touch the same entities as today's
    new one" is a real, existing query (`entities_touched && $1::text[]
@@ -367,27 +369,33 @@ doesn't reliably judge semantic sameness.
    supersession is already structurally supported; nothing has ever
    exercised it.
 
-   Design: after `RunDaily` stores a new day's summary, look up other
-   current summaries (any level/period) sharing at least one touched
-   entity. For each, decrypt its key_facts and make one focused,
-   separate LLM call: "here are today's new facts about these shared
-   entities; here are that other period's existing facts about the same
-   entities; do any of today's facts directly state a different,
-   incompatible value for the same specific real-world attribute as an
-   existing fact (not just relate to the same entity/topic)?" If yes,
-   for each contradicted old summary, build a corrected
-   `ConsolidationOutput` (its own content, with the contradicted fact
-   removed or updated) and call `storeSummary` directly (not through
-   `Runner.Correct`, which is shaped for a human operator supplying the
-   full corrected output by hand) with `period`/`level` = the *old*
-   summary's own values, `supersedes` = its ID, `actor = systemActor`,
-   and a correction reason that marks it as system-detected, not a human
-   correction — mirroring `RunDaily`'s own existing
-   "automatic re-consolidation, not a human correction" pattern for
-   same-day re-runs. A real, separate LLM call per new day with
-   entity overlap (real, bounded added cost — only runs when today's
-   summary actually shares an entity with something else already on
-   record, not on every consolidation).
+   Implementation, revised from the original design during actual
+   coding: `RunDaily` calls `checkCrossPeriodContradictions`
+   (`internal/consolidation/contradiction.go`) after its own summary is
+   durably stored. `findRelatedSummaries` looks up other current
+   summaries (any level/period, capped at
+   `maxRelatedSummariesForContradictionCheck=5`, most-recent-first) that
+   share a touched entity. For each, a focused, separate LLM call
+   (`contradictionCheckPrompt` — deliberately narrow, not full
+   consolidation) compares today's grounded key facts against that
+   period's grounded key facts and reports any real contradictions. The
+   real implementation reuses `Runner.CurrentContent` +
+   `Runner.Correct` directly, rather than calling `storeSummary` by hand
+   as originally sketched — `CurrentContent` already produces exactly
+   the "full existing output, ready to hand-edit" starting point
+   `Correct` needs (same tool `cmd/hupi-correct` uses for human
+   corrections), so this only has to surgically replace the
+   contradicted fact(s) within that snapshot and hand it to the
+   existing, already-safety-checked `Correct` path (it independently
+   confirmed a real, useful side effect: `Correct`'s "reject an
+   already-superseded target" guard, built for human operators, fired
+   correctly here too when two unrelated seed scopes' summaries had
+   already been corrected by an earlier test run — no code changes
+   needed for that safety net to already cover this new, automatic
+   caller). Best-effort: any failure in this whole step is logged, never
+   propagated as a `RunDaily` error, matching
+   `entitiesMissingEmbeddings`'s own "supplementary, not blocking"
+   precedent.
 
    The explicit "not just relate to the same entity/topic" instruction
    is the real guard against Category 1's already-known false-positive
@@ -396,6 +404,45 @@ doesn't reliably judge semantic sameness.
    "unrelated additional fact," the same judgment `establishedRecord`'s
    existing prompt already asks it to make for same-period continuity,
    just extended across periods.
+
+   **Real end-to-end verification with real GPT-4.1**: the same
+   synthetic Wells-Fargo-style two-day scenario used for sub-problem 1,
+   run through the full real `RunDaily` pipeline (not a hand-constructed
+   unit test). The mechanism fired correctly — the older day's summary
+   was genuinely superseded by a real, system-authored correction, with
+   the corrected `key_facts` reflecting the new $300,000 value instead
+   of the stale $250,000 one. The safety-check side effect above was
+   also real and unplanned, a genuine bonus from reusing `Correct`
+   rather than a hand-rolled write path.
+
+   **This same verification surfaced two real, honest follow-up gaps,
+   not yet fixed:**
+   - **The replacement fact fails re-grounding.** `Correct`'s
+     `storeSummary` call re-runs `groundingCheck` against the *old*
+     summary's own original source episodes (by design, for the human-
+     correction case it was built for) — but a cross-period
+     replacement fact is, by construction, actually grounded in the
+     *other* period's sources, not the old summary's. The corrected fact
+     came back `grounded: false` in real testing, meaning it's currently
+     invisible to retrieval (`loadKeyFacts`' own `grounded = true`
+     filter) even though it's now the historically-correct value. Net
+     effect is still a real improvement (the stale, wrong fact is no
+     longer surfaced either, since the old summary version is
+     superseded), just not a full fix — the corrected fact needs its own
+     grounding path that includes the triggering period's sources, not
+     only the old summary's.
+   - **The prose summary text isn't touched.** This implementation only
+     edits `KeyFacts` within the `CurrentContent` snapshot; the prose
+     paragraph (which retrieval also surfaces alongside key facts,
+     verified in real testing to still read "...pre-approved for a
+     $250,000 mortgage...") is carried through unchanged. A
+     retrieval-time reader of the prose itself would still see the
+     stale value even though the structured fact has been superseded.
+
+   Neither gap invalidates the core mechanism (detection judgment +
+   safe, correctly-guarded application) — both are real, scoped
+   follow-ups on making the correction's effect fully retrieval-visible,
+   not evidence the detection or supersession logic itself is wrong.
 
 Sequencing: (1) first — lower risk, no new LLM call, fully
 self-contained. (2) only after (1) is real-verified working, since (2)
@@ -672,12 +719,36 @@ belonging here:
   (confirmed via a new permanent diagnostic log line), and the final
   entity attributes are clean — only the updated value, no stale
   duplicate key. 5 new unit tests, `go test ./...` clean.
-- Phase C sub-problem 2 (cross-period `key_fact` supersession): designed
-  (see Phase C's own writeup above), not yet built — now unblocked
-  since sub-problem 1 is real-verified working.
+- **Phase C sub-problem 2 (cross-period `key_fact` supersession): ✅ core
+  mechanism implemented and real-verified.** `checkCrossPeriodContradictions`/
+  `findRelatedSummaries`/`checkOneRelatedSummary`
+  (`internal/consolidation/contradiction.go`), wired into `RunDaily` as a
+  best-effort post-storage step. Reuses `Runner.CurrentContent` +
+  `Runner.Correct` directly rather than a hand-rolled `storeSummary`
+  call — a real, unplanned bonus: `Correct`'s existing
+  already-superseded-target guard (built for human operators) correctly
+  protected this new, automatic caller too, with no extra code, when a
+  real test scenario hit it. 3 new tests including a real end-to-end
+  correction-application test. Real GPT-4.1 verification via the full
+  `RunDaily` pipeline (not just a unit test) against the same synthetic
+  Wells Fargo scenario: the older day's summary was genuinely
+  superseded, with the corrected `key_facts` reflecting the new value.
+
+  Two real, honest follow-up gaps surfaced by that same verification,
+  not yet fixed: (1) the replacement fact fails `Correct`'s
+  re-grounding, since it checks against the *old* summary's own
+  original sources, not the triggering period's — currently makes the
+  corrected fact invisible to retrieval, though the stale fact is still
+  correctly no longer surfaced either (net improvement, not a full fix);
+  (2) the prose summary text is untouched — only `KeyFacts` gets edited,
+  so a retrieval-time reader of the prose paragraph itself would still
+  see the stale value. See Phase C's own writeup above for the full
+  detail on both.
 - Phase D item 4 (rollup re-run-awareness): not started — still gated
-  on Phase C sub-problem 2 specifically (its own premise is "a
-  contradiction gets resolved," which needs that mechanism to exist).
+  on Phase C sub-problem 2's own two follow-up gaps being closed first
+  (its premise, "a contradiction gets resolved," should mean fully
+  resolved, not just structurally superseded with the correction still
+  invisible to retrieval).
 - Phase E: not started — gated on Phases B/C/D, per its own section.
 - Per-episode fact extraction (Phase B's second design option): not
   started — confirmed necessary for the Ibotta case specifically (see
@@ -701,15 +772,17 @@ not yet built:
 - **Phase C sub-problem 1** (entity attribute key-aliasing): ✅ done —
   implemented and real-verified end to end with real GPT-4.1 against
   the actual Wells Fargo failure mode.
-- **Phase C sub-problem 2** (cross-period `key_fact` supersession) —
-  designed (reuses `entities_touched` overlap + a focused follow-up LLM
-  call, `storeSummary` called directly with the old summary's own
-  period/level rather than through `Runner.Correct`), not yet built.
-  Sequenced after sub-problem 1 per this phase's own stated ordering —
-  now unblocked.
-- **Phase D item 4** (rollup re-run-awareness) — still gated on Phase C
-  sub-problem 2 specifically (its own premise, "a contradiction gets
-  resolved," needs that mechanism to exist).
+- **Phase C sub-problem 2** (cross-period `key_fact` supersession): ✅
+  core mechanism done — real-verified end to end with real GPT-4.1
+  (reuses `Runner.CurrentContent` + `Runner.Correct`, not a hand-rolled
+  `storeSummary` call as originally sketched). Two real follow-up gaps
+  found by that same verification, not yet fixed: the replacement fact
+  fails re-grounding (checked against the wrong period's sources) and
+  the prose summary text is left unchanged — see Phase C's own writeup
+  for detail.
+- **Phase D item 4** (rollup re-run-awareness) — still gated, now on
+  Phase C sub-problem 2's two follow-up gaps being closed rather than
+  on sub-problem 2 not existing at all.
 - **Phase E** (retrieval date-relevance, if it turns out to still
   matter) — gated on Phases B/C/D.
 - **Per-episode fact extraction** (Phase B's second design option) —
