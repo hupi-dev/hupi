@@ -137,7 +137,7 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		}
 	}
 
-	output, err := r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+	output, err := r.generateDailySummary(ctx, scope, period, sources, establishedRecord)
 	if err != nil {
 		return fmt.Errorf("consolidation: generate daily summary for %s: %w", period, err)
 	}
