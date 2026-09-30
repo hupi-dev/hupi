@@ -25,6 +25,33 @@ export interface ChatMessage {
   content: string;
 }
 
+// Mirrors internal/gateway/handler.go's Citation/identity.Ref exactly —
+// one entry per memory (summary/entity/episode) that fed an answer, with
+// the exact snippet that was injected into context for it. `used` is
+// only ever set when X-Hupi-Explain: deep ran the extra attribution
+// check (internal/gateway/attribution.go); undefined means "not
+// checked," not "checked and found unused" — see docs/ANSWER_CITATIONS_PLAN.md.
+export interface CitationRef {
+  kind: string;
+  scope: { kind: string; owner: string };
+  id: string;
+}
+
+export interface Citation {
+  ref: CitationRef;
+  snippet: string;
+  used?: boolean;
+}
+
+// The OpenAI SDK's ChatCompletionChunk/ChatCompletion response types are
+// closed interfaces with no index signature, so HUPI's own additive
+// hupi_citations field (never part of the real OpenAI wire shape) needs
+// a cast to read rather than a typed property — this is that cast's one
+// shared shape, used at both read sites below.
+interface HupiCitationsExtension {
+  hupi_citations?: Citation[];
+}
+
 /**
  * HUPI's private route is POST {root}/v1/chat/completions; its team route
  * is POST {root}/v1/team/{teamId}/chat/completions. The openai SDK always
@@ -56,6 +83,15 @@ export interface StreamChatOptions {
   messages: ChatMessage[];
   onDelta: (text: string) => void;
   signal?: AbortSignal;
+  /** "on" (free, retrieval-level "what was available") or "deep" (one
+   *  extra real LLM call, generation-level "what was actually used" —
+   *  see internal/gateway/attribution.go). Omit to get today's behavior
+   *  (no citations at all). */
+  explain?: 'on' | 'deep';
+  /** Called at most once, after streaming completes, only when the
+   *  server actually included citations (X-Hupi-Explain was set and the
+   *  server does not just come back empty). */
+  onCitations?: (citations: Citation[]) => void;
 }
 
 /**
@@ -71,7 +107,10 @@ export async function streamChat(client: OpenAI, opts: StreamChatOptions): Promi
       messages: opts.messages,
       stream: true,
     },
-    { signal: opts.signal },
+    {
+      signal: opts.signal,
+      headers: opts.explain ? { 'X-Hupi-Explain': opts.explain } : undefined,
+    },
   );
 
   let full = '';
@@ -80,6 +119,12 @@ export async function streamChat(client: OpenAI, opts: StreamChatOptions): Promi
     if (delta) {
       full += delta;
       opts.onDelta(delta);
+    }
+    // Only ever set on the terminal chunk (see internal/gateway/handler.go's
+    // handleStream) — every other chunk's cast just yields undefined.
+    const citations = (chunk as unknown as HupiCitationsExtension).hupi_citations;
+    if (citations && citations.length > 0) {
+      opts.onCitations?.(citations);
     }
   }
   return full;

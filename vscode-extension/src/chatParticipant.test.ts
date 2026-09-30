@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { __resetVscodeMock, __setActiveTextEditor, createChatParticipant } from './test/vscode-mock';
+import { __resetVscodeMock, __setActiveTextEditor, __setConfig, createChatParticipant } from './test/vscode-mock';
 
 vi.mock('./hupiClient', () => ({
   createClient: vi.fn(),
@@ -24,6 +24,7 @@ const fakeCfg = { baseUrl: 'http://localhost:8787', model: '', teamId: '', apiKe
 // Same reasoning as chatViewProvider.test.ts's messageSnapshots: opts.messages
 // must be captured at call time, not read back from .mock.calls afterward.
 let messageSnapshots: { role: string; content: string }[][] = [];
+let explainSnapshots: (StreamChatOptions['explain'] | undefined)[] = [];
 function lastMessages(): { role: string; content: string }[] {
   return messageSnapshots[messageSnapshots.length - 1];
 }
@@ -32,12 +33,14 @@ type StreamChatImpl = (client: never, opts: StreamChatOptions) => Promise<string
 function mockStreamChat(impl: StreamChatImpl) {
   return vi.mocked(streamChat).mockImplementation((client, opts) => {
     messageSnapshots.push(opts.messages.map((m) => ({ role: m.role, content: m.content })));
+    explainSnapshots.push(opts.explain);
     return impl(client as never, opts);
   });
 }
 function mockStreamChatOnce(impl: StreamChatImpl) {
   return vi.mocked(streamChat).mockImplementationOnce((client, opts) => {
     messageSnapshots.push(opts.messages.map((m) => ({ role: m.role, content: m.content })));
+    explainSnapshots.push(opts.explain);
     return impl(client as never, opts);
   });
 }
@@ -45,6 +48,7 @@ function mockStreamChatOnce(impl: StreamChatImpl) {
 beforeEach(() => {
   __resetVscodeMock();
   messageSnapshots = [];
+  explainSnapshots = [];
   vi.mocked(loadConfig).mockReset().mockResolvedValue(fakeCfg);
   vi.mocked(createClient).mockReset().mockReturnValue({} as never);
   vi.mocked(streamChat).mockReset();
@@ -241,5 +245,61 @@ describe('registerChatParticipant', () => {
     expect(content).toContain('Context — visible file from');
     expect(content).toContain('const x = 1;');
     expect(content.endsWith('what does this do?')).toBe(true);
+  });
+
+  it('requests citations on by default (hupi.citations.enabled defaults to true)', async () => {
+    mockStreamChat(async () => 'reply');
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream } = fakeStream();
+
+    await handler(fakeRequest('hi'), { history: [] }, stream, token);
+
+    expect(explainSnapshots).toEqual(['on']);
+  });
+
+  it('does not request citations when hupi.citations.enabled is false', async () => {
+    __setConfig({ 'citations.enabled': false });
+    mockStreamChat(async () => 'reply');
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream } = fakeStream();
+
+    await handler(fakeRequest('hi'), { history: [] }, stream, token);
+
+    expect(explainSnapshots).toEqual([undefined]);
+  });
+
+  it('requests deep citations when hupi.citations.deep is true', async () => {
+    __setConfig({ 'citations.enabled': true, 'citations.deep': true });
+    mockStreamChat(async () => 'reply');
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream } = fakeStream();
+
+    await handler(fakeRequest('hi'), { history: [] }, stream, token);
+
+    expect(explainSnapshots).toEqual(['deep']);
+  });
+
+  it('renders citations as a Sources markdown block after the answer', async () => {
+    mockStreamChat(async (_client, opts) => {
+      opts.onDelta('the answer');
+      opts.onCitations?.([
+        { ref: { kind: 'summary', scope: { kind: 'private', owner: 'user:1' }, id: 'sum_1' }, snippet: 'source text', used: true },
+      ]);
+      return 'the answer';
+    });
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream, chunks } = fakeStream();
+
+    await handler(fakeRequest('hi'), { history: [] }, stream, token);
+
+    expect(chunks[0]).toBe('the answer');
+    expect(chunks[1]).toContain('Sources');
+    expect(chunks[1]).toContain('summary');
+    expect(chunks[1]).toContain('source text');
+    expect(chunks[1]).toContain('✓ used');
   });
 });

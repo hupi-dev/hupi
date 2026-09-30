@@ -78,6 +78,71 @@ describe('streamChat', () => {
     expect(deltas).toEqual(['a', 'b']);
     expect(full).toBe('ab');
   });
+
+  it('sends X-Hupi-Explain when explain is set, and omits it otherwise', async () => {
+    const create = vi.fn().mockResolvedValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { choices: [{ delta: { content: 'hi' } }] };
+      },
+    });
+    const client = { chat: { completions: { create } } };
+
+    await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+      explain: 'deep',
+    });
+    expect(create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ headers: { 'X-Hupi-Explain': 'deep' } }));
+
+    create.mockClear();
+    await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+    });
+    expect(create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ headers: undefined }));
+  });
+
+  it('calls onCitations once with the terminal chunk’s hupi_citations, and not for chunks without it', async () => {
+    const create = vi.fn().mockResolvedValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { choices: [{ delta: { content: 'Hel' } }] };
+        yield { choices: [{ delta: { content: 'lo' } }] };
+        yield {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          hupi_citations: [{ ref: { kind: 'summary', scope: { kind: 'private', owner: 'user:1' }, id: 'sum_1' }, snippet: 'text', used: true }],
+        };
+      },
+    });
+    const client = { chat: { completions: { create } } };
+    const seen: unknown[] = [];
+
+    const full = await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+      onCitations: (c) => seen.push(c),
+    });
+
+    expect(full).toBe('Hello');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual([{ ref: { kind: 'summary', scope: { kind: 'private', owner: 'user:1' }, id: 'sum_1' }, snippet: 'text', used: true }]);
+  });
+
+  it('never calls onCitations when the server never included hupi_citations', async () => {
+    const client = fakeStreamClient(['a']);
+    const onCitations = vi.fn();
+
+    await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+      onCitations,
+    });
+
+    expect(onCitations).not.toHaveBeenCalled();
+  });
 });
 
 describe('chat', () => {

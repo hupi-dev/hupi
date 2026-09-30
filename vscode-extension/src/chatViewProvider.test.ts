@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { __resetVscodeMock, __setActiveTextEditor } from './test/vscode-mock';
+import { __resetVscodeMock, __setActiveTextEditor, __setConfig } from './test/vscode-mock';
 
 vi.mock('./hupiClient', () => ({
   createClient: vi.fn(),
@@ -14,7 +14,7 @@ vi.mock('./oidcAuth', () => ({
   promptSignInRequired: vi.fn(),
 }));
 
-import { createClient, streamChat, type StreamChatOptions } from './hupiClient';
+import { createClient, streamChat, type Citation, type StreamChatOptions } from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
 import { HupiChatViewProvider } from './chatViewProvider';
@@ -22,6 +22,7 @@ import { HupiChatViewProvider } from './chatViewProvider';
 type ToWebview =
   | { type: 'userEcho'; text: string }
   | { type: 'delta'; text: string }
+  | { type: 'citations'; items: Citation[] }
   | { type: 'done' }
   | { type: 'error'; message: string };
 
@@ -58,6 +59,7 @@ const fakeCfg = { baseUrl: 'http://localhost:8787', model: '', teamId: '', apiKe
 // state at call time. Every mocked implementation below snapshots a copy
 // up front instead.
 let messageSnapshots: { role: string; content: string }[][] = [];
+let explainSnapshots: (StreamChatOptions['explain'] | undefined)[] = [];
 function lastMessages(): { role: string; content: string }[] {
   return messageSnapshots[messageSnapshots.length - 1];
 }
@@ -66,12 +68,14 @@ type StreamChatImpl = (client: never, opts: StreamChatOptions) => Promise<string
 function mockStreamChat(impl: StreamChatImpl) {
   return vi.mocked(streamChat).mockImplementation((client, opts) => {
     messageSnapshots.push(opts.messages.map((m) => ({ role: m.role, content: m.content })));
+    explainSnapshots.push(opts.explain);
     return impl(client as never, opts);
   });
 }
 function mockStreamChatOnce(impl: StreamChatImpl) {
   return vi.mocked(streamChat).mockImplementationOnce((client, opts) => {
     messageSnapshots.push(opts.messages.map((m) => ({ role: m.role, content: m.content })));
+    explainSnapshots.push(opts.explain);
     return impl(client as never, opts);
   });
 }
@@ -79,6 +83,7 @@ function mockStreamChatOnce(impl: StreamChatImpl) {
 beforeEach(() => {
   __resetVscodeMock();
   messageSnapshots = [];
+  explainSnapshots = [];
   vi.mocked(loadConfig).mockReset().mockResolvedValue(fakeCfg);
   vi.mocked(createClient).mockReset().mockReturnValue({} as never);
   vi.mocked(streamChat).mockReset();
@@ -240,5 +245,44 @@ describe('HupiChatViewProvider', () => {
     await send({ type: 'send', text: 'no editor open' });
 
     expect(lastMessages()).toEqual([{ role: 'user', content: 'no editor open' }]);
+  });
+
+  it('requests citations on by default and posts them to the webview before done', async () => {
+    const citation: Citation = { ref: { kind: 'summary', scope: { kind: 'private', owner: 'user:1' }, id: 'sum_1' }, snippet: 'source text' };
+    mockStreamChat(async (_client, opts) => {
+      opts.onDelta('answer');
+      opts.onCitations?.([citation]);
+      return 'answer';
+    });
+    const { posted, send } = makeProvider();
+
+    await send({ type: 'send', text: 'hi' });
+
+    expect(explainSnapshots).toEqual(['on']);
+    expect(posted).toEqual([
+      { type: 'delta', text: 'answer' },
+      { type: 'citations', items: [citation] },
+      { type: 'done' },
+    ]);
+  });
+
+  it('does not request citations when hupi.citations.enabled is false', async () => {
+    __setConfig({ 'citations.enabled': false });
+    mockStreamChat(async () => 'reply');
+    const { send } = makeProvider();
+
+    await send({ type: 'send', text: 'hi' });
+
+    expect(explainSnapshots).toEqual([undefined]);
+  });
+
+  it('requests deep citations when hupi.citations.deep is true', async () => {
+    __setConfig({ 'citations.enabled': true, 'citations.deep': true });
+    mockStreamChat(async () => 'reply');
+    const { send } = makeProvider();
+
+    await send({ type: 'send', text: 'hi' });
+
+    expect(explainSnapshots).toEqual(['deep']);
   });
 });

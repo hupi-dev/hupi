@@ -75,6 +75,17 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
   from currently-open files, describe a change, and a review panel (a
   webview) shows a per-file diff with a checkbox before anything is
   applied. Scoped to open editors, not a whole-workspace scan.
+- **Citations** — both the chat sidebar and `@hupi` show a "Sources" list
+  under each answer (which summaries/entities/past exchanges fed it, with
+  the exact text used), via a new `X-Hupi-Explain` request header and an
+  `hupi_citations` field on the gateway's response
+  (docs/ANSWER_CITATIONS_PLAN.md). On by default (`hupi.citations.enabled`,
+  free — no extra request, just asks the gateway to include what
+  retrieval already computed). `hupi.citations.deep` (off by default)
+  additionally verifies which cited sources the answer actually relied
+  on, at the cost of one extra real LLM call per answer. A gateway
+  without citation support simply omits the field — nothing breaks,
+  there's just no Sources list.
 
 **Explicitly out of scope for v1** (a scope decision, not an oversight):
 

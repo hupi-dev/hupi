@@ -1,8 +1,26 @@
 import * as vscode from 'vscode';
-import { createClient, streamChat, type ChatMessage } from './hupiClient';
+import { createClient, streamChat, type ChatMessage, type Citation } from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
 import { currentFileContext } from './chatViewProvider';
+
+// Renders citations as plain markdown for VS Code's native chat view.
+// chatViewProvider.ts's own citations rendering lives in
+// src/webview/chat.ts instead (renderCitationsHtml) — that surface posts
+// the raw Citation[] across the extension-host/webview boundary and
+// builds HTML there, since the webview's own marked.parse call would
+// otherwise re-interpret this function's markdown output a second time.
+function citationsMarkdown(citations: Citation[]): string {
+  if (citations.length === 0) {
+    return '';
+  }
+  const lines = citations.map((c) => {
+    const used = c.used === true ? ' ✓ used' : c.used === false ? ' (not relied on)' : '';
+    const snippet = c.snippet.length > 200 ? c.snippet.slice(0, 200) + '…' : c.snippet;
+    return `- **${c.ref.kind}**${used}: ${snippet.replace(/\n/g, ' ')}`;
+  });
+  return `\n\n---\n**Sources**\n${lines.join('\n')}`;
+}
 
 // Registers HUPI as a participant in VS Code's own native Chat view
 // (invoked as "@hupi", same mechanism GitHub Copilot Chat's own
@@ -76,6 +94,10 @@ async function handleChatRequest(
   const controller = new AbortController();
   token.onCancellationRequested(() => controller.abort());
 
+  const settings = vscode.workspace.getConfiguration('hupi');
+  const citationsEnabled = settings.get<boolean>('citations.enabled', true);
+  const deepCitations = settings.get<boolean>('citations.deep', false);
+
   const client = createClient(cfg);
   try {
     await streamChat(client, {
@@ -83,6 +105,8 @@ async function handleChatRequest(
       messages,
       signal: controller.signal,
       onDelta: (delta) => stream.markdown(delta),
+      explain: citationsEnabled ? (deepCitations ? 'deep' : 'on') : undefined,
+      onCitations: (citations) => stream.markdown(citationsMarkdown(citations)),
     });
   } catch (err) {
     if (controller.signal.aborted) {

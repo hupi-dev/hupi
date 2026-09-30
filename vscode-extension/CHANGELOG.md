@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.12
+
+- Added citations: the chat sidebar and `@hupi` now show a "Sources"
+  list under each answer — which stored memories (summaries, entities,
+  past exchanges) fed it, with the exact text HUPI actually used.
+  Controlled by two new settings: `hupi.citations.enabled` (default on,
+  free — asks the gateway to include what it already computed during
+  retrieval) and `hupi.citations.deep` (default off — additionally
+  verifies which cited sources the answer actually relied on vs. merely
+  had available, at the cost of one extra real LLM call per answer).
+  Requires a HUPI gateway with citation support
+  (docs/ANSWER_CITATIONS_PLAN.md); older gateways simply won't include
+  the extra data and nothing changes.
+
 ## 0.1.11
 
 - Added `hupi.inlineSuggestions.model` — lets ghost-text completions use
