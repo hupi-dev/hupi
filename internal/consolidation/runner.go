@@ -193,6 +193,14 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		return err
 	}
 
+	// Phase D item 4 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): only a
+	// genuine re-consolidation (not a day's first-ever summary) can leave
+	// an already-existing rollup stale — nothing existed to be stale
+	// before this day had a summary at all.
+	if existingCurrentID != "" {
+		r.refreshRollupsCovering(ctx, scope, "daily", period)
+	}
+
 	// Phase C sub-problem 2 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
 	// best-effort, after the day's own summary is durably stored — see
 	// checkCrossPeriodContradictions' own doc comment for why a failure
@@ -578,18 +586,39 @@ func (r *Runner) embedHighImportanceEpisodes(ctx context.Context, scope identity
 // week/month/year (calendar boundaries, ISO week numbers) is the caller's
 // job, not the Runner's — this only needs an already-decided list.
 //
-// Idempotent by level+period+scope: a second call for a period that
-// already has a rollup is a no-op, not a second undifferentiated draft.
-// This matters once a cron scheduler is calling this (docs/GAP_CLOSURE_PLAN.md
-// §4.1) — RunDaily doesn't need the same guard because a duplicate daily
-// draft is a pre-existing, unrelated gap, but a scheduler that isn't safe
-// to double-fire isn't a scheduler.
+// A second call for a period that already has a current, non-stale
+// rollup is a no-op, not a second undifferentiated draft — this matters
+// once a cron scheduler is calling this (docs/GAP_CLOSURE_PLAN.md §4.1),
+// since a scheduler that isn't safe to double-fire isn't a scheduler.
+// "Non-stale" (not simply "already exists") is Phase D item 4's real
+// fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): a source period's own
+// current summary can legitimately change after this rollup was already
+// generated (RunDaily's own same-day re-consolidation; Phase C
+// correcting a contradiction), and the original write-once behavior had
+// no way to notice that happened, ever — nothing in the natural cron
+// cadence (dueRollups only revisits a given calendar period once) would
+// call RunRollup for that period again on its own. rollupIsStale checks
+// for exactly this; when stale, this regenerates and supersedes the old
+// rollup the same way RunDaily regenerates and supersedes an existing
+// day's draft. After a successful store (new or regenerated), this
+// cascades upward via refreshRollupsCovering — a refreshed weekly rollup
+// can itself make an already-existing monthly rollup stale, and so on up
+// to yearly — so callers only ever need to trigger this once, at the
+// level that actually changed.
 func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sourceLevel, period string, sourcePeriods []string) error {
 	var sources []textSource
+	var existingCurrentID string
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
-		exists, err := r.summaryExists(ctx, tx, scope, level, period)
-		if err != nil || exists {
+		var err error
+		existingCurrentID, err = r.currentSummaryID(ctx, tx, scope, level, period)
+		if err != nil {
 			return err
+		}
+		if existingCurrentID != "" {
+			stale, err := r.rollupIsStale(ctx, tx, scope, existingCurrentID, sourceLevel, sourcePeriods)
+			if err != nil || !stale {
+				return err
+			}
 		}
 		sources, err = r.loadSummaries(ctx, tx, scope, sourceLevel, sourcePeriods)
 		return err
@@ -601,9 +630,10 @@ func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sou
 		return nil
 	}
 
-	// No establishedRecord: RunRollup only ever generates when
-	// summaryExists says nothing exists yet for this level+period, so
-	// there's never a prior draft to preserve continuity with. No
+	// No establishedRecord: a rollup regenerates wholesale from its
+	// current sources every time, unlike RunDaily's own draft, which
+	// accumulates episodes incrementally within one day — there's no
+	// meaningful "partial rollup" to preserve continuity with. No
 	// knownEntities either — Phase C sub-problem 1 is scoped to raw
 	// daily episode text for now (see generateSummary's own doc
 	// comment).
@@ -612,15 +642,114 @@ func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sou
 		return fmt.Errorf("consolidation: generate %s summary for %s: %w", level, period, err)
 	}
 
-	return r.storeSummary(ctx, storeSummaryInput{
+	var correctionReason string
+	if existingCurrentID != "" {
+		correctionReason = "automatic re-consolidation, not a human correction: a source period changed since this rollup was last generated"
+	}
+	if err := r.storeSummary(ctx, storeSummaryInput{
 		scope:                scope,
 		level:                level,
 		period:               period,
 		sourceSummaryPeriods: sourcePeriods,
 		output:               output,
 		groundingSourceText:  joinSources(sources),
+		supersedes:           existingCurrentID,
+		correctionReason:     correctionReason,
 		actor:                systemActor,
+	}); err != nil {
+		return err
+	}
+
+	r.refreshRollupsCovering(ctx, scope, level, period)
+	return nil
+}
+
+// rollupIsStale reports whether any of a rollup's own source periods has
+// a *current* summary created after the rollup itself was — see
+// RunRollup's own doc comment for why this needs checking at all.
+func (r *Runner) rollupIsStale(ctx context.Context, q dbscope.Querier, scope identity.Scope, rollupID, sourceLevel string, sourcePeriods []string) (bool, error) {
+	var rollupCreatedAt time.Time
+	if err := q.QueryRowContext(ctx, `select created_at from summaries where id = $1`, rollupID).Scan(&rollupCreatedAt); err != nil {
+		return false, fmt.Errorf("load rollup %s created_at: %w", rollupID, err)
+	}
+	var newestSourceCreatedAt sql.NullTime
+	if err := q.QueryRowContext(ctx, `
+		select max(created_at) from summaries
+		where level = $1 and period = any($2::text[]) and supersedes is null
+		  and scope_kind = $3 and scope_owner = $4
+	`, sourceLevel, pgfmt.TextArray(sourcePeriods), scope.Kind, scope.Owner).Scan(&newestSourceCreatedAt); err != nil {
+		return false, fmt.Errorf("load newest source created_at for rollup %s: %w", rollupID, err)
+	}
+	return newestSourceCreatedAt.Valid && newestSourceCreatedAt.Time.After(rollupCreatedAt), nil
+}
+
+// rollupLevelAbove is sourceLevelBelow's inverse — the level whose
+// rollup would summarize correctedLevel, or "" for yearly (nothing rolls
+// up further).
+func rollupLevelAbove(level string) string {
+	switch level {
+	case "daily":
+		return "weekly"
+	case "weekly":
+		return "monthly"
+	case "monthly":
+		return "yearly"
+	default:
+		return ""
+	}
+}
+
+// refreshRollupsCovering re-invokes RunRollup for every already-existing,
+// current rollup that summarizes correctedPeriod at correctedLevel —
+// Phase D item 4's real trigger (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
+// nothing in the natural cron cadence ever revisits a past calendar
+// period on its own, so a correction to one period needs to explicitly
+// prod whatever already-generated rollups cover it. Best-effort, like
+// checkCrossPeriodContradictions — logged, never propagated, so a
+// problem refreshing a rollup can't fail the correction that triggered
+// it. RunRollup itself calls this again after a successful store. so one
+// call here cascades upward through weekly -> monthly -> yearly as far
+// as real, already-existing rollups go.
+func (r *Runner) refreshRollupsCovering(ctx context.Context, scope identity.Scope, correctedLevel, correctedPeriod string) {
+	rollupLevel := rollupLevelAbove(correctedLevel)
+	if rollupLevel == "" {
+		return
+	}
+
+	type coveringRollup struct {
+		period        string
+		sourcePeriods []string
+	}
+	var rollups []coveringRollup
+	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select period, source_summary_periods from summaries
+			where level = $1 and $2 = any(source_summary_periods) and supersedes is null
+			  and scope_kind = $3 and scope_owner = $4
+		`, rollupLevel, correctedPeriod, scope.Kind, scope.Owner)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var period, sourcePeriodsLit string
+			if err := rows.Scan(&period, &sourcePeriodsLit); err != nil {
+				return err
+			}
+			rollups = append(rollups, coveringRollup{period: period, sourcePeriods: pgfmt.ParseTextArray(sourcePeriodsLit)})
+		}
+		return rows.Err()
 	})
+	if err != nil {
+		slog.Warn("consolidation: find rollups covering corrected period failed", "corrected_level", correctedLevel, "corrected_period", correctedPeriod, "error", err)
+		return
+	}
+
+	for _, ru := range rollups {
+		if err := r.RunRollup(ctx, scope, rollupLevel, correctedLevel, ru.period, ru.sourcePeriods); err != nil {
+			slog.Warn("consolidation: refresh rollup after correction failed", "rollup_level", rollupLevel, "rollup_period", ru.period, "error", err)
+		}
+	}
 }
 
 func (r *Runner) loadDailyEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, date time.Time) ([]textSource, error) {
@@ -695,25 +824,6 @@ func (r *Runner) scanEpisodeSources(ctx context.Context, rows *sql.Rows, scope i
 // second, driftable copy of this format string.
 func EpisodeEmbedText(input, output string) string {
 	return fmt.Sprintf("USER: %s\nASSISTANT: %s", input, output)
-}
-
-// summaryExists reports whether scope already has any summary (any
-// version, corrected or not) at level+period — RunRollup's idempotency
-// guard: a rollup's sources are other summaries, already-finalized by the
-// time it runs, so a second call for a period that already rolled up has
-// nothing new to fold in and should be a pure no-op, not even a
-// supersession. (RunDaily is different — see currentSummaryID — because a
-// day's episodes can keep arriving between runs, so re-running it *does*
-// have something new to fold in.)
-func (r *Runner) summaryExists(ctx context.Context, q dbscope.Querier, scope identity.Scope, level, period string) (bool, error) {
-	var exists bool
-	err := q.QueryRowContext(ctx, `
-		select exists(
-			select 1 from summaries
-			where level = $1 and period = $2 and scope_kind = $3 and scope_owner = $4
-		)
-	`, level, period, scope.Kind, scope.Owner).Scan(&exists)
-	return exists, err
 }
 
 // currentSummaryID returns the id of the current version of scope's

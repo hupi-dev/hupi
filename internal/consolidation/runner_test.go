@@ -321,6 +321,183 @@ func TestRunRollup_IdempotentAcrossReruns(t *testing.T) {
 	}
 }
 
+// TestRunRollup_RegeneratesWhenSourceChangesAfterward is Phase D item 4's
+// real fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): a source day's
+// current summary can legitimately change after its own weekly rollup
+// was already generated — a later, artificially-timestamped daily
+// summary version (simulating RunDaily's own re-consolidation, or a
+// Phase C correction) must make the existing rollup stale, and a second
+// RunRollup call must regenerate and supersede it, not silently stay a
+// no-op the way TestRunRollup_IdempotentAcrossReruns confirms it should
+// when nothing actually changed.
+func TestRunRollup_RegeneratesWhenSourceChangesAfterward(t *testing.T) {
+	consolidationJSON := `{"summary": "Rolled up the week.", "key_facts": [], "entities_touched": []}`
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-run-rollup-stale"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	dailyCT, _ := enc.Encrypt("daily summary text")
+	sourcePeriods := []string{"2026-09-07", "2026-09-08"}
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		for _, p := range sourcePeriods {
+			if _, err := tx.ExecContext(ctx, `
+				insert into summaries (id, period, level, summary, scope_kind, scope_owner)
+				values ($1, $2, 'daily', $3, $4, $5)
+			`, "sum_stale_test_"+p, p, dailyCT, scope.Kind, scope.Owner); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed daily summaries: %v", err)
+	}
+
+	if err := runner.RunRollup(ctx, scope, "weekly", "daily", "2026-W37", sourcePeriods); err != nil {
+		t.Fatalf("first RunRollup: %v", err)
+	}
+
+	// Simulate a later re-consolidation of one source day: a fresh
+	// current row, artificially timestamped well after the rollup above,
+	// so this test is deterministic rather than racing real wall-clock
+	// granularity.
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into summaries (id, period, level, summary, scope_kind, scope_owner, created_at)
+			values ($1, $2, 'daily', $3, $4, $5, now() + interval '1 hour')
+		`, "sum_stale_test_2026-09-07_v2", "2026-09-07", dailyCT, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed later daily summary version: %v", err)
+	}
+
+	if err := runner.RunRollup(ctx, scope, "weekly", "daily", "2026-W37", sourcePeriods); err != nil {
+		t.Fatalf("second RunRollup (should regenerate, source changed): %v", err)
+	}
+
+	var current, total int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `
+			select count(*) from summaries where level = 'weekly' and period = '2026-W37' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&total); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries s where level = 'weekly' and period = '2026-W37' and scope_kind = $1 and scope_owner = $2
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		`, scope.Kind, scope.Owner).Scan(&current)
+	}); err != nil {
+		t.Fatalf("count weekly summaries: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("got %d total weekly summaries for 2026-W37, want 2 (original + regenerated)", total)
+	}
+	if current != 1 {
+		t.Errorf("got %d current weekly summaries for 2026-W37, want exactly 1 (the regenerated one superseding the original)", current)
+	}
+}
+
+// TestRefreshRollupsCovering_FindsAndRegeneratesExistingRollup is Phase D
+// item 4's other real half: the query that finds *which* already-existing
+// rollups cover a corrected period (RunDaily and checkOneRelatedSummary
+// both trigger this after a correction, since nothing in the natural cron
+// cadence ever revisits a past calendar period on its own).
+func TestRefreshRollupsCovering_FindsAndRegeneratesExistingRollup(t *testing.T) {
+	consolidationJSON := `{"summary": "Rolled up the week.", "key_facts": [], "entities_touched": []}`
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-refresh-rollups-covering"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	dailyCT, _ := enc.Encrypt("daily summary text")
+	sourcePeriods := []string{"2026-09-07", "2026-09-08"}
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		for _, p := range sourcePeriods {
+			if _, err := tx.ExecContext(ctx, `
+				insert into summaries (id, period, level, summary, scope_kind, scope_owner)
+				values ($1, $2, 'daily', $3, $4, $5)
+			`, "sum_refresh_test_"+p, p, dailyCT, scope.Kind, scope.Owner); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed daily summaries: %v", err)
+	}
+	if err := runner.RunRollup(ctx, scope, "weekly", "daily", "2026-W37", sourcePeriods); err != nil {
+		t.Fatalf("seed weekly rollup: %v", err)
+	}
+
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into summaries (id, period, level, summary, scope_kind, scope_owner, created_at)
+			values ($1, $2, 'daily', $3, $4, $5, now() + interval '1 hour')
+		`, "sum_refresh_test_2026-09-07_v2", "2026-09-07", dailyCT, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed later daily summary version: %v", err)
+	}
+
+	// The real trigger under test: given only the corrected level+period,
+	// this must find the existing weekly rollup on its own (via
+	// entities_touched-style source_summary_periods overlap) and
+	// regenerate it — the caller never names "weekly" or "2026-W37"
+	// itself.
+	runner.refreshRollupsCovering(ctx, scope, "daily", "2026-09-07")
+
+	var current int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries s where level = 'weekly' and period = '2026-W37' and scope_kind = $1 and scope_owner = $2
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		`, scope.Kind, scope.Owner).Scan(&current)
+	}); err != nil {
+		t.Fatalf("count current weekly summaries: %v", err)
+	}
+	if current != 1 {
+		t.Errorf("got %d current weekly summaries after refreshRollupsCovering, want exactly 1", current)
+	}
+
+	var regeneratedSummary []byte
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select summary from summaries s where level = 'weekly' and period = '2026-W37' and scope_kind = $1 and scope_owner = $2
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		`, scope.Kind, scope.Owner).Scan(&regeneratedSummary)
+	}); err != nil {
+		t.Fatalf("load regenerated weekly summary: %v", err)
+	}
+	dec, err := enc.Decrypt(regeneratedSummary)
+	if err != nil {
+		t.Fatalf("decrypt regenerated summary: %v", err)
+	}
+	if dec != "Rolled up the week." {
+		t.Errorf("regenerated weekly summary = %q, want the fresh consolidation output, not a stale copy", dec)
+	}
+}
+
 // TestCorrect_WritesAuditLogWithGivenActor checks the one place actor
 // isn't systemActor: a correction is always a deliberate human action
 // (docs/GAP_CLOSURE_PLAN.md §4.3), so it must be attributed to whoever

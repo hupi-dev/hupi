@@ -756,9 +756,35 @@ belonging here:
   summary's prose is a complete, accurate rewrite with no trace of the
   stale $250,000 value. Phase C is now fully closed, not just
   core-mechanism-complete.
-- Phase D item 4 (rollup re-run-awareness): not started — no longer
-  gated on anything within Phase C (both sub-problems and their
-  follow-ups are done); the next real blocker for this item.
+- **Phase D item 4 (rollup re-run-awareness): ✅ implemented,
+  real-verified end to end with real GPT-4.1.** `RunRollup`'s blunt
+  `summaryExists` no-op guard replaced with a real staleness check
+  (`rollupIsStale` — any source period's *current* summary created after
+  the rollup itself); when stale, regenerates and supersedes it the same
+  way `RunDaily` already does for a day's own draft. A new
+  `refreshRollupsCovering` (the real *trigger*, since nothing in the
+  natural cron cadence ever revisits a past calendar period on its own)
+  finds already-existing rollups covering a corrected period and
+  re-invokes `RunRollup`; `RunRollup` itself calls this again after every
+  successful store, so one trigger cascades upward through
+  weekly → monthly → yearly automatically. Wired into both real trigger
+  points: `RunDaily`'s own same-day re-consolidation, and
+  `checkOneRelatedSummary` after a Phase C correction. 3 new tests
+  (staleness-triggered regeneration, idempotency preserved when nothing
+  changed, and the covering-rollup lookup itself).
+
+  Real verification: a synthetic scenario spanning a real weekly and
+  monthly rollup boundary (Wells Fargo's $250,000 fact on a Monday,
+  filler content the following Monday to trigger the real weekly
+  rollup, the contradicting $300,000 fact three weeks later to trigger
+  Phase C on the already-rolled-up day) — every level of the resulting
+  hierarchy (`2023-01-02` daily, `2023-W01` weekly, `2023-01` monthly)
+  came back consistently correct, all stating $300,000 with zero trace
+  of the stale $250,000 value anywhere. This is the last item Phase B's
+  original follow-up list flagged; the consolidation-completeness
+  investigation this whole document tracks is now fully closed except
+  for Phase E (gated, still no real example) and per-episode fact
+  extraction (Ibotta's own open follow-up).
 - Phase E: not started — gated on Phases B/C/D, per its own section.
 - Per-episode fact extraction (Phase B's second design option): not
   started — confirmed necessary for the Ibotta case specifically (see
@@ -785,10 +811,14 @@ not yet built:
   initially-found follow-up gaps (re-grounding scope, prose rewriting —
   sub-problem 2). See Phase C's own writeup for full detail on all of
   it.
-- **Phase D item 4** (rollup re-run-awareness) — the next real item;
-  no longer gated on anything, since Phase C is fully closed.
+- **Phase D item 4 — fully done**, real-verified end to end with real
+  GPT-4.1: a synthetic scenario spanning a real weekly and monthly
+  rollup boundary confirmed daily → weekly → monthly all correctly
+  reflect a Phase-C-triggered correction, with zero stale values left
+  anywhere in the hierarchy.
 - **Phase E** (retrieval date-relevance, if it turns out to still
-  matter) — gated on Phases B/C/D.
+  matter) — gated on Phases B/C/D, all now done; the next real
+  candidate, still with no confirmed real example driving it.
 - **Per-episode fact extraction** (Phase B's second design option) —
   confirmed necessary for the Ibotta case specifically (Phase D item 3
   found cap-raising hits a real ceiling on especially topic-diverse

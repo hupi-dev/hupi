@@ -298,6 +298,12 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 		return
 	}
 	slog.Info("consolidation: cross-period contradiction corrected", "corrected_summary", old.id, "triggering_period", newPeriod, "facts_replaced", applied, "prose_rewritten", strings.TrimSpace(parsed.CorrectedProse) != "")
+
+	// Phase D item 4 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): old.id
+	// just changed, so any already-existing rollup covering old.period
+	// may now be stale too — nothing in the natural cron cadence would
+	// ever revisit it on its own.
+	r.refreshRollupsCovering(ctx, scope, old.level, old.period)
 }
 
 // loadGroundingSourceTextForSummary rebuilds a summary's own grounding
