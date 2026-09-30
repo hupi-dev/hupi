@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
+	"strconv"
 	"strings"
 
 	"hupi/internal/identity"
@@ -34,14 +36,35 @@ const clusterEpisodeThreshold = 8
 // posture as internal/store/retrieve.go's own threshold comments).
 const clusterSimilarityThreshold = 0.60
 
-// maxClustersPerDay bounds real LLM-call cost on a pathological day
-// with many genuinely distinct topics: each cluster is its own
+// defaultMaxClustersPerDay bounds real LLM-call cost on a pathological
+// day with many genuinely distinct topics: each cluster is its own
 // generateSummary call, so an unbounded cluster count could turn one
 // busy day into dozens of consolidation calls. When grouping produces
 // more clusters than this, the two most similar clusters (by centroid)
 // are merged together until at or under the cap, rather than an
 // arbitrary cluster being dropped or forced smaller.
-const maxClustersPerDay = 6
+//
+// Real, measured limitation at the original default of 6
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 3): the Ibotta
+// LongMemEval case's day genuinely has more than 6 distinct topics (its
+// surviving key_facts, even after merging, clearly spanned at least 6-7
+// unrelated subjects — Osprey vocalizations, Sikh meditation, GPU
+// software, content-moderation policy, Ayn Rand, a math word problem —
+// meaning the true topic count was already at or past the cap before
+// Ibotta's own topic got merged into one of them and diluted out).
+// Configurable via HUPI_MAX_CLUSTERS_PER_DAY (same override pattern as
+// contextCharBudget/maxVectorResults in internal/store/retrieve.go) so
+// real calibration against further examples doesn't need a rebuild.
+const defaultMaxClustersPerDay = 6
+
+func maxClustersPerDay() int {
+	if v := os.Getenv("HUPI_MAX_CLUSTERS_PER_DAY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxClustersPerDay
+}
 
 // generateDailySummary is RunDaily's entry point into generateSummary,
 // adding Gap 1's real fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase
@@ -57,9 +80,16 @@ const maxClustersPerDay = 6
 // degenerates to one cluster, this falls back to exactly today's
 // single-call behavior rather than erroring the whole day's
 // consolidation over an optimization.
-func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope, period string, sources []textSource, establishedRecord string) (ConsolidationOutput, error) {
+//
+// knownEntities (RunDaily's own findKnownEntities result, computed once
+// for the whole day) is passed unchanged to every cluster's
+// generateSummary call — Phase C sub-problem 1 doesn't need to
+// re-scope it per cluster, since the same existing entities are
+// relevant context regardless of which cluster a given episode landed
+// in.
+func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope, period string, sources []textSource, establishedRecord string, knownEntities []knownEntityContext) (ConsolidationOutput, error) {
 	if len(sources) <= clusterEpisodeThreshold {
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 	}
 
 	texts := make([]string, len(sources))
@@ -69,29 +99,37 @@ func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope,
 	embedResp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: texts})
 	if err != nil {
 		slog.Warn("consolidation: embed sources for clustering failed, falling back to single-pass summary", "period", period, "error", err)
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 	}
 	if len(embedResp.Vectors) != len(sources) {
 		slog.Warn("consolidation: embedder returned mismatched vector count, falling back to single-pass summary", "period", period, "want", len(sources), "got", len(embedResp.Vectors))
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 	}
 
 	clusters := clusterSources(sources, embedResp.Vectors)
 	if len(clusters) <= 1 {
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 	}
 
 	slog.Info("consolidation: clustering busy day into topic groups", "period", period, "sources", len(sources), "clusters", len(clusters))
 
 	outputs := make([]ConsolidationOutput, 0, len(clusters))
 	for _, cluster := range clusters {
-		out, err := r.generateSummary(ctx, scope, "daily", period, cluster, establishedRecord)
+		out, err := r.generateSummary(ctx, scope, "daily", period, cluster, establishedRecord, knownEntities)
 		if err != nil {
 			return ConsolidationOutput{}, fmt.Errorf("generate cluster summary for %s: %w", period, err)
 		}
 		outputs = append(outputs, out)
 	}
-	return mergeConsolidationOutputs(outputs), nil
+	merged := mergeConsolidationOutputs(outputs)
+
+	// Phase B option 2 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md),
+	// confirmed necessary by Phase D item 3's real finding that
+	// clustering alone has a ceiling on especially topic-diverse days:
+	// an independent, per-episode insurance pass over the *same* full
+	// day's sources, appended to whatever clustering already produced.
+	merged.KeyFacts = append(merged.KeyFacts, r.extractPerEpisodeFacts(ctx, sources)...)
+	return merged, nil
 }
 
 // mergeConsolidationOutputs combines several clusters' independently-
@@ -192,7 +230,7 @@ func clusterSources(sources []textSource, vectors [][]float32) [][]textSource {
 		centroids = append(centroids, centroidOf(vectors, idxs))
 	}
 
-	for len(clusters) > maxClustersPerDay {
+	for len(clusters) > maxClustersPerDay() {
 		bi, bj, best := 0, 1, -2.0
 		for i := 0; i < len(centroids); i++ {
 			for j := i + 1; j < len(centroids); j++ {

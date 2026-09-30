@@ -18,7 +18,7 @@ const summarySystemPrompt = `You are HUPI's consolidation engine (see MEMORY_FOR
     {"fact": "a single concrete, checkable fact", "source_episode_ids": ["<id>", ...]}
   ],
   "entities_touched": [
-    {"id": "kind:slug", "kind": "person|project|preference|skill|place|organization", "name": "...", "attributes": {"key": "value"}}
+    {"id": "kind:slug", "kind": "person|project|preference|skill|place|organization", "name": "...", "attributes": {"key": "value"}, "supersedes_keys": ["existing_key_name", ...]}
   ],
   "relationships": [
     {"subject_kind": "person|project|preference|skill|place|organization", "subject_name": "...", "predicate": "a short verb phrase, e.g. works_at, married_to, friends_with, manages", "object_kind": "person|project|preference|skill|place|organization", "object_name": "...", "valid_from": "YYYY-MM-DD or empty string if unknown", "valid_until": "YYYY-MM-DD or empty string if still current"}
@@ -26,6 +26,8 @@ const summarySystemPrompt = `You are HUPI's consolidation engine (see MEMORY_FOR
 }
 
 Only include a key_fact if it is directly and specifically supported by the source texts you were given. Cite the exact source ids it came from. Do not include anything you are inferring, generalizing, or guessing beyond what the source text states.
+
+supersedes_keys is optional and almost always empty — omit it entirely unless a KNOWN ENTITIES block below lists this same entity with an existing attribute key that a source text explicitly updates under a NEW key name in this response's own attributes. Only name a key there when you're confident it's the same specific real-world fact being updated (e.g. a mortgage pre-approval amount changing), not merely a different fact about the same entity — when in doubt, leave supersedes_keys empty and let the new attribute sit alongside the old one rather than risk discarding a fact that was actually still true.
 
 A source text speaks as of its own labeled date (the "(date: YYYY-MM-DD)" shown after that source's id, when present), not today. When a source uses a relative time reference — "yesterday", "last week", "next month", "this morning" — resolve it against THAT source's own date and write the resulting absolute date (YYYY-MM-DD) into the summary and any key_fact that states it, instead of repeating the relative phrase. For example, a source dated 2023-05-08 saying "I lost my job yesterday" becomes a key_fact stating the job loss happened on 2023-05-07, not one that says "lost his job yesterday" — a relative phrase written into a summary today becomes meaningless the next time anyone reads it. If a source has no labeled date, leave its own relative phrasing as-is rather than guessing what date it means.
 
@@ -51,10 +53,23 @@ CRITICAL constraint on relationships: subject_kind/subject_name and object_kind/
 // walked the correction back. Telling it the established record already
 // reflects any corrections, and to only override it on explicit new
 // evidence in the sources, prevents that regression.
-func buildSummaryPrompt(level, period string, sources []textSource, establishedRecord string) string {
+//
+// knownEntities (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase C
+// sub-problem 1), when non-empty, is every existing entity whose name
+// appears somewhere in sources, with its current attributes
+// (findKnownEntities) — the same "here's what's already on record"
+// context establishedRecord already gives for a day's own prose,
+// extended to entity attributes so the model can recognize a new
+// attribute as an update to an existing one under a different key name
+// (EntityUpdate.SupersedesKeys) instead of writing a second, differently
+// -named key that leaves the stale one sitting there forever.
+func buildSummaryPrompt(level, period string, sources []textSource, establishedRecord string, knownEntities []knownEntityContext) string {
 	var sb strings.Builder
 	if establishedRecord != "" {
 		fmt.Fprintf(&sb, "ALREADY-ESTABLISHED RECORD for this %s — the current, reviewed summary before this re-consolidation, which may already incorporate one or more deliberate human corrections not visible anywhere in the raw source texts below. Treat every fact in it as settled and correct. Only change something from it if a source text below EXPLICITLY states a new fact that supersedes it (the user or a later message clearly states a value changed, a decision was reversed, etc). Do NOT contradict, doubt, or walk back anything here merely because a raw source phrases something differently, states an earlier value in passing, or because your own past response in a source text differs from it — this record already reflects the outcome of any corrections that were made, even when the raw sources don't show that correction happening.\n\n%s\n\n", level, establishedRecord)
+	}
+	if known := formatKnownEntities(knownEntities); known != "" {
+		fmt.Fprintf(&sb, "KNOWN ENTITIES already on record whose name appears in the source texts below, with their current attributes — if a source text below restates one of these entities' facts using a different attribute key name than shown here (e.g. the record already has \"preapproval_amount\" and a source states a new pre-approval amount), name that existing key in supersedes_keys for the corresponding entities_touched entry so the old, differently-spelled key doesn't stay stale. Only do this when a source text states an update to the SAME specific real-world fact — a source stating a different, unrelated fact about the same entity is not a supersession, just an additional attribute.\n\n%s\n", known)
 	}
 	fmt.Fprintf(&sb, "Level: %s\nPeriod: %s\n\nSource texts:\n", level, period)
 	for _, s := range sources {

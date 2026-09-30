@@ -113,7 +113,7 @@ func TestScopeIsolation_Entities(t *testing.T) {
 	// team's, even though both rows share the same bare id.
 	result, err := s.Retrieve(ctx, userScope, userScope, []provider.Message{
 		{Role: provider.RoleUser, Content: "tell me about the hupi project"},
-	})
+	}, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve (user scope): %v", err)
 	}
@@ -188,7 +188,7 @@ func TestScopeIsolation_Episodes(t *testing.T) {
 
 	result, err := s.Retrieve(ctx, teamScope, teamScope, []provider.Message{
 		{Role: provider.RoleUser, Content: "what did we decide about salary last time"},
-	})
+	}, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve (team scope): %v", err)
 	}
@@ -223,7 +223,7 @@ func TestSelfModelAnchorsToActingUser(t *testing.T) {
 	// content to match against.
 	result, err := s.Retrieve(ctx, userScope, teamScope, []provider.Message{
 		{Role: provider.RoleUser, Content: "hello"},
-	})
+	}, time.Now())
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}

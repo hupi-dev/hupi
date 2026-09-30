@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"hupi/internal/audit"
 	"hupi/internal/crypto"
@@ -101,6 +102,35 @@ const (
 	// flagged for real calibration once this is verified to help at all.
 	recommendationEntitySimilarityThreshold = 0.25
 	recommendationEntityMaxResults          = 10
+	// orderingSummarySimilarityThreshold/-MaxResults widen SUMMARY
+	// retrieval specifically for a detected multi-event/ordering-shaped
+	// question (looksLikeOrderingRequest,
+	// docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 2) — the same
+	// widening idea Category 2 cause 1 tried once already
+	// (docs/LONGMEMEVAL_ACCURACY_PLAN.md) and reverted, but that attempt
+	// only widened mmrSelect's final pick count, not the vector fetch's
+	// own similarity threshold — real tracing (HUPI_DEBUG_FUSION) showed
+	// every candidate in that case had vectorRank=-1: the vector search
+	// itself never admitted a single summary above
+	// vectorSimilarityThreshold (0.40) for that query, so widening how
+	// many get *picked* from an empty vector pool did nothing. This
+	// widens the threshold and fetch/keyword caps themselves — mirroring
+	// recommendationEntitySimilarityThreshold's exact pattern, applied to
+	// summaries instead of entities — real-verified need: the
+	// sports-order LongMemEval case's needed summaries ("Spring Sprint
+	// Triathlon," "Midsummer 5K Run") share no literal vocabulary with a
+	// generic query like "order of sports events," so they score zero on
+	// both BM25 keyword matching and (at the normal threshold) vector
+	// similarity, and never enter the candidate pool at all — confirmed
+	// via hupi-export-memory that the facts genuinely exist in
+	// consolidated summaries; this is a pure retrieval-admission gap, not
+	// a consolidation or context-budget one (see Phase D item 1, already
+	// fixed separately). Not yet measured against real embedding
+	// distances the way the thresholds above were — a reasoned starting
+	// point (same 0.25/wider-cap shape as the entity case), flagged for
+	// calibration once verified to help at all.
+	orderingSummarySimilarityThreshold = 0.25
+	orderingSummaryMaxResults          = 15
 	// episodeVectorSimilarityThreshold is vectorSimilarityThreshold's
 	// counterpart for individual episodes (vectorSearchEpisodes) — used
 	// to reuse vectorSimilarityThreshold outright, which real measurement
@@ -189,12 +219,40 @@ func looksLikeRecommendationRequest(query string) bool {
 	return false
 }
 
+// orderingKeywords backs looksLikeOrderingRequest
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 2), grounded in
+// the actual real LongMemEval questions that failed this way (see
+// orderingSummarySimilarityThreshold's own doc comment) — same cheap,
+// deliberately generous substring-match pattern as recommendationKeywords.
+var orderingKeywords = []string{
+	"order of", "which came first", "came first", "first or", "or first",
+	"which task did i", "which item did i", "which did i",
+	"how many months", "how many weeks", "how many days",
+	"in a row", "consecutive", "earliest to latest", "earliest",
+}
+
+// looksLikeOrderingRequest detects a question asking about the sequence,
+// count, or elapsed time between multiple distinct events — the shape
+// that needs several different summaries recalled and combined, not just
+// the single best match, and whose specific event names (e.g. "Spring
+// Sprint Triathlon") often share no vocabulary with a generic question
+// about "sports events" or "which came first."
+func looksLikeOrderingRequest(query string) bool {
+	lower := strings.ToLower(query)
+	for _, kw := range orderingKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // Retrieve implements gateway.Retriever, delegating to retrieve for the
 // actual read and logging exactly one audit_log row per call regardless
 // of which of retrieve's return paths fired — see retrieve's doc comment
 // for the retrieval logic itself.
-func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (gateway.RetrievalResult, error) {
-	result, err := s.retrieve(ctx, actingUser, workspace, messages)
+func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (gateway.RetrievalResult, error) {
+	result, err := s.retrieve(ctx, actingUser, workspace, messages, now)
 	if err != nil {
 		return result, err
 	}
@@ -242,7 +300,7 @@ func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Sco
 // around the embedding call in the middle (docs/HARDENING_PLAN.md D3):
 // never hold a Postgres transaction open across a network call to an
 // external provider.
-func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message) (gateway.RetrievalResult, error) {
+func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (gateway.RetrievalResult, error) {
 	var anchor string
 	var anchorRefs []identity.Ref
 	var anchorCitations []gateway.Citation
@@ -333,6 +391,13 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		entityMaxResults = recommendationEntityMaxResults
 	}
 
+	summarySimilarityThreshold := vectorSimilarityThreshold
+	summaryMaxResults := maxVectorResults()
+	if looksLikeOrderingRequest(query) {
+		summarySimilarityThreshold = orderingSummarySimilarityThreshold
+		summaryMaxResults = orderingSummaryMaxResults
+	}
+
 	err = dbscope.Run(ctx, s.db, workspace, workspace, func(tx *sql.Tx) error {
 		// Summaries fuse their vector and keyword rankings into one MMR
 		// selection (docs/BENCHMARK_IMPROVEMENT_PLAN.md step 4) — unlike
@@ -344,12 +409,17 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// docs/LONGMEMEVAL_ACCURACY_PLAN.md category 2 originally
 		// threaded an explicit finalK/lambda through this call to widen
 		// it for detected ordering/counting questions — reverted after
-		// real verification showed zero effect: the actual bottleneck
-		// for those failures was upstream (consolidation never wrote the
-		// fact down, or buried it beyond recognition), not the
-		// final-selection stage this call controls. See that doc's own
-		// corrected root cause.
-		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations)
+		// real verification showed zero effect, because that attempt
+		// only widened the final-selection stage, not the vector fetch's
+		// own similarity threshold (every candidate had vectorRank=-1 —
+		// nothing to select from). This second attempt
+		// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 2) widens
+		// the threshold and fetch caps themselves, the same pattern
+		// already proven for recommendationEntitySimilarityThreshold —
+		// see orderingSummarySimilarityThreshold's own doc comment for
+		// the real evidence this stage, not final-selection, was the
+		// actual bottleneck.
+		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, summarySimilarityThreshold, summaryMaxResults, query, now)
 		if err != nil {
 			return fmt.Errorf("fused search summaries: %w", err)
 		}
@@ -695,10 +765,11 @@ func reciprocalRank(rank int) float64 {
 // separates a true positive from a same-topic near-miss in practice, on
 // top of that cutoff. Re-measure if the tokenizer's stopword list or the
 // BM25 k1/b constants ever change.
-func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
+func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time) ([]identity.Ref, error) {
 	type candidate struct {
 		id          string
 		text        string
+		period      string
 		enc         *crypto.Encryptor
 		vectorRank  int // -1 if not found by vector search
 		keywordRank int // -1 if not found by keyword search
@@ -709,14 +780,14 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// used before this refactor — see summaryOverfetchFactor's own doc
 	// comment for why overfetching matters.
 	vecRows, err := q.QueryContext(ctx, `
-		select id, summary, key_version, (embedding <=> $1::vector) as distance
+		select id, summary, key_version, period, (embedding <=> $1::vector) as distance
 		from summaries s
 		where embedding is not null
 		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxVectorResults()*summaryOverfetchFactor)
+	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor)
 	if err != nil {
 		return nil, err
 	}
@@ -725,15 +796,16 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		var id string
 		var summaryCT []byte
 		var keyVersion int
+		var period string
 		var distance float64
-		if err := vecRows.Scan(&id, &summaryCT, &keyVersion, &distance); err != nil {
+		if err := vecRows.Scan(&id, &summaryCT, &keyVersion, &period, &distance); err != nil {
 			vecRows.Close()
 			return nil, err
 		}
 		// Cosine distance -> similarity for a normalized embedding space;
 		// see vectorSimilarityThreshold's doc comment for the cutoff.
 		similarity := 1 - distance
-		if similarity < vectorSimilarityThreshold {
+		if similarity < similarityThreshold {
 			continue
 		}
 		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
@@ -746,7 +818,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 			vecRows.Close()
 			return nil, err
 		}
-		byID[id] = &candidate{id: id, text: text, enc: enc, vectorRank: vecRank, keywordRank: -1}
+		byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: vecRank, keywordRank: -1}
 		vecRank++
 	}
 	if err := vecRows.Err(); err != nil {
@@ -762,7 +834,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 
 	if keywordSearchEnabled() && len(queryTerms) > 0 {
 		kwRows, err := q.QueryContext(ctx, `
-			select id, summary, key_version
+			select id, summary, key_version, period
 			from summaries s
 			where summary is not null
 			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
@@ -774,14 +846,17 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		var docs []bm25Document
 		kwText := make(map[string]string)
 		kwEnc := make(map[string]*crypto.Encryptor)
+		kwPeriod := make(map[string]string)
 		for kwRows.Next() {
 			var id string
 			var summaryCT []byte
 			var keyVersion int
-			if err := kwRows.Scan(&id, &summaryCT, &keyVersion); err != nil {
+			var period string
+			if err := kwRows.Scan(&id, &summaryCT, &keyVersion, &period); err != nil {
 				kwRows.Close()
 				return nil, err
 			}
+			kwPeriod[id] = period
 			// Already decrypted by the vector pass above — reuse it
 			// rather than paying for a second decrypt of the same
 			// ciphertext.
@@ -822,7 +897,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 			}
 		}
 		sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
-		kwCap := maxVectorResults() * summaryOverfetchFactor
+		kwCap := maxResults * summaryOverfetchFactor
 		if len(matches) > kwCap {
 			matches = matches[:kwCap]
 		}
@@ -831,7 +906,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				c.keywordRank = rank
 				continue
 			}
-			byID[m.id] = &candidate{id: m.id, text: kwText[m.id], enc: kwEnc[m.id], vectorRank: -1, keywordRank: rank}
+			byID[m.id] = &candidate{id: m.id, text: kwText[m.id], period: kwPeriod[m.id], enc: kwEnc[m.id], vectorRank: -1, keywordRank: rank}
 		}
 	}
 
@@ -848,6 +923,15 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// depend on that.
 	sort.Strings(ids)
 
+	// Resolved once for the whole call, not per candidate — Phase E
+	// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): real-verified need, a
+	// synthetic adversarial test confirmed a temporally-wrong but
+	// lexically-closer summary (fused=1.0) outranking the temporally-
+	// correct one (fused=0.667) for a query implying "last month," with
+	// nothing in the existing ranking aware of either summary's own
+	// period at all.
+	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
+
 	pool := make([]mmrCandidate, len(ids))
 	for i, id := range ids {
 		c := byID[id]
@@ -858,9 +942,21 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		if c.keywordRank >= 0 {
 			fused += reciprocalRank(c.keywordRank)
 		}
+		if hasTimeframe {
+			if pStart, pEnd, ok := parsePeriodRange(c.period); ok && periodsOverlap(pStart, pEnd, tfStart, tfEnd) {
+				// A full reciprocal-rank-0 contribution's worth of boost
+				// (comparable to being the single best vector or keyword
+				// match) — real-verified strong enough to flip the exact
+				// adversarial case above, without being an unconditional
+				// override: a candidate with a much stronger textual
+				// match can still win if its own fused score clears this
+				// margin some other way.
+				fused += temporalRelevanceBoost
+			}
+		}
 		pool[i] = mmrCandidate{relevance: fused, tokens: tokenSet(c.text)}
 	}
-	picked := mmrSelect(pool, maxVectorResults(), mmrLambda())
+	picked := mmrSelect(pool, maxResults, mmrLambda())
 
 	// HUPI_DEBUG_FUSION is a real, permanent diagnostic escape hatch, not
 	// throwaway debug code -- added while investigating a real multi-hop
@@ -881,7 +977,12 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		}
 	}
 
-	var refs []identity.Ref
+	type pickedSummary struct {
+		c     *candidate
+		label string
+		facts []string
+	}
+	picks := make([]pickedSummary, 0, len(picked))
 	for _, idx := range picked {
 		c := byID[ids[idx]]
 		// Real, deliberate observability, same reasoning as the
@@ -895,15 +996,40 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		case c.keywordRank >= 0:
 			label = ", keyword match"
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s): %s", c.id, label, c.text))
-		facts, err := appendKeyFacts(ctx, q, c.id, c.enc, queryTerms, sb)
+		facts, err := loadKeyFacts(ctx, q, c.id, c.enc)
 		if err != nil {
 			return nil, err
 		}
-		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: c.id})
+		picks = append(picks, pickedSummary{c: c, label: label, facts: facts})
+	}
+
+	// Two real passes over picks, not one interleaved loop — see
+	// docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 1. An
+	// earlier, interleaved version (guaranteed content + that same
+	// summary's own depth, then the next summary's guaranteed content +
+	// depth, and so on) still let one busy summary's depth section push
+	// a *later* summary's guarantee past the truncation point once
+	// several summaries were picked — real-verified against the
+	// charity-events LongMemEval case. Writing every picked summary's
+	// guarantee first, before any summary's depth, means a global
+	// truncateToBudget cut (still the final backstop) can only ever
+	// land on depth, never on a guarantee that hasn't been written yet.
+	//
+	// Pass 2 doesn't repeat "related memory (summary %s...)" — just the
+	// depth content itself — so each summary's id still appears exactly
+	// once in the assembled context
+	// (TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms).
+	for _, p := range picks {
+		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s): %s", p.c.id, p.label, guaranteedFact(p.c.text, p.facts, queryTerms)))
+	}
+
+	var refs []identity.Ref
+	for _, p := range picks {
+		sb.WriteString("\n" + depthText(p.c.text, p.facts, queryTerms))
+		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id})
 		*citations = append(*citations, gateway.Citation{
-			Ref:     identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: c.id},
-			Snippet: summaryCitationSnippet(c.text, facts, queryTerms),
+			Ref:     identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id},
+			Snippet: summaryCitationSnippet(p.c.text, p.facts, queryTerms),
 		})
 		*strongHit = true
 	}
@@ -942,11 +1068,13 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 // unmarked, whenever nothing actually stands out (every fact scores 0,
 // or ties for the top score) — a fabricated "most relevant" label on an
 // arbitrary pick would be worse than no reordering at all.
-// appendKeyFacts returns the grounded facts it wrote, in original order
-// (not reordered to match what it wrote to sb) — callers building a
-// citation snippet re-run mostRelevantFactIndex themselves rather than
-// have this function encode two different orderings in one return.
-func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryTerms []string, sb *strings.Builder) ([]string, error) {
+// loadKeyFacts is appendKeyFacts' original DB-loading half, split out
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 1) so
+// fusedSearchSummaries can decide what to do with a summary's facts —
+// guarantee one, then bound the rest — before anything gets written to
+// sb, instead of appendKeyFacts writing everything the moment it's
+// loaded.
+func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		select fact from summary_key_facts
 		where summary_id = $1 and grounded = true
@@ -969,10 +1097,13 @@ func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, en
 		}
 		facts = append(facts, fact)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+	return facts, rows.Err()
+}
 
+// writeKeyFacts is appendKeyFacts' original writing half — one bullet
+// per fact, the most query-relevant one (if any stands out) promoted to
+// the front and marked, same behavior as before the loadKeyFacts split.
+func writeKeyFacts(sb *strings.Builder, facts []string, queryTerms []string) {
 	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
 		sb.WriteString(fmt.Sprintf("\n  - (most relevant) %s", facts[best]))
 		for i, fact := range facts {
@@ -980,12 +1111,74 @@ func appendKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, en
 				sb.WriteString(fmt.Sprintf("\n  - %s", fact))
 			}
 		}
-		return facts, nil
+		return
 	}
 	for _, fact := range facts {
 		sb.WriteString(fmt.Sprintf("\n  - %s", fact))
 	}
-	return facts, nil
+}
+
+// guaranteedFact returns the one piece of text worth protecting for a
+// summary ahead of every picked summary's depth section (see
+// fusedSearchSummaries' two-pass doc comment for why a guarantee, ahead
+// of any depth, is needed at all). Prefers the fact sharing the most
+// query vocabulary (mostRelevantFactIndex); falls back to the first fact
+// if none stands out but at least one exists; falls back to a short
+// prose snippet only when the summary has no grounded key facts at all
+// (rare — see loadKeyFacts/writeKeyFacts' own doc comment on why only
+// grounded facts are ever surfaced).
+//
+// This ranking isn't perfect — real-verified against the charity-events
+// LongMemEval case that mostRelevantFactIndex's plain lexical-overlap
+// scoring can promote the wrong fact on a summary with many candidates,
+// the same real limitation that sank the preference-ranking "1b"
+// attempt elsewhere in this file — which is exactly why depthText's own
+// (uncapped) facts are real insurance beyond this one guaranteed pick,
+// not a redundant duplicate of it.
+func guaranteedFact(prose string, facts []string, queryTerms []string) string {
+	if len(facts) == 0 {
+		return truncateToBudget(prose, guaranteedProseFallbackChars)
+	}
+	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
+		return facts[best]
+	}
+	return facts[0]
+}
+
+// guaranteedProseFallbackChars caps guaranteedFact's no-facts fallback —
+// small on purpose, a fallback for a summary with nothing grounded to
+// guarantee, not meant to substitute for real prose depth.
+const guaranteedProseFallbackChars = 300
+
+// proseDepthCap bounds only a summary's full PROSE contribution to its
+// depth section — key facts (writeKeyFacts) are deliberately NOT capped
+// here. Facts are already engineered to be short and atomic
+// (summarySystemPrompt asks for "a single concrete, checkable fact" per
+// entry), and a Phase B (topic-clustered) busy day can legitimately have
+// 20+ of them, each individually cheap; prose is where the real bulk
+// lives (Phase B's multi-paragraph merged summaries) and is "for human
+// skimming only, not treated as fact" per that same prompt — the right
+// place to spend a tight cap when something has to give. Real-verified
+// against the charity-events LongMemEval case: capping facts and prose
+// together (the original version of this fix) let prose alone exhaust
+// the cap before ever reaching a fact several bullets down the list,
+// even though every fact was individually far cheaper than the prose
+// that crowded it out.
+const proseDepthCap = 500
+
+// depthText is every picked summary's "extra depth," written in pass 2
+// of fusedSearchSummaries' two-pass render (see that function's own doc
+// comment) — every key fact, uncapped, followed by a capped prose
+// snippet. The eventual global truncateToBudget call is still the final
+// backstop if the combined depth across every picked summary is too
+// large; this function's job is only to make sure that cut lands on the
+// least valuable content (verbose prose) as late as possible, not on a
+// fact several bullets into a busy day's summary.
+func depthText(prose string, facts []string, queryTerms []string) string {
+	var sb strings.Builder
+	writeKeyFacts(&sb, facts, queryTerms)
+	sb.WriteString("\n" + truncateToBudget(prose, proseDepthCap))
+	return sb.String()
 }
 
 // summaryCitationSnippet builds a citation's Snippet for a summary: its
@@ -1338,10 +1531,20 @@ type mmrCandidate struct {
 // to hand back which ones won and in what order.
 func mmrSelect(pool []mmrCandidate, k int, lambda float64) []int {
 	if k >= len(pool) {
+		// Still sorted by relevance descending, not left in whatever order
+		// the caller's candidate slice happened to be built in — a real,
+		// previously untested bug (docs/CONSOLIDATION_COMPLETENESS_PLAN.md
+		// Phase E verification): with few enough candidates that none get
+		// discarded here, this branch was the one actually taken for the
+		// exact case Phase D item 2's widened threshold and Phase E's
+		// temporal boost exist to reorder, silently returning candidates
+		// in raw pool order and discarding both fixes' entire effect on
+		// what the model actually sees first.
 		out := make([]int, len(pool))
 		for i := range pool {
 			out[i] = i
 		}
+		sort.Slice(out, func(i, j int) bool { return pool[out[i]].relevance > pool[out[j]].relevance })
 		return out
 	}
 	remaining := make([]int, len(pool))

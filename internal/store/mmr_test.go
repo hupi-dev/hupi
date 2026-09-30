@@ -58,18 +58,26 @@ func TestMMRSelectPrefersDiversityOverNearDuplicate(t *testing.T) {
 	}
 }
 
-// TestMMRSelectIsNoOpWhenPoolFitsWithinK confirms mmrSelect doesn't
-// discard or reorder candidates when there's no actual surplus to choose
-// from — overfetching more than k candidates is what makes MMR
-// meaningful; asking for k from exactly k should just return everything.
-func TestMMRSelectIsNoOpWhenPoolFitsWithinK(t *testing.T) {
+// TestMMRSelectDoesNotDiscardButStillSortsWhenPoolFitsWithinK confirms
+// mmrSelect never discards a candidate when there's no actual surplus to
+// choose from (asking for k from exactly k must return everything), but
+// still orders that full set by relevance — a real, previously untested
+// bug (docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase E verification): an
+// earlier version of this shortcut returned candidates in raw pool
+// (insertion) order whenever nothing needed discarding, which silently
+// discarded Phase D item 2's widened threshold and Phase E's temporal
+// boost's entire effect on context order for exactly the common case —
+// few enough candidates that none get cut here. This pool is built with
+// the lower-relevance candidate first specifically so a naive "leave
+// order unchanged" implementation would fail this test.
+func TestMMRSelectDoesNotDiscardButStillSortsWhenPoolFitsWithinK(t *testing.T) {
 	pool := []mmrCandidate{
-		{relevance: 0.9, tokens: tokenSet("first")},
-		{relevance: 0.5, tokens: tokenSet("second")},
+		{relevance: 0.5, tokens: tokenSet("first")},
+		{relevance: 0.9, tokens: tokenSet("second")},
 	}
 	picked := mmrSelect(pool, 2, 0.7)
-	if len(picked) != 2 || picked[0] != 0 || picked[1] != 1 {
-		t.Errorf("mmrSelect(pool, k=len(pool)) = %v, want [0 1] unchanged", picked)
+	if len(picked) != 2 || picked[0] != 1 || picked[1] != 0 {
+		t.Errorf("mmrSelect(pool, k=len(pool)) = %v, want [1 0] (sorted by relevance descending, not insertion order)", picked)
 	}
 }
 

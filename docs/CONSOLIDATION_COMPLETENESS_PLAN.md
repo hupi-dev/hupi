@@ -154,35 +154,58 @@ nothing resolves which one wins. A fix that only makes consolidation
 preserve more facts, without also addressing precedence, increases the
 surface area for Gap 3 rather than reducing it.
 
-### Gap 4 — Two mechanisms flagged, not yet confirmed as real bugs
+### Gap 4 — Two mechanisms, both now confirmed real
 
-Kept separate and explicitly labeled speculative, per this session's
-own evidentiary discipline (real verification before claiming a bug
-exists) — every concrete example chased down for the two mechanisms
-below turned out, on inspection, to actually be Gap 1 or Gap 3 in
-disguise. That is real signal that they're not the dominant problem,
-but it is not proof they never occur:
+1. **Retrieval has no temporal-relevance signal — ✅ confirmed real,
+   fixed (Phase E).** Ranking was pure embedding/keyword similarity to
+   the question's words; nothing boosted a candidate because its
+   `period` label actually overlapped a timeframe the question implied
+   ("last month," "since my trip"). Confirmed via a deliberately
+   adversarial synthetic test, not assumed: a textually-similar but
+   temporally-wrong summary did outrank the correct one (fused 1.0 vs.
+   0.667) for exactly this reason. See Phase E's own status writeup
+   below for the fix (`internal/store/temporal.go`) and a second, real
+   bug its verification exposed and fixed along the way (`mmrSelect`
+   silently discarding relevance order whenever nothing needed to be
+   discarded).
+2. **Raw aggregation errors at answer time — ✅ confirmed real** (not
+   merely plausible). Real-verified against the charity-events case
+   once Phase D items 1-2 made both needed facts reliably present in
+   context (`HUPI_DEBUG_FUSION` and direct string search both confirm
+   this): the model still answers "no information available" even
+   though everything it needs — both dated charity-event facts — is
+   there for it to find. This isn't a retrieval or consolidation problem
+   anymore; it's the model failing to (a) recognize which two of
+   several charity-event mentions are "the pair on consecutive days" and
+   (b) compute the requested duration from that pair.
 
-1. **Retrieval has no temporal-relevance signal.** Ranking is pure
-   embedding similarity to the question's words; nothing boosts a
-   candidate because its `period` label actually overlaps a timeframe
-   the question implies ("last month," "since my trip"). A
-   textually-similar but temporally-wrong summary could in principle
-   outrank the correct one even with perfect, non-contradictory
-   consolidation. Every real failure traced this session happened to be
-   explained by Gap 1 first, so this mechanism has never been isolated
-   — it may be hiding behind the bigger, confirmed problem.
-2. **Raw date-arithmetic/aggregation errors at answer time** — the
-   model has the right, complete, unambiguous facts and still computes
-   the wrong duration or miscounts/misorders events. This was the
-   original hypothesis for two of Category 2's three causes; every
-   candidate example turned out to be Gap 1 underneath once traced to
-   the actual consolidated data. Cheap to guard against regardless (an
-   explicit "state both dates, then compute" prompt instruction) since
-   it costs nothing and touches no retrieval/consolidation behavior —
-   worth shipping as insurance even without a confirmed example, unlike
-   every other change in this document, which is gated on real evidence
-   first.
+   **A prompt-only fix was tried and reverted, twice, escalating
+   specificity each time** — matching the outcome of every other
+   prompt-only attempt at a consolidation/retrieval-adjacent problem in
+   this document:
+   - First addition: a general instruction to scan every retrieved
+     memory block for each separate occurrence of a multi-part question
+     before answering, rather than stopping at the first one found. No
+     measured effect — answer unchanged.
+   - Second addition (compounding on the first, not replacing it): an
+     explicit, structured instruction — for "in a row"/"consecutive
+     days" phrasing specifically, list every occurrence found with its
+     own date, then check each pair for exactly one calendar day apart.
+     Still no measured effect.
+   
+   Both reverted (`git checkout`) rather than left in place with zero
+   demonstrated benefit, the same discipline as every other disproven
+   change in this document. This looks like a genuine model-capability
+   limit on a real multi-step task (find N candidates across a large,
+   generically-similar context, pair them by date, then compute a
+   derived quantity from the winning pair) rather than something prompt
+   wording alone can close — consistent with this mechanism's own
+   original framing as "partly a raw-model-arithmetic reliability limit
+   no prompt fully closes." Not chasing a third prompt iteration; if
+   this needs fixing, the honest next step is a different mechanism
+   entirely (e.g., a dedicated multi-fact-aggregation reasoning pass
+   with visible intermediate steps, not a single-shot concise-answer
+   prompt) — not scoped further here.
 
 ## Why these are one family of problem, not four unrelated ones
 
@@ -255,15 +278,21 @@ not just what it's told. Two candidate designs, cheaper first:
    further LLM compression pass (a mechanical concatenation, not
    another summarization call, so this step doesn't reintroduce the
    same dilution risk it's fixing).
-2. **Decoupled per-episode fact extraction**, only if (1) proves
-   insufficient. A lightweight pass per episode — not per day — asking
-   "does this contain anything a future question might need," entirely
-   independent of whatever the day's narrative summary becomes. Most
-   robust against dilution by construction (every episode gets its own
-   dedicated consideration regardless of how busy its day was), but
+2. **Decoupled per-episode fact extraction. Confirmed needed, not yet
+   built.** (1)'s cap-based clustering was real-verified to recover 3 of
+   4 known cases cheaply, but hit a real, confirmed ceiling on the
+   Ibotta case specifically — see Phase D item 3's own status for the
+   real evidence (raising the cap from 6 to 10 still wasn't enough; that
+   day's real topic diversity exceeds even the raised cap). A
+   lightweight pass per episode — not per day, not per cluster —
+   asking "does this contain anything a future question might need,"
+   entirely independent of whatever the day's narrative summary
+   becomes. Most robust against dilution by construction (every episode
+   gets its own dedicated consideration regardless of how busy its day
+   was, or how many genuinely distinct topics that day held), but
    doubles episode-processing cost across every day, not just busy
    ones, and is a bigger structural change to how `key_facts` get
-   produced.
+   produced. Not started.
 
 Verification: re-run the exact same 4 real examples this document's Gap
 1 section documents as failing (`gpt4_45189cb4`, `gpt4_e072b769`,
@@ -276,37 +305,159 @@ consolidation-side one the way the original Category 2 diagnosis did.
 
 ### Phase C — Gap 3's real fix: contradiction detection at consolidation time
 
-Two sub-problems, matching the two root causes found:
+The most invasive item in this document — both sub-problems below now
+have a concrete, grounded design (verified against the actual schema
+and `Runner` code, not just described in the abstract), but neither is
+built yet. Detection precision is the real risk in both: a false
+positive silently hides a real, valid fact from retrieval by marking it
+superseded; a false negative leaves Gap 3 unfixed. Both designs
+deliberately reuse the *same* detection mechanism — asking the
+consolidation LLM, which already has the right context loaded, rather
+than a standalone heuristic — because this session's own "1b"
+re-ranking attempt already showed plain lexical/heuristic scoring
+doesn't reliably judge semantic sameness.
 
-1. **Same-fact-different-key-name detection for entity attributes.**
-   Before merging a new extraction's attributes over existing ones,
-   check whether an incoming key plausibly restates an existing key
-   under different naming (semantic similarity between key names,
-   possibly combined with checking whether the *values* are consistent
-   with "an update to the same fact" vs. "a genuinely different fact").
-   High false-positive risk if done naively — needs its own design pass
-   specifically on the detection heuristic, not just the mechanical
-   "supersede when detected" plumbing, which can mostly reuse
-   `upsertEntities`'s existing `replace` path.
-2. **Cross-period summary supersession.** Extend `RunDaily`'s
-   supersession check beyond the exact same `(level, period)` pair —
-   when a new day's consolidation produces a key_fact that plausibly
-   contradicts a key_fact in a *different* day's current summary
-   (same entity/topic, conflicting value), mark that relationship
-   explicitly, the same `supersedes`/`correction_reason` mechanism
-   `Runner.Correct` already uses for human corrections, but system-
-   triggered. This needs a definition of "plausibly contradicts" that's
-   specific enough not to false-positive on two summaries that just
-   happen to both mention the same entity without conflicting (e.g. two
-   different, both-true facts about the same person, exactly the
-   multi-candidate problem already flagged in Category 1's own
-   ranking gap) — likely the same underlying detection mechanism as
-   (1), applied to `key_facts` instead of entity attributes.
+1. **Same-fact-different-key-name detection for entity attributes. ✅
+   Implemented and real-verified.** `upsertEntities`
+   (`internal/consolidation/store.go`) already loaded an entity's
+   *existing* attributes before merging in a new extraction's — that
+   read is exactly the context a human would need to judge "is this key
+   restating an existing one under a different name." Implementation:
+   `EntityUpdate` (`internal/consolidation/types.go`) gained an optional
+   `SupersedesKeys []string` field in the consolidation LLM's structured
+   output; a new `findKnownEntities` (`internal/consolidation/supersession.go`)
+   does a cheap, read-only scan (mirroring `internal/store/retrieve.go`'s
+   `stage1EntityMatches` pattern, just in the opposite direction) for
+   existing entities whose name appears in a day's own raw episode text,
+   run inside `RunDaily`'s existing quick-reads transaction; their
+   current attributes are fed into the consolidation prompt
+   (`buildSummaryPrompt`) as a new "KNOWN ENTITIES" block, the same
+   continuity role `establishedRecord` already plays for a day's own
+   prose. `upsertEntities`'s merge step deletes each named superseded key
+   before merging, instead of the flat overlay that let both sit side by
+   side forever. No new LLM call — folds into the single existing
+   consolidation call, scoped to `RunDaily` only (not `RunRollup`, which
+   summarizes summaries rather than raw episode text where entity names
+   literally appear). 5 new unit tests, including a real
+   `findKnownEntities` DB-integration test.
 
-This phase is explicitly the most invasive in this document — both
-sub-problems need a real design pass on detection precision before any
-code, matching this document's own "verify before design, design before
-code" discipline. Not scoped down to a concrete implementation here.
+   **Real end-to-end verification with real GPT-4.1** (not just the
+   hand-constructed unit tests): a synthetic two-day scenario mirroring
+   the actual Wells Fargo case — day 1, "pre-approved for a $250,000
+   mortgage from Wells Fargo"; day 2, "Wells Fargo... bumped my max home
+   loan budget to $300,000" (deliberately different phrasing to avoid
+   just testing whether the model reuses one key name by coincidence).
+   The model genuinely populated `supersedes_keys` on day 2
+   (`superseded_keys=[mortgage_preapproval_amount mortgage_preapproval_date]`,
+   confirmed via a new permanent diagnostic log line), and the final
+   entity attributes are clean — only the updated $300,000 value, no
+   stale duplicate key sitting alongside it. This is a real, live
+   confirmation of the exact failure mode Wells Fargo demonstrated, not
+   a synthetic pass against hand-fed JSON.
+2. **Cross-period summary key_fact supersession. ✅ Core mechanism
+   implemented and real-verified; two real follow-up gaps found by that
+   same verification.** Real schema check:
+   `summaries.entities_touched` is already a stored, queryable column,
+   so "which other current summaries touch the same entities as today's
+   new one" is a real, existing query (`entities_touched && $1::text[]
+   and supersedes is null`), not something needing a migration. Real
+   mechanism check: `internal/store/retrieve.go`'s current-summary
+   filter (`not exists (select 1 from summaries newer where
+   newer.supersedes = s.id)`) never actually constrains the superseding
+   row to the *same* period as what it supersedes — that constraint
+   only exists in `RunDaily`'s own same-period lookup
+   (`currentSummaryID`), not in the schema or in retrieval. Cross-period
+   supersession is already structurally supported; nothing has ever
+   exercised it.
+
+   Implementation, revised from the original design during actual
+   coding: `RunDaily` calls `checkCrossPeriodContradictions`
+   (`internal/consolidation/contradiction.go`) after its own summary is
+   durably stored. `findRelatedSummaries` looks up other current
+   summaries (any level/period, capped at
+   `maxRelatedSummariesForContradictionCheck=5`, most-recent-first) that
+   share a touched entity. For each, a focused, separate LLM call
+   (`contradictionCheckPrompt` — deliberately narrow, not full
+   consolidation) compares today's grounded key facts against that
+   period's grounded key facts and reports any real contradictions. The
+   real implementation reuses `Runner.CurrentContent` +
+   `Runner.Correct` directly, rather than calling `storeSummary` by hand
+   as originally sketched — `CurrentContent` already produces exactly
+   the "full existing output, ready to hand-edit" starting point
+   `Correct` needs (same tool `cmd/hupi-correct` uses for human
+   corrections), so this only has to surgically replace the
+   contradicted fact(s) within that snapshot and hand it to the
+   existing, already-safety-checked `Correct` path (it independently
+   confirmed a real, useful side effect: `Correct`'s "reject an
+   already-superseded target" guard, built for human operators, fired
+   correctly here too when two unrelated seed scopes' summaries had
+   already been corrected by an earlier test run — no code changes
+   needed for that safety net to already cover this new, automatic
+   caller). Best-effort: any failure in this whole step is logged, never
+   propagated as a `RunDaily` error, matching
+   `entitiesMissingEmbeddings`'s own "supplementary, not blocking"
+   precedent.
+
+   The explicit "not just relate to the same entity/topic" instruction
+   is the real guard against Category 1's already-known false-positive
+   shape (two different, both-true facts about the same person aren't a
+   contradiction) — asking the model to distinguish "update" from
+   "unrelated additional fact," the same judgment `establishedRecord`'s
+   existing prompt already asks it to make for same-period continuity,
+   just extended across periods.
+
+   **Real end-to-end verification with real GPT-4.1**: the same
+   synthetic Wells-Fargo-style two-day scenario used for sub-problem 1,
+   run through the full real `RunDaily` pipeline (not a hand-constructed
+   unit test). The mechanism fired correctly — the older day's summary
+   was genuinely superseded by a real, system-authored correction, with
+   the corrected `key_facts` reflecting the new $300,000 value instead
+   of the stale $250,000 one. The safety-check side effect above was
+   also real and unplanned, a genuine bonus from reusing `Correct`
+   rather than a hand-rolled write path.
+
+   **This same verification surfaced two real, honest follow-up gaps —
+   both now ✅ closed, real-verified with real GPT-4.1:**
+   - **The replacement fact failed re-grounding, fixed.** `Correct`'s
+     `storeSummary` call re-runs `groundingCheck` against the *old*
+     summary's own original source episodes (by design, for the human-
+     correction case it was built for) — but a cross-period
+     replacement fact is, by construction, actually grounded in the
+     *other* period's sources, not the old summary's, and came back
+     `grounded: false` in the first real test. Fixed: `Correct` gained
+     an `extraGroundingSourceText` parameter, appended to what it
+     already builds from the old summary's own sources; a new
+     `loadGroundingSourceTextForSummary` (factored out of `Correct`'s
+     own existing source-loading logic, so both share one
+     implementation) loads the *triggering* period's own sources for
+     `checkOneRelatedSummary` to supply. Re-verified on a fresh run of
+     the same scenario: the corrected fact now comes back
+     `"grounded": true`.
+   - **The prose summary text wasn't touched, fixed.** The original
+     implementation only edited `KeyFacts` within the `CurrentContent`
+     snapshot, leaving the prose paragraph itself carrying the stale
+     value (verified reading "...pre-approved for a $250,000
+     mortgage..." in the first real test even after the fact-level
+     correction). Fixed: `contradictionCheckPrompt`'s response schema
+     gained a `corrected_prose` field — a full rewrite of the old
+     paragraph, not just the changed clause — and
+     `checkOneRelatedSummary` now loads `CurrentContent` *before* the
+     LLM call (previously after, once a contradiction was already
+     confirmed) specifically so the old prose can be included in the
+     prompt for the model to rewrite. Re-verified on the same fresh
+     run: the corrected summary's prose is now a complete, accurate
+     rewrite with no trace of the stale value.
+
+   Both fixes are covered by the existing/updated unit tests
+   (`corrected_prose` exercised in
+   `TestCheckCrossPeriodContradictions_AppliesCorrection`) and by this
+   real, live GPT-4.1 re-verification — not just plausible in theory.
+
+Sequencing: (1) first — lower risk, no new LLM call, fully
+self-contained. (2) only after (1) is real-verified working, since (2)
+depends on the same underlying "is this really the same fact updated"
+judgment being trustworthy, and is the more invasive, higher-cost, more
+consequential (marks historical data superseded) of the two.
 
 ### Phase D — Gap 2's real fix: cross-day stitching, now confirmed needed
 
@@ -315,39 +466,133 @@ phase is necessary, not speculative — recovering the previously-missing
 facts exposed three concrete, distinct follow-ups, the first two
 belonging here:
 
-1. **Budget-aware context assembly, not naive tail-truncation.**
-   `internal/store/retrieve.go`'s context builder currently appends
-   selected summaries in relevance order and truncates whatever doesn't
-   fit at the end (`truncateToBudget`) — real-verified against the
-   charity-events case: both needed daily summaries are correctly
-   retrieved and selected, but the lower-ranked one gets cut off
-   mid-sentence, one sentence before the fact the question needs, even
-   at `HUPI_CONTEXT_CHAR_BUDGET=20000`. The fix: guarantee at least the
-   single most-relevant key_fact from every *selected* summary before
-   spending remaining budget on additional depth from higher-ranked
-   ones — a fixed small reservation per summary, then fill the rest
-   greedily by rank, rather than one global ordered append-then-cut.
+1. **Budget-aware context assembly, not naive tail-truncation. ✅
+   Implemented and real-verified.** `fusedSearchSummaries` now renders
+   in two real passes over every picked summary — every summary's one
+   guaranteed fact (`guaranteedFact`) is written first, across all
+   picked summaries, before any summary's "extra depth" (`depthText`);
+   depth itself writes every key fact uncapped (they're already short
+   and atomic by design) followed by a tightly-capped prose snippet
+   (`proseDepthCap=500`), not the other way around. Getting there took
+   two real, disproven intermediate designs, both found by testing
+   against the actual charity-events scope rather than trusting the
+   design on paper:
+   - First attempt interleaved each summary's guarantee immediately
+     followed by its own depth, one summary at a time — still let an
+     earlier summary's depth section push a *later* summary's guarantee
+     past the truncation point once several summaries were picked.
+     Fixed by making guarantee and depth two genuinely separate passes
+     (`loadKeyFacts`/`writeKeyFacts` split out of the old
+     `appendKeyFacts` to make this possible without querying twice; pass
+     2 doesn't repeat the "related memory (summary id...)" header, so
+     `TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms`'s
+     exactly-once invariant still holds).
+   - Second attempt capped prose+facts together per summary
+     (`summaryDepthCap`) — still let prose alone exhaust the cap before
+     ever reaching a fact several bullets down a Phase-B-clustered day's
+     20+-fact list, even though every fact was individually far cheaper
+     than the prose crowding it out. Fixed by uncapping facts entirely
+     and only capping prose.
+
+   Real re-verification against the charity-events case (`HUPI_CONTEXT_CHAR_BUDGET=20000`,
+   `HUPI_MAX_VECTOR_RESULTS=12` so both needed daily summaries are even
+   candidates — see item 2 below for why the widened pick count itself
+   is still a separate, unfixed gap): both previously-truncated facts
+   (the Feb 14 and Feb 15 charity events) are now confirmed present in
+   the assembled context, verified by locating their exact text and
+   surrounding position in the retrieved string, not just a final
+   answer check. The NFL-playoffs case (a single-summary question,
+   default settings) remains fully fixed, confirming no regression.
+
+   **This exposed a new, final-stage, genuinely different gap**: with
+   both facts now reliably in context, the answer is still "No
+   information available" — a real answer-time reasoning/aggregation
+   failure (recognizing two facts as "the two consecutive-day events"
+   and computing the month difference), not a retrieval or
+   context-assembly problem anymore. Not yet designed or fixed — this
+   is Gap 4's "raw aggregation/arithmetic errors at answer time"
+   mechanism, now confirmed real (previously only flagged as plausible
+   but unobserved) rather than a new item.
 2. **Re-test retrieval breadth widening for detected multi-event/
-   cross-day query shapes** — the same mechanism
-   `docs/LONGMEMEVAL_ACCURACY_PLAN.md` already tried and reverted for
-   Category 2 cause 1. Real-verified this is now genuinely needed: the
-   sports-order case's `HUPI_DEBUG_FUSION` trace showed 2 of 3 needed
-   summaries never entering the candidate pool at all, regardless of
-   context budget — a real retrieval-selection miss, not a truncation
-   problem. The original revert is still correct for *why it failed
-   then* (the candidate pool was empty, nothing to widen into); Phase B
-   now supplies real candidates, so this needs a fresh, real
-   re-verification, not a reuse of the old (now-obsolete) negative
-   result.
-3. **Calibrate or redesign `maxClustersPerDay`.** The Ibotta case's day
-   has more genuinely distinct topics than the current cap of 6 allows,
-   so its fact still landed in an under-cap, still-diluted cluster —
-   confirmed via `hupi-export-memory`, the one Phase B example that
-   didn't recover. Cheapest first step: measure whether raising the cap
-   (real cost tradeoff — more LLM calls on already-expensive busy days)
-   recovers it; if a higher cap still doesn't fully separate every real
-   topic on especially diverse days, the cap itself may need to scale
-   with a day's real topic diversity rather than being a fixed constant.
+   cross-day query shapes. ✅ Implemented and real-verified.** The
+   original Category 2 cause 1 attempt widened the wrong stage —
+   `mmrSelect`'s final pick count — when the real bottleneck (confirmed
+   by `HUPI_DEBUG_FUSION`: every candidate had `vectorRank=-1`) was
+   upstream: the vector fetch's own `similarityThreshold` filter, and to
+   a lesser extent the keyword/fetch caps, discarding candidates before
+   they ever became eligible to be picked. This attempt widens the
+   threshold and caps themselves, mirroring
+   `recommendationEntitySimilarityThreshold`'s exact, already-proven
+   pattern but applied to summaries: `fusedSearchSummaries` now takes
+   explicit `similarityThreshold`/`maxResults` params (default
+   `vectorSimilarityThreshold`/`maxVectorResults()`, unchanged for every
+   ordinary query); a new `looksLikeOrderingRequest` detector
+   (`orderingKeywords`, same cheap substring-match pattern as
+   `looksLikeRecommendationRequest`, grounded in the real failing
+   questions) switches in `orderingSummarySimilarityThreshold=0.25` /
+   `orderingSummaryMaxResults=15` when a multi-event/ordering-shaped
+   question is detected. 3 new unit tests (`ordering_test.go`).
+
+   Real verification against the sports-order case: `HUPI_DEBUG_FUSION`
+   confirmed both previously-invisible summaries (`2023-06-02`, the
+   triathlon; `2023-06-10`, the 5K) now enter the candidate pool via
+   vector search (`vectorRank=0` and `1` respectively — meaningfully
+   similar to the query in embedding space all along, just below the
+   normal 0.40 threshold) and get picked. **The final answer is now
+   fully correct**: all 3 events, in the right chronological order,
+   matching the gold answer exactly. Re-checked the NFL-playoffs and
+   charity-events cases for regressions — both unchanged (NFL still
+   fully fixed; charity still blocked purely by the separate,
+   already-documented answer-time reasoning gap, confirmed via
+   `HUPI_DEBUG_FUSION` that this item's widening now engages
+   automatically for that query too, without needing the manual
+   `HUPI_MAX_VECTOR_RESULTS` override item 1's verification used).
+
+   **Phase D items 1 and 2 together now fully resolve 2 of the original
+   4 Phase B follow-up cases** (NFL playoffs, sports-order) end to end;
+   the charity-events case is retrieval-complete but blocked on
+   answer-time reasoning (Gap 4); Ibotta (item 3, `maxClustersPerDay`)
+   remains unaddressed.
+3. **Calibrate `maxClustersPerDay`. ✅ Investigated — real ceiling found,
+   not a simple tuning fix.** Made configurable
+   (`HUPI_MAX_CLUSTERS_PER_DAY`, same override pattern as
+   `contextCharBudget`/`maxVectorResults`) so calibration doesn't need a
+   rebuild — real re-verification against the Ibotta case at
+   `HUPI_MAX_CLUSTERS_PER_DAY=10` (up from the default 6) confirmed the
+   cap change took effect (10 real clusters fired, one grounding-check
+   hiccup on the larger fact batch — 42 facts extracted against 40
+   expected — self-corrected by consolidation's existing retry, all 40
+   facts landed grounded) — but **the Ibotta fact was still completely
+   absent from all 40 surviving key facts.** Counting the topics that
+   *did* survive (Camille Claudel/Rodin, the user's daily schedule,
+   Sikhism, a birthday party, Osprey vocalizations, bike maintenance,
+   a content-moderation prompt, NYC photography, GPU hardware, BBQ/hot
+   sauce, a math word problem — roughly 11 distinct topics), this
+   specific day's real topic diversity is higher than even the raised
+   cap, not just higher than the original default.
+
+   **Conclusion: fixed-cap clustering has a real ceiling on extremely
+   topic-diverse days, and this is one of them** — not a case where the
+   right constant just hasn't been found yet. This LongMemEval day looks
+   structurally different from the charity/NFL/sports-order days
+   clustering already fixed: it's ~26 sessions that are each genuinely
+   about a *different* single topic (LongMemEval's own "needle in
+   haystack" design deliberately piles up many single-topic distractor
+   sessions onto a handful of real calendar dates), not a few recurring
+   themes repeated across many sessions. Clustering's core assumption —
+   group by topic because a few themes repeat — doesn't hold when there's
+   little-to-no real repetition to exploit; pushing the cap higher for a
+   day like this converges toward "one cluster per source," which stops
+   being clustering at all and just becomes Phase B's other, not-yet-built
+   alternative below. Not chasing a specific cap value further — the
+   plan doc's own Phase B design already named the real next step for
+   exactly this failure mode (decoupled per-episode fact extraction),
+   and that's where this should go, not into more calibration attempts
+   on a mechanism that's shown its ceiling. Left `HUPI_MAX_CLUSTERS_PER_DAY`'s
+   default at 6 (the value already real-verified to recover 3 of 4 cases
+   cheaply); the override exists for whoever wants to trade real cost for
+   a somewhat higher ceiling, with this finding on record that it isn't a
+   full fix for the most extreme days.
 4. **Make rollups re-run-aware, not write-once.** `RunRollup`'s
    `summaryExists` early-return means a week's rollup, once generated,
    never incorporates a later correction to one of its source days.
@@ -435,7 +680,242 @@ belonging here:
   None of these three require reversing Phase B — it's a confirmed,
   real, net-positive foundation. They're follow-up work, tracked
   separately below, not blocking this commit.
-- Phases C, D, E: not started.
+- **Phase D item 1 (budget-aware context assembly): ✅ implemented,
+  real-verified, shipped.** See that item's own writeup above for the
+  two disproven intermediate designs before landing on the working
+  one. Both charity-event facts confirmed present in context now; NFL
+  case confirmed no regression. Exposed Gap 4 mechanism 2 as real (see
+  below).
+- **Phase D item 2 (retrieval breadth widening, re-attempted): ✅
+  implemented, real-verified, shipped.** Widened the vector fetch's own
+  similarity threshold and caps (the actual bottleneck, per real
+  tracing), not just final-selection count (the original, correctly-
+  reverted attempt's mistake). Sports-order case now fully correct
+  end-to-end, gold-matching order. No regressions on NFL or charity.
+- **Phase D item 3 (`maxClustersPerDay` calibration): ✅ investigated —
+  real ceiling found, not a tuning miss.** Made configurable
+  (`HUPI_MAX_CLUSTERS_PER_DAY`); raising it from 6 to 10 for the Ibotta
+  case took effect (confirmed 10 real clusters, a grounding hiccup on
+  the larger batch self-corrected via existing retry) but still didn't
+  recover the fact — that day's real topic diversity exceeds even the
+  raised cap. Left the default at 6; per-episode fact extraction (Phase
+  B's own second design option) is the real next step for this specific
+  failure mode, not further cap tuning.
+- **Gap 4 mechanism 2 (raw aggregation errors at answer time): ✅
+  confirmed real** (previously only flagged as plausible). Two
+  escalating prompt-only fix attempts against the now-retrieval-complete
+  charity case both showed zero measured effect and were reverted. Looks
+  like a genuine model-capability limit on a real multi-step task, not
+  something prompt wording alone closes — not chasing further prompt
+  iterations; a different mechanism (a dedicated multi-fact-aggregation
+  reasoning pass) would be the honest next step if this needs fixing,
+  not scoped further here.
+- **Net picture across the 4 original Phase B follow-up cases**: NFL
+  playoffs and sports-order are now fully fixed end-to-end. Charity
+  events is retrieval-complete but blocked on Gap 4's now-confirmed
+  answer-time reasoning limit. Ibotta remains unfixed — blocked on
+  per-episode fact extraction, not yet built.
+- **Phase C sub-problem 1 (entity attribute key-aliasing): ✅ implemented,
+  real-verified, shipped.** `EntityUpdate.SupersedesKeys`,
+  `findKnownEntities`/`formatKnownEntities`
+  (`internal/consolidation/supersession.go`), `buildSummaryPrompt`'s new
+  "KNOWN ENTITIES" block, `upsertEntities`'s delete-before-merge — all
+  folded into the existing single consolidation call, no new LLM call,
+  scoped to `RunDaily` only. Real end-to-end verification with real
+  GPT-4.1 against a synthetic scenario mirroring the actual Wells Fargo
+  case: the model genuinely populated `supersedes_keys` when the same
+  fact was restated under a different key name across two days
+  (confirmed via a new permanent diagnostic log line), and the final
+  entity attributes are clean — only the updated value, no stale
+  duplicate key. 5 new unit tests, `go test ./...` clean.
+- **Phase C sub-problem 2 (cross-period `key_fact` supersession): ✅ core
+  mechanism implemented and real-verified.** `checkCrossPeriodContradictions`/
+  `findRelatedSummaries`/`checkOneRelatedSummary`
+  (`internal/consolidation/contradiction.go`), wired into `RunDaily` as a
+  best-effort post-storage step. Reuses `Runner.CurrentContent` +
+  `Runner.Correct` directly rather than a hand-rolled `storeSummary`
+  call — a real, unplanned bonus: `Correct`'s existing
+  already-superseded-target guard (built for human operators) correctly
+  protected this new, automatic caller too, with no extra code, when a
+  real test scenario hit it. 3 new tests including a real end-to-end
+  correction-application test. Real GPT-4.1 verification via the full
+  `RunDaily` pipeline (not just a unit test) against the same synthetic
+  Wells Fargo scenario: the older day's summary was genuinely
+  superseded, with the corrected `key_facts` reflecting the new value.
+
+  Both follow-up gaps found by that verification are now **✅ closed,
+  real-verified with real GPT-4.1**: `Correct` gained an
+  `extraGroundingSourceText` parameter (the triggering period's own
+  sources, loaded via a new `loadGroundingSourceTextForSummary`,
+  factored out of `Correct`'s own existing source-loading logic so both
+  share it); `contradictionCheckPrompt`'s response gained a
+  `corrected_prose` field, with `checkOneRelatedSummary` now loading
+  `CurrentContent` *before* the LLM call (not after) so the model can
+  see and rewrite the old prose, not just the facts. Re-ran the same
+  synthetic Wells Fargo scenario fresh: the corrected fact now comes
+  back `"grounded": true` (previously `false`), and the corrected
+  summary's prose is a complete, accurate rewrite with no trace of the
+  stale $250,000 value. Phase C is now fully closed, not just
+  core-mechanism-complete.
+- **Phase D item 4 (rollup re-run-awareness): ✅ implemented,
+  real-verified end to end with real GPT-4.1.** `RunRollup`'s blunt
+  `summaryExists` no-op guard replaced with a real staleness check
+  (`rollupIsStale` — any source period's *current* summary created after
+  the rollup itself); when stale, regenerates and supersedes it the same
+  way `RunDaily` already does for a day's own draft. A new
+  `refreshRollupsCovering` (the real *trigger*, since nothing in the
+  natural cron cadence ever revisits a past calendar period on its own)
+  finds already-existing rollups covering a corrected period and
+  re-invokes `RunRollup`; `RunRollup` itself calls this again after every
+  successful store, so one trigger cascades upward through
+  weekly → monthly → yearly automatically. Wired into both real trigger
+  points: `RunDaily`'s own same-day re-consolidation, and
+  `checkOneRelatedSummary` after a Phase C correction. 3 new tests
+  (staleness-triggered regeneration, idempotency preserved when nothing
+  changed, and the covering-rollup lookup itself).
+
+  Real verification: a synthetic scenario spanning a real weekly and
+  monthly rollup boundary (Wells Fargo's $250,000 fact on a Monday,
+  filler content the following Monday to trigger the real weekly
+  rollup, the contradicting $300,000 fact three weeks later to trigger
+  Phase C on the already-rolled-up day) — every level of the resulting
+  hierarchy (`2023-01-02` daily, `2023-W01` weekly, `2023-01` monthly)
+  came back consistently correct, all stating $300,000 with zero trace
+  of the stale $250,000 value anywhere. This was the last item Phase B's
+  original follow-up list flagged before per-episode fact extraction and
+  Phase E (both written up next) closed out the rest of this document's
+  scope.
+- **Per-episode fact extraction (Phase B's second design option): ✅
+  implemented, real-verified.** `internal/consolidation/perepisode.go` —
+  one independent, narrow LLM call per episode on days already past
+  `clusterEpisodeThreshold`, appended to whatever clustering separately
+  produces (`generateDailySummary`'s busy-day branch). 3 unit tests
+  (`perepisode_test.go`: attribution to the episode's own id, best-effort
+  skip on a failed/malformed call, empty input).
+
+  Real verification against the Ibotta case (the exact scenario Phase D
+  item 3 found clustering alone can't reach): the first prompt version
+  extracted a fact from the target episode but consistently missed the
+  one specific fact the LongMemEval question actually needed — 3 real
+  GPT-4.1 calls against the exact episode text all reported "Ibotta
+  partnered with Thrive Market for cashback," 0/3 ever mentioning "the
+  user just downloaded Ibotta" (the temporal anchor the question's answer
+  depends on), even though both statements are in the same episode. Root
+  cause, not guessed: the prompt's examples ("a purchase, a decision...")
+  didn't cue the model that an incidental scene-setting remark early in a
+  long exchange counts too. Fixed by naming that pattern explicitly and
+  telling the model to be exhaustive, not selective, within one episode.
+  Re-tested against the identical real episode text: 5/5 real GPT-4.1
+  calls now include "The user has just downloaded Ibotta" as its own
+  fact. Real end-to-end re-consolidation of the actual Ibotta day
+  confirmed the same fact lands in the stored summary.
+
+  This surfaced two further real, previously-invisible problems, both
+  found and fixed in the same verification pass (see their own writeups
+  below): more facts per busy day pushed an existing grounding-check
+  weakness from occasional to near-total failure, and — once grounding
+  was fixed and the fact was live in the database — the specific
+  LongMemEval question ("how many weeks ago did I start using Ibotta?")
+  still came back wrong ("9 weeks ago" vs. gold "3 weeks ago") because
+  the answering model got the date arithmetic wrong even with the
+  correct fact in front of it. That residual failure is the same
+  already-confirmed Gap 4 mechanism 2 (answer-time reasoning, not
+  retrieval) documented above for the charity-events case — not a new
+  gap, and not chased further here for the same reason that one wasn't.
+- **Grounding-check batching: ✅ implemented, real-verified (a fix this
+  session's own per-episode verification made necessary, not originally
+  scoped).** `groundingCheck` sent every fact for a whole summary in one
+  LLM call, asking for an exact 1:1 boolean-per-fact JSON array; on any
+  count mismatch it safe-degrades *every* fact in that call to
+  ungrounded (a deliberate, pre-existing design — an ungrounded fact is
+  still stored, just excluded from retrieval, so this was always meant
+  to fail safe rather than destroy information). Real, measured
+  discovery: on the Ibotta day specifically (26 sources, 6 clusters,
+  worse once per-episode extraction adds more facts on top), 2 fresh,
+  independent full real-GPT-4.1 re-consolidation runs both hit this
+  mismatch on **every one of 3 scopes sharing that calendar date**,
+  every single retry — not a rare fluke, and getting *worse* with more
+  facts, exactly the volume per-episode extraction is designed to add.
+  One run's final, persisted summary had 81 facts, 0 grounded — the
+  Ibotta fact my prompt fix had just successfully recovered was
+  completely invisible to retrieval anyway.
+
+  Fixed with `groundingCheckBatchSize = 20`: `groundingCheck` now splits
+  any fact list above that size into fixed-size batches, each its own
+  grounding call, concatenating results — confining any remaining
+  mismatch to the one miscounted batch instead of discarding the whole
+  summary's grounding. 5 new unit tests (`grounding_test.go`), including
+  one that specifically confirms a mismatch on one batch leaves an
+  adjacent, correctly-matched batch's real results untouched. Real
+  re-verification: a third fresh full real-GPT-4.1 re-consolidation of
+  the same Ibotta day came back with only one small mismatch (one batch
+  of 20, off by 1, in a *different* scope) instead of 3/3 scopes fully
+  failing — the target scope's summary landed with **85/85 facts
+  grounded**, including the Ibotta fact.
+- **Phase E (retrieval date-relevance boosting): ✅ implemented,
+  real-verified.** Confirmed genuinely needed first, not assumed: a
+  deliberately adversarial synthetic scenario (a January "AI conference"
+  session about neural networks, a May session about robotics, a
+  question asking what was learned "at the AI conference... last month")
+  showed via `HUPI_DEBUG_FUSION` that both candidates were retrieved
+  (ruling out a candidate-pool gap, Gap 4 mechanism 1) but the
+  temporally-wrong January summary's fused score (1.0, pure lexical
+  match on "AI conference") beat the correct May one (0.667) purely
+  because nothing in ranking was aware of either summary's own period.
+
+  Implemented `internal/store/temporal.go`: `resolveQueryTimeframe`
+  detects a small set of relative-time phrases ("last month," "this
+  week," etc.) against the caller's own `now`, `parsePeriodRange` parses
+  a summary's stored period string (all 4 real formats: daily/weekly/
+  monthly/yearly) into a concrete range, `periodsOverlap` checks the two
+  against each other. `fusedSearchSummaries` adds a flat
+  `temporalRelevanceBoost = 1.0` (a full reciprocal-rank-0 contribution)
+  to any candidate whose period overlaps the resolved timeframe. Since
+  benchmark/synthetic testing fabricates historical "now" values (see
+  `gateway.Handler.Now`'s own doc comment), a real `time.Now()` call
+  inside retrieval would have been silently wrong under exactly the
+  testing this whole document relies on — `now time.Time` was threaded
+  through the `Retriever` interface, `Store.Retrieve`, `retrieve()`, and
+  `fusedSearchSummaries` instead, with `h.now()` the one real call site.
+  7 new unit tests (`temporal_test.go`), including a self-consistency
+  check of `isoWeekStart` against `time.Time.ISOWeek()`'s own reverse
+  mapping across a year boundary (`2020-W53`).
+
+  Real re-verification against the adversarial scenario confirmed the
+  fused score itself was fixed exactly as designed: May's candidate now
+  scores 1.667 (0.667 + the boost) against January's unchanged 1.0.
+  But capturing the actual assembled context (via
+  `-retrieved-context-out-file`) surfaced a second, real, previously
+  invisible bug this fix's own verification exposed: **`mmrSelect`'s
+  "pool fits within k" shortcut returned candidates in raw insertion
+  order, not sorted by relevance, whenever nothing needed to be
+  discarded** — exactly the common case (most queries retrieve fewer
+  candidates than the widened `summaryMaxResults`), and exactly the case
+  this adversarial test hit. The fused-score fix was real, but the
+  context the model actually saw still put January first, because
+  nothing after fusion ever re-sorted a "select everything" pool. This
+  had been silently undermining Phase D item 2's own retrieval-breadth
+  widening the same way, for any query where the widened threshold
+  didn't produce a surplus over `maxResults` — an existing unit test
+  (`TestMMRSelectIsNoOpWhenPoolFitsWithinK`) had encoded this as
+  intentional, using a pool that happened to already be in descending-
+  relevance order, so nothing caught it.
+
+  Fixed by sorting the "return everything" branch by relevance
+  descending — a "no discard" guarantee, not a "no reorder" one.
+  Rewrote the masking unit test with an out-of-order pool so a
+  regression back to raw insertion order would be caught. Re-verified
+  against the adversarial scenario: the assembled context now correctly
+  presents May's (correct) summary first. The final answer is still
+  wrong ("Neural networks, deep learning" instead of gold "Robotics,
+  actuators, and control systems") — with both the fused ranking and the
+  actual context order now fully correct, this is squarely the same
+  already-confirmed Gap 4 mechanism 2 (a real model-reasoning limit at
+  answer time: the model matched the literal phrase "AI conference" in
+  the question to January's content over the "last month" temporal cue,
+  even with the right content presented first) — not a retrieval defect,
+  and not chased further here for the same reason mechanism 2's other
+  instance wasn't.
 - Category 1 (`single-session-preference`) work is separate, already
   shipped (PR #11), and unaffected by this document — see
   `docs/LONGMEMEVAL_ACCURACY_PLAN.md` for its own status and the
@@ -446,6 +926,31 @@ belonging here:
   search in the first place; a different mechanism, likely LLM-based
   re-ranking, is still needed there and is out of scope for this
   document).
+
+### Status: every phase in this document's original scope is now done
+
+All five phases (A revert, B, C, D, E) plus both of Phase B's own
+follow-up options (per-episode fact extraction) are implemented and
+real-verified against real GPT-4.1. What's left is not new phases but
+real, honestly-documented residual gaps outside this document's own
+scope boundary (answer-time model reasoning, not consolidation or
+retrieval):
+
+- **Gap 4 mechanism 2 (answer-time reasoning/arithmetic)** — confirmed
+  real in three independent instances now (charity-events aggregation,
+  the Ibotta "weeks ago" computation, the Phase E adversarial
+  "AI conference" case), all with retrieval fully correct and the needed
+  fact(s) demonstrably present in the assembled context. Three separate
+  prompt-only fix attempts across these cases all showed zero or
+  negligible measured effect. This looks like a genuine model-capability
+  limit on multi-step reasoning over retrieved context, not something
+  this document's own toolkit (consolidation completeness, retrieval
+  ranking) can address — the honest next step, if this is worth
+  pursuing further, is a dedicated answer-time reasoning mechanism (e.g.
+  a structured multi-step reasoning pass), out of scope here.
+- **Category 1 (`single-session-preference`) multi-candidate ranking** —
+  tracked separately in `docs/LONGMEMEVAL_ACCURACY_PLAN.md`, already
+  noted below.
 
 ## Non-goals
 

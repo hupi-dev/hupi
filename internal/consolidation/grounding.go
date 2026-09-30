@@ -29,6 +29,19 @@ func buildGroundingPrompt(sourceText string, facts []KeyFactOutput) string {
 	return sb.String()
 }
 
+// groundingCheckBatchSize caps how many facts go into one grounding call.
+// Real, measured failure mode (docs/CONSOLIDATION_COMPLETENESS_PLAN.md,
+// per-episode fact extraction verification): busy days that combine
+// clustering with per-episode extraction can produce 70-100+ facts for a
+// single summary, and the count-mismatch degrade below — which discards
+// every fact's grounding, not just the miscounted one — was observed to
+// trigger on *every* real attempt at that volume, not as a rare fluke.
+// Splitting into fixed-size batches keeps each individual call's list
+// short enough for the model to reliably echo back one boolean per fact,
+// and confines any remaining mismatch to that one batch instead of the
+// whole summary.
+const groundingCheckBatchSize = 20
+
 // groundingCheck is ARCHITECTURE.md § Consolidation integrity safeguards'
 // second pass: a separate LLM call (r.grounding, which may be a
 // smaller/cheaper model than r.consolidation) re-verifies every generated
@@ -40,7 +53,29 @@ func (r *Runner) groundingCheck(ctx context.Context, sourceText string, facts []
 	if len(facts) == 0 {
 		return nil, nil
 	}
+	if len(facts) > groundingCheckBatchSize {
+		all := make([]bool, 0, len(facts))
+		for start := 0; start < len(facts); start += groundingCheckBatchSize {
+			end := start + groundingCheckBatchSize
+			if end > len(facts) {
+				end = len(facts)
+			}
+			batch, err := r.groundingCheckOne(ctx, sourceText, facts[start:end])
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, batch...)
+		}
+		return all, nil
+	}
+	return r.groundingCheckOne(ctx, sourceText, facts)
+}
 
+// groundingCheckOne is the single-call implementation groundingCheck
+// batches on top of — exactly its previous body, unchanged, just
+// factored out so a big fact list can be split into several calls this
+// size instead of one oversized one.
+func (r *Runner) groundingCheckOne(ctx context.Context, sourceText string, facts []KeyFactOutput) ([]bool, error) {
 	resp, err := r.grounding.ChatCompletion(ctx, provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: groundingSystemPrompt},

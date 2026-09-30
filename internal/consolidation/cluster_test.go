@@ -98,8 +98,8 @@ func TestClusterSourcesRespectsMaxClustersPerDay(t *testing.T) {
 	}
 
 	clusters := clusterSources(sources, vectors)
-	if len(clusters) > maxClustersPerDay {
-		t.Fatalf("clusterSources() produced %d clusters, want at most %d (maxClustersPerDay)", len(clusters), maxClustersPerDay)
+	if len(clusters) > maxClustersPerDay() {
+		t.Fatalf("clusterSources() produced %d clusters, want at most %d (maxClustersPerDay)", len(clusters), maxClustersPerDay())
 	}
 
 	total := 0
@@ -175,5 +175,25 @@ func TestMergeConsolidationOutputsSkipsEmptySummaries(t *testing.T) {
 	merged := mergeConsolidationOutputs([]ConsolidationOutput{a, b})
 	if merged.Summary != "Real content." {
 		t.Errorf("merged.Summary = %q, want the blank/whitespace-only summary excluded", merged.Summary)
+	}
+}
+
+// TestMaxClustersPerDayDefaultAndOverride is the real lever
+// docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase D item 3 exists for —
+// the default of 6 is a real, measured limitation on especially
+// topic-diverse days (the Ibotta LongMemEval case), so this needs to be
+// tunable without a rebuild, same pattern as
+// internal/store/retrieve.go's contextCharBudget/maxVectorResults.
+func TestMaxClustersPerDayDefaultAndOverride(t *testing.T) {
+	if got := maxClustersPerDay(); got != defaultMaxClustersPerDay {
+		t.Errorf("maxClustersPerDay() = %d, want the default %d when HUPI_MAX_CLUSTERS_PER_DAY is unset", got, defaultMaxClustersPerDay)
+	}
+	t.Setenv("HUPI_MAX_CLUSTERS_PER_DAY", "10")
+	if got := maxClustersPerDay(); got != 10 {
+		t.Errorf("maxClustersPerDay() = %d, want 10 from HUPI_MAX_CLUSTERS_PER_DAY", got)
+	}
+	t.Setenv("HUPI_MAX_CLUSTERS_PER_DAY", "not-a-number")
+	if got := maxClustersPerDay(); got != defaultMaxClustersPerDay {
+		t.Errorf("maxClustersPerDay() = %d, want the default %d for an invalid override", got, defaultMaxClustersPerDay)
 	}
 }

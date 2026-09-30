@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
@@ -75,7 +76,7 @@ func runOne(ctx context.Context, retriever gateway.Retriever, p Probe) (Result, 
 	// they're a low-level check on retrieval, not tied to a specific
 	// person — so the same scope serves as both (see gateway.Retriever's
 	// doc comment on why the two are normally separate).
-	result, err := retriever.Retrieve(ctx, scope, scope, []provider.Message{{Role: provider.RoleUser, Content: p.Query}})
+	result, err := retriever.Retrieve(ctx, scope, scope, []provider.Message{{Role: provider.RoleUser, Content: p.Query}}, time.Now())
 	if err != nil {
 		return Result{}, err
 	}
