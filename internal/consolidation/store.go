@@ -164,7 +164,21 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			}
 		}
 
-		if err := r.upsertEntities(ctx, tx, in.scope, entities, in.replaceEntityAttrs); err != nil {
+		// asOf resolves in.level+in.period into the single real-world date
+		// entities.first_seen/last_updated should reflect — see
+		// periodAsOfDate's own doc comment for why this exists at all
+		// (previously Postgres's own current_date, the real wall-clock
+		// day, regardless of what date is actually being consolidated).
+		// Falls back to real now() only if a period is somehow
+		// unparseable, which shouldn't happen for a level this package
+		// itself generated — never blocks the write over it, same
+		// degrade-not-fail posture as groundingCheck's own fallback.
+		asOf, ok := periodAsOfDate(in.level, in.period)
+		if !ok {
+			slog.Warn("consolidation: could not resolve an as-of date for entity timestamps, using real now instead", "level", in.level, "period", in.period)
+			asOf = time.Now()
+		}
+		if err := r.upsertEntities(ctx, tx, in.scope, entities, in.replaceEntityAttrs, asOf); err != nil {
 			return fmt.Errorf("upsert entities for summary %s: %w", id, err)
 		}
 
@@ -307,7 +321,7 @@ func slugify(s string) string {
 // the entity's full corrected set of touched attributes, not a partial
 // patch, so replacing is the semantically correct behavior specifically
 // for this caller.
-func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.Scope, updates []EntityUpdate, replace bool) error {
+func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.Scope, updates []EntityUpdate, replace bool, asOf time.Time) error {
 	// Writes always go under the *current* version — resolved once here,
 	// not per entity, since it can't change mid-transaction. Reads of
 	// each entity's *existing* attributes below use that specific row's
@@ -385,14 +399,14 @@ func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.
 			return fmt.Errorf("encrypt attributes for entity %s: %w", e.ID, err)
 		}
 		_, err = tx.ExecContext(ctx, `
-			insert into entities (id, kind, name, attributes, scope_kind, scope_owner, key_version)
-			values ($1, $2, $3, $4, $5, $6, $7)
+			insert into entities (id, kind, name, attributes, first_seen, last_updated, scope_kind, scope_owner, key_version)
+			values ($1, $2, $3, $4, $5, $5, $6, $7, $8)
 			on conflict (scope_kind, scope_owner, id) do update set
 				name = excluded.name,
 				attributes = excluded.attributes,
 				key_version = excluded.key_version,
-				last_updated = current_date
-		`, e.ID, e.Kind, e.Name, attrsCT, scope.Kind, scope.Owner, keyVersion)
+				last_updated = excluded.last_updated
+		`, e.ID, e.Kind, e.Name, attrsCT, asOf, scope.Kind, scope.Owner, keyVersion)
 		if err != nil {
 			return fmt.Errorf("upsert entity %s: %w", e.ID, err)
 		}
