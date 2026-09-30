@@ -10,11 +10,11 @@ import { GITHUB_URL, docFileURL } from '../lib/links.js';
 // that doc (and bench/results/) before trusting a specific number here
 // if it's been a while.
 const categories = [
-  { label: 'Multi-hop', n: 282, accuracy: '39.6%' },
-  { label: 'Single-hop', n: 321, accuracy: '38.0%' },
-  { label: 'Temporal', n: 96, accuracy: '23.1%' },
-  { label: 'Open-domain', n: 841, accuracy: '52.3%' },
-  { label: 'Adversarial (abstention)', n: 446, accuracy: '67.7%' },
+  { label: 'Multi-hop', n: 282, accuracy: '46.4%' },
+  { label: 'Single-hop', n: 321, accuracy: '61.1%' },
+  { label: 'Temporal', n: 96, accuracy: '35.3%' },
+  { label: 'Open-domain', n: 841, accuracy: '56.4%' },
+  { label: 'Adversarial (abstention)', n: 446, accuracy: '68.2%' },
 ];
 
 const longMemEvalCategories = [
@@ -64,7 +64,7 @@ const longMemEvalCategories = [
       <div class="mx-auto max-w-4xl px-6 py-16 sm:py-20">
         <div class="grid gap-6 sm:grid-cols-2">
           <div class="rounded-xl border border-white/10 bg-navy-900/60 p-8 text-center">
-            <p class="font-mono-tight text-5xl font-extrabold text-ember-500">50.2%</p>
+            <p class="font-mono-tight text-5xl font-extrabold text-ember-500">57.3%</p>
             <p class="mt-2 text-sm text-fog-300">
               Overall accuracy — all 10 LoCoMo conversations, 1,986 questions, real GPT-4.1,
               scored with LoCoMo's own unmodified scoring code.

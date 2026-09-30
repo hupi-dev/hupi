@@ -398,25 +398,53 @@ further this pass — flagged as a real, open design question for
 benchmark scale, not something to speculatively "fix" against one
 hand-traced example.
 
-### LongMemEval result
+### LongMemEval result: 71.67% task-averaged on a 30/48 partial run (up from 52.1%), full run not completed
 
-The combined re-verification run (48 instances, real GPT-4.1) is still
-in progress as of this writing, using the bug-fixed but **pre-verbosity-
-fix** binary (started before `fda0a3f` landed). Decision: let it finish
-rather than kill it mid-consolidation — restarting would throw away
-hours of already-completed real GPT-4.1 consolidation work for a fix
-whose impact on this benchmark specifically isn't established yet.
-LongMemEval's scoring is an LLM judge (GPT-4o), not literal F1/EM like
-LoCoMo, so it may be more tolerant of the same verbosity increase — this
-is genuinely unknown until the pre-fix result is in hand.
+The original pre-fix run hit a real OpenAI credit-exhaustion outage
+partway through (documented below), which also exposed a real gap in
+`cmd/hupi-bench` itself: a single late failure discarded the entire
+run's output, since predictions were only ever written once, at the very
+end. Fixed properly (`ebafe29`, see "Harness resilience fix" below) with
+per-conversation error isolation, incremental output, and a resume mode
+that skips already-complete conversations on restart — verified against
+real Postgres by killing an in-progress run and confirming the restart
+correctly skipped the 6 already-done conversations and cleanly reset the
+one that was mid-consolidation.
 
-Plan: score this pre-fix run for real once it completes. If it shows the
-same verbosity-driven score loss pattern LoCoMo did (or otherwise
-undershoots the 52.1% baseline), do a second cheap `-answer-only` re-run
-with the fix, reusing the 48 already-consolidated scopes — the same
-approach just used for LoCoMo's fixed re-run, at near-zero extra
-consolidation cost. Result to be added here once the pre-fix run
-completes and this decision is made.
+The resumed run (with the v7 fixes: MMR, RRF fusion, date resolution,
+key-fact promotion, conciseness fix) was intentionally stopped after 30
+of 48 instances to bound cost, rather than run to completion. Scored with
+LongMemEval's own real, unmodified GPT-4o-judge scoring:
+
+| | Task-averaged | Overall | Abstention |
+|---|---|---|---|
+| Original (48 instances) | 52.1% | — | 75% |
+| v7 fixes (30 instances, partial) | **71.67%** | 73.33% | 66.67% |
+
+Directionally consistent with LoCoMo's own improvement (50.2% → 57.3%),
+but **not promoted to a new published headline** — see
+`docs/BENCHMARKS.md` §7 for why a 30-instance partial run shouldn't
+replace a completed 48-instance one. A full-scale LongMemEval
+re-verification remains open (`docs/BENCHMARKS.md` §8).
+
+### Harness resilience fix (`ebafe29`)
+
+The credit-exhaustion incident above surfaced a real gap unrelated to any
+retrieval fix: `cmd/hupi-bench` aborted its entire process on the first
+unhandled per-question error (a 429), discarding ~31 already-consolidated
+conversations' worth of real, paid-for work, because predictions were
+only ever written once, at the very end. Fixed with three changes to
+`cmd/hupi-bench` (`main.go`, `replay.go`): per-question and
+per-conversation error isolation (log and continue, rather than abort),
+incremental output (rewritten after every conversation, not just once at
+the end), and a resume mode — restarting with the same `-out-file` skips
+conversations that are already fully answered and cleanly resets
+(`resetScope`) anything else, since replay has no dedup guard and would
+otherwise double-write episodes into a partially-consolidated scope.
+Verified: 3 new unit tests on the resume-completeness logic, full build
+and `go vet` clean, and a live test against real Postgres — killing an
+in-flight run and confirming the restart skipped the done conversations
+and correctly reset the interrupted one.
 
 ## Non-goals for this pass
 
