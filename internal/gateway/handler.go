@@ -279,7 +279,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	inputText := lastUserMessage(messages)
 
 	if req.Stream {
-		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture)
+		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode)
 		return
 	}
 	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode)
@@ -508,6 +508,7 @@ func (h *Handler) handleStream(
 	inputText string,
 	actor string,
 	skipCapture bool,
+	explainMode string,
 ) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -594,10 +595,26 @@ drain:
 	// the client is *told* the turn is done, not merely before the content
 	// finishes arriving — the content itself was already streamed above.
 	finish := "stop"
-	writeSSEChunk(w, chatCompletionChunk{
+	terminal := chatCompletionChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: target.Model(),
 		Choices: []chatCompletionChunkChoice{{Index: 0, Delta: chatCompletionChunkDelta{}, FinishReason: &finish}},
-	})
+	}
+	if explainMode != "" {
+		citations := append([]Citation{}, result.Citations...)
+		if explainMode == "deep" && len(citations) > 0 {
+			used, attrErr := attributionCheck(ctx, target, buf.String(), citations)
+			if attrErr != nil {
+				h.log().Error("attribution check failed, returning citations without Used", "error", attrErr)
+			} else {
+				for i := range citations {
+					u := used[i]
+					citations[i].Used = &u
+				}
+			}
+		}
+		terminal.Citations = citations
+	}
+	writeSSEChunk(w, terminal)
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }

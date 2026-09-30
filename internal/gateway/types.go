@@ -74,4 +74,10 @@ type chatCompletionChunk struct {
 	Created int64                       `json:"created"`
 	Model   string                      `json:"model"`
 	Choices []chatCompletionChunkChoice `json:"choices"`
+	// Citations is only set on the terminal chunk (the one carrying
+	// FinishReason), and only when X-Hupi-Explain was set — same
+	// additive, omitempty field as chatCompletionResponse.Citations, for
+	// clients that stream instead of using the non-streamed response
+	// shape (docs/ANSWER_CITATIONS_PLAN.md).
+	Citations []Citation `json:"hupi_citations,omitempty"`
 }

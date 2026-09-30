@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -386,5 +388,85 @@ func TestHandleChatCompletions_PlainExplainDoesNotRunAttributionCheck(t *testing
 	}
 	if len(resp.Citations) != 1 || resp.Citations[0].Used != nil {
 		t.Fatalf("Citations = %+v, want one citation with Used == nil (not checked)", resp.Citations)
+	}
+}
+
+// TestHandleChatCompletions_StreamDeepExplainIncludesCitationsOnTerminalChunk
+// confirms streaming responses (chatParticipant.ts/chatViewProvider.ts's
+// actual code path, not the non-streamed one — docs/ANSWER_CITATIONS_PLAN.md)
+// carry citations too: attached only to the terminal (finish_reason)
+// chunk, with Used populated when X-Hupi-Explain: deep ran attribution
+// against the fully-assembled streamed answer.
+func TestHandleChatCompletions_StreamDeepExplainIncludesCitationsOnTerminalChunk(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		bodyBytes, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(bodyBytes, &body)
+
+		if streaming, _ := body["stream"].(bool); streaming {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"hello "}}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"world"}}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+
+		// Non-streaming: this is the attribution call.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "fake-model",
+			"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": `{"used": [true]}`}}},
+			"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	defer upstream.Close()
+
+	reg, err := provider.NewRegistry(provider.Config{
+		ActiveChatProvider:          "test",
+		ActiveConsolidationProvider: "test",
+		ActiveEmbeddingProvider:     "test",
+		Providers: map[string]provider.ProfileConfig{
+			"test": {Kind: provider.KindOpenAICompat, Vendor: "test", BaseURL: upstream.URL, Model: "fake-model"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("provider.NewRegistry: %v", err)
+	}
+
+	citation := Citation{Ref: identity.Ref{Kind: identity.RefKindSummary, ID: "sum_test"}, Snippet: "the source text"}
+	retriever := &fakeRetriever{result: RetrievalResult{Gate: GateFull, Citations: []Citation{citation}}}
+	h := &Handler{Registry: reg, Retriever: retriever, Capturer: &fakeCapturer{}}
+
+	body := strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	req.Header.Set("X-Hupi-Explain", "deep")
+	w := httptest.NewRecorder()
+	h.HandleChatCompletions(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	// Parse the SSE body: find the terminal chunk (has finish_reason set)
+	// and confirm it carries the citation with Used populated.
+	var sawTerminalCitation bool
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if line == "" || line == "[DONE]" {
+			continue
+		}
+		var chunk chatCompletionChunk
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			t.Fatalf("decode SSE chunk %q: %v", line, err)
+		}
+		if len(chunk.Citations) > 0 {
+			sawTerminalCitation = true
+			if chunk.Citations[0].Used == nil || !*chunk.Citations[0].Used {
+				t.Errorf("terminal chunk Citations[0].Used = %v, want true", chunk.Citations[0].Used)
+			}
+		}
+	}
+	if !sawTerminalCitation {
+		t.Fatalf("no SSE chunk carried citations; full body:\n%s", w.Body.String())
 	}
 }
