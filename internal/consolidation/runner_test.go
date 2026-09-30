@@ -193,6 +193,71 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 	}
 }
 
+// TestRunDaily_EmbedsHighImportanceEpisode is a real regression test for
+// a bug docs/BENCHMARK_IMPROVEMENT_PLAN.md step 5's textSource.date
+// change introduced but no existing test caught: embedHighImportanceEpisodes
+// has its own SQL query (separate from loadDailyEpisodes/loadEpisodesByID)
+// that also feeds scanEpisodeSources, and step 5 added a 5th scanned
+// column (ts) to that shared helper without updating this third,
+// easy-to-miss call site's own SELECT to also fetch it — a real
+// "sql: expected 4 destination arguments in Scan, not 5" failure on any
+// episode actually meeting the importance threshold, silently swallowed
+// by RunDaily's own "continue past a failed scope" resilience (found via
+// a real full-scale benchmark re-run, not code review). Every existing
+// episode fixture in this file hardcodes importance=0.5, below
+// EpisodeEmbedImportanceThreshold (0.6) -- so embedHighImportanceEpisodes'
+// query always matched zero rows in every other test here, never
+// actually exercising this path. This one seeds importance=0.8
+// specifically so it does.
+func TestRunDaily_EmbedsHighImportanceEpisode(t *testing.T) {
+	consolidationJSON := `{"summary": "Unrelated daily content.", "key_facts": [], "entities_touched": []}`
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-high-importance-embed"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	inputCT, _ := enc.Encrypt("what's the most important decision we made today?")
+	outputCT, _ := enc.Encrypt("choosing pgvector for the vector index")
+	date := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+			values ('ep_test_high_importance', $1, 'interaction', $2, $3, 'sha256:test', 0.8, $4, $5)
+		`, date, inputCT, outputCT, scope.Kind, scope.Owner)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed high-importance episode: %v", err)
+	}
+
+	if err := runner.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("RunDaily: %v", err)
+	}
+
+	var embeddingCount int
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select count(*) from episodes where id = 'ep_test_high_importance' and embedding is not null`).Scan(&embeddingCount)
+	})
+	if err != nil {
+		t.Fatalf("check episode embedding: %v", err)
+	}
+	if embeddingCount != 1 {
+		t.Error("expected the high-importance episode to have been embedded — embedHighImportanceEpisodes either errored (the real regression this test catches) or silently skipped it")
+	}
+}
+
 // TestRunRollup_IdempotentAcrossReruns exercises the guard
 // docs/GAP_CLOSURE_PLAN.md §4.1 added ahead of a cron scheduler calling
 // this on a fixed calendar boundary: a second call for a period that

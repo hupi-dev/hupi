@@ -17,12 +17,12 @@ headline percentage.
 
 | Category | Questions | Accuracy |
 |---|---|---|
-| 1 — multi-hop | 282 | 39.6% |
-| 2 — single-hop | 321 | 38.0% |
-| 3 — temporal | 96 | 23.1% |
-| 4 — open-domain | 841 | 52.3% |
-| 5 — adversarial (abstention) | 446 | 67.7% |
-| **Overall** | **1,986** | **50.2%** |
+| 1 — multi-hop | 282 | 46.4% |
+| 2 — single-hop | 321 | 61.1% |
+| 3 — temporal | 96 | 35.3% |
+| 4 — open-domain | 841 | 56.4% |
+| 5 — adversarial (abstention) | 446 | 68.2% |
+| **Overall** | **1,986** | **57.3%** |
 
 **Method**: `cmd/hupi-bench -benchmark locomo -all-conversations`, real
 `gateway.Handler`, real nightly consolidation (`hupi-consolidate`), real
@@ -33,8 +33,14 @@ completely unmodified `task_eval.evaluation.eval_question_answering` /
 `task_eval.evaluation_stats.analyze_aggr_acc` (`bench/score_locomo.py`).
 Answer/consolidation model: **GPT-4.1** (`gpt-4.1`, OpenAI). Embedding
 model: **text-embedding-3-small** (OpenAI, 1536 dims natively). Bench
-branch commit: `e8aaa01` (`bench/locomo-longmemeval-harness`). Raw
-predictions and stats: `bench/results/locomo_gpt-4.1_2026-09-26/`.
+branch: `feature/benchmark-improvements` — see
+[docs/BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md) for
+the full methodology (MMR diversity-aware selection, RRF fusion of
+vector+keyword search, relative-date resolution, key-fact prominence
+promotion, and an answer-conciseness fix), including an honestly-reported
+per-category regression investigation. Raw predictions and stats:
+`bench/results/locomo_gpt-4.1_2026-09-26/` (v6 baseline; v7 predictions
+not yet archived to `bench/results/`).
 
 ## 2. Is this comparable to Mem0's/Zep's published numbers?
 
@@ -94,7 +100,8 @@ shipped default behavior real users get:
 | v1 | Original QA prompt | 24.9% |
 | v3 | QA prompt fixes (absolute dates, fuller answers, narrowed abstention) | 34.2% |
 | v5 | + `key_facts` surfacing + larger retrieval budget | 38.6% |
-| **v6 (final)** | + attribution-confusion fix + test-hygiene cleanup (see §6) | **50.2%** |
+| v6 | + attribution-confusion fix + test-hygiene cleanup (see §6) | 50.2% |
+| **v7 (final)** | + MMR diversity, RRF fusion, date resolution, key-fact promotion, conciseness fix (see [BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md)) | **57.3%** |
 
 ## 5. No-memory baseline — the real caveat on all of the above
 
@@ -206,23 +213,37 @@ a preference-satisfying recommendation needs. Fixing this well means a
 benchmark/question-type-aware answer prompt, not a retrieval change —
 flagged for the next iteration, not fixed in this pass.
 
+**Partial re-verification with the v7 fixes above (30 of 48 instances)**:
+after the same MMR/RRF/date-resolution/conciseness changes described in
+§1 and [BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md),
+task-averaged accuracy on the 30 instances that finished consolidating
+was **71.67%** (overall 73.33%, abstention 66.67%), real GPT-4o judge, up
+from the 52.1% baseline above. This run was stopped intentionally before
+covering all 48 (cost/time tradeoff, not a failure — see the improvement
+plan doc's own incident log for the real credit-exhaustion interruption
+this run recovered from). **Not promoted to the headline number above**:
+30/48 is a smaller, differently-composed sample than the 48-instance
+figure it would be replacing, and every other number in this document
+holds to a "fully run, not partial" bar — a full-scale LongMemEval
+re-verification remains open (see §8).
+
 ## 8. Still open
 
-- **Scale the LongMemEval sample up** from 48 to something larger
-  (§7's own small-n caveat) — mainly to sharpen `multi-session`,
-  `knowledge-update`, and `temporal-reasoning`, the three categories that
-  moved most between the n=3 and n=8 samples. Not urgent; the overall
-  52.1% is already a meaningfully more reliable number than the pilot's
-  61.1%.
+- **Finish the full-scale (48-instance) LongMemEval re-verification**
+  under the v7 fixes — §7's 30/48 partial run is real, directional
+  evidence (task-averaged 71.67% vs. 52.1%) but was intentionally stopped
+  short of a full run; a complete, judge-scored 48-instance number should
+  replace both the 52.1% headline and this note once run.
 - **A `single-session-preference`-aware answer prompt** for LongMemEval
-  (§7) — the harness needs to stop assuming one QA prompt style fits
-  every benchmark/category.
-- **Graph-walk ablation** (`HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK=false`):
-  measured at the v3 codepoint, all 10 conversations — no measurable
-  difference (34.2% vs. 34.8%, within noise). Not re-measured against v6;
-  worth re-checking now that both benchmarks have real numbers, since the
-  relationship layer's actual value may show up differently at v6's
-  improved retrieval quality or on LongMemEval's multi-session category.
+  — done as part of the v7 work
+  ([BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md) step
+  1); reflected in the §7 partial re-verification above, not yet in a
+  full-scale LongMemEval number.
+- **Graph-walk ablation**: re-verified against real data at the v7
+  codepoint (BENCHMARK_IMPROVEMENT_PLAN.md step 2) — fired 0/32 times on
+  LoCoMo's own multi-hop questions; LoCoMo's "multi-hop" tests
+  cross-session narrative connections, not multi-edge graph traversal,
+  so this mechanism's value doesn't show up on this particular benchmark.
 - **Real Claude/Anthropic number**: both benchmark runs used GPT-4.1
   only: OpenAI provides embeddings, Anthropic doesn't, and mixing vendors
   for a first real run added complexity without a clear need. A Claude

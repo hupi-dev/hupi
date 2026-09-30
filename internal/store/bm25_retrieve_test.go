@@ -164,13 +164,20 @@ func TestRetrieve_KeywordSearchFindsExactTermVectorSearchMisses(t *testing.T) {
 	}
 }
 
-// TestRetrieve_KeywordSearchSkipsWhatVectorSearchAlreadyFound confirms
-// keywordSearchSummaries' excludeIDs actually prevents a double-render:
-// a summary that clears vectorSimilarityThreshold (default fakeEmbedder
-// dimension, so it's a real vector-search hit) and also shares an exact
-// term with the query should appear exactly once in the context, not
-// twice.
-func TestRetrieve_KeywordSearchSkipsWhatVectorSearchAlreadyFound(t *testing.T) {
+// TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms confirms
+// fusedSearchSummaries' real behavior change from the old
+// vectorSearchSummaries/keywordSearchSummaries split
+// (docs/BENCHMARK_IMPROVEMENT_PLAN.md step 4): a summary that clears
+// vectorSimilarityThreshold (default fakeEmbedder dimension, so it's a
+// real vector-search hit) and also shares an exact term with the query
+// is no longer treated as "vector found it first, keyword search skips
+// it" — both mechanisms' rankings feed into one Reciprocal-Rank-Fusion
+// score, and the summary is deliberately labeled as found by both,
+// distinct from a vector-only or keyword-only hit (real, intentional
+// observability, the same reasoning as the graph-walk match marker).
+// Still appears exactly once, though — fusion combines evidence per
+// candidate, it doesn't duplicate rendering.
+func TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-bm25-dedup"}
@@ -192,10 +199,10 @@ func TestRetrieve_KeywordSearchSkipsWhatVectorSearchAlreadyFound(t *testing.T) {
 
 	count := strings.Count(result.ContextMessage, "sum_test-bm25-dedup_2026-01-01_daily_v1")
 	if count != 1 {
-		t.Errorf("summary appears %d times in context (want exactly 1) — keyword search should have skipped a summary vector search already found, got: %q", count, result.ContextMessage)
+		t.Errorf("summary appears %d times in context (want exactly 1) — a candidate found by both mechanisms should still render once, got: %q", count, result.ContextMessage)
 	}
-	if strings.Contains(result.ContextMessage, "keyword match") {
-		t.Errorf("context message shows a keyword match for a summary that was actually a vector-search hit, got: %q", result.ContextMessage)
+	if !strings.Contains(result.ContextMessage, "vector+keyword match") {
+		t.Errorf("context message doesn't show the vector+keyword match label for a summary found by both mechanisms, got: %q", result.ContextMessage)
 	}
 }
 

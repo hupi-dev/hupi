@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"time"
@@ -177,7 +178,40 @@ Always give dates as an absolute date (e.g. "7 May 2023"), never a relative term
 
 Make your best specific attempt using anything relevant you've been told, even if you're not fully certain or the exact wording isn't stated verbatim — a specific, plausible answer inferred from related information is better than declining to answer. Only say "not mentioned" or "no information available" if there is truly nothing relevant to work with at all — not merely because the precise fact isn't stated in so many words.
 
-Before answering, double-check WHO the retrieved information is actually about. A conversation between two people often has facts that apply to only one of them — if the question asks about person A but the fact you found belongs to person B, say so explicitly (e.g. "That's B's necklace, not A's — A's own necklace isn't mentioned") rather than answering as if it were A's.`
+Before answering, double-check WHO the retrieved information is actually about. A conversation between two people often has facts that apply to only one of them — if the question asks about person A but the fact you found belongs to person B, say so explicitly (e.g. "That's B's necklace, not A's — A's own necklace isn't mentioned") rather than answering as if it were A's.
+
+When the answer is a list of items or a yes/no question, give ONLY the items or the yes/no verdict itself — do not add supporting context, dates, or an explanation for each item, even when that detail is available in what you were given. Having more detail available doesn't mean including it is more correct; match the specificity level the question actually asked for, not everything you know that's related.`
+
+// preferenceAnswerPrompt is qaConcisenessPrompt's counterpart for
+// LongMemEval's single-session-preference category — the one category
+// that scored 0% in both the n=3 and n=8 real runs (docs/BENCHMARKS.md
+// §7), traced to a real answer-*style* mismatch, not a retrieval
+// failure: that category's "answer" field isn't a fact to recall, it's
+// a grading rubric describing what a personalized recommendation
+// should reference (e.g. "should suggest quinoa-based recipes,
+// building on the user's stated preferences"), and qaConcisenessPrompt
+// ("answer directly, using a short phrase") is close to the opposite of
+// what a rubric-satisfying recommendation needs.
+const preferenceAnswerPrompt = `Answer the following question by making a specific, substantive recommendation or suggestion — not a short factual phrase.
+
+Explicitly reference the specific preferences, likes, dislikes, or past choices this person has mentioned, and build your recommendation directly on top of them (e.g. "Since you mentioned you enjoy X and are trying to avoid Y, I'd suggest Z" rather than a generic answer that could apply to anyone).
+
+If nothing relevant about this person's preferences was actually mentioned, say so plainly rather than inventing a preference they never stated.`
+
+// answerPromptFor selects the QA-phase system prompt for one question.
+// LongMemEval's own questionType (unused by LoCoMo, which never sets it)
+// picks preferenceAnswerPrompt for the one category that needs a
+// genuinely different answer shape; every other case keeps
+// qaConcisenessPrompt. Used by both answerQuestions and
+// runBaselineConversation so the no-memory control isolates "does
+// memory help," not "does the new prompt help" — both paths see the
+// same prompt-selection logic.
+func answerPromptFor(qa qaItem) string {
+	if qa.questionType == "single-session-preference" {
+		return preferenceAnswerPrompt
+	}
+	return qaConcisenessPrompt
+}
 
 // runBaselineConversation is the no-memory control: no session replay, no
 // consolidation, so this scope's real Retrieve call has nothing to find —
@@ -210,9 +244,17 @@ func runBaselineConversation(handler *gateway.Handler, userID, answerModel strin
 		content := fmt.Sprintf("%s\n\nQuestion: %s", fullTranscript, qa.question)
 		var context string
 		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
-		answer, err := sendChatTurn(handler, userID, answerModel, qaConcisenessPrompt, content)
-		if err != nil {
-			return nil, nil, fmt.Errorf("bench: baseline answer question %d of %s: %w", i, conv.id, err)
+		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), content)
+		if aerr != nil {
+			// Log and continue rather than aborting the whole
+			// conversation: a single transient failure (rate limit,
+			// momentary outage) shouldn't discard every other
+			// already-answered question here. Left as "" — main.go's
+			// loadPriorAnswers treats an empty answer as "not really
+			// answered," so a resumed run redoes this conversation
+			// rather than silently accepting a hole in its answers.
+			slog.Error("baseline answer question failed, continuing to next question", "id", conv.id, "question_index", i, "error", aerr)
+			continue
 		}
 		answers[i] = answer
 		retrievedContexts[i] = context
@@ -242,9 +284,16 @@ func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv 
 		handler.Now = func() time.Time { return qt }
 		var context string
 		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
-		answer, err := sendChatTurn(handler, userID, answerModel, qaConcisenessPrompt, qa.question)
-		if err != nil {
-			return nil, nil, fmt.Errorf("bench: answer question %d of %s: %w", i, conv.id, err)
+		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), qa.question)
+		if aerr != nil {
+			// Log and continue rather than aborting the whole
+			// conversation — see runBaselineConversation's identical
+			// comment; this is the exact path a single late-run 429
+			// hit for real, discarding a whole night's already-paid-for
+			// consolidation because the old code aborted the entire
+			// process on the first such error.
+			slog.Error("answer question failed, continuing to next question", "id", conv.id, "question_index", i, "error", aerr)
+			continue
 		}
 		answers[i] = answer
 		retrievedContexts[i] = context

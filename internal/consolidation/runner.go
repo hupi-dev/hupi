@@ -483,7 +483,7 @@ func (r *Runner) embedHighImportanceEpisodes(ctx context.Context, scope identity
 	var sources []textSource
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-			select id, input_text, output_text, key_version from episodes
+			select id, input_text, output_text, key_version, ts from episodes
 			where type = 'interaction' and ts >= $1 and ts < $2
 			  and importance >= $3
 			  and (embedding is null or embedding_model is distinct from $4)
@@ -574,7 +574,7 @@ func (r *Runner) loadDailyEpisodes(ctx context.Context, q dbscope.Querier, scope
 	end := start.Add(24 * time.Hour)
 
 	rows, err := q.QueryContext(ctx, `
-		select id, input_text, output_text, key_version from episodes
+		select id, input_text, output_text, key_version, ts from episodes
 		where type = 'interaction' and ts >= $1 and ts < $2
 		  and scope_kind = $3 and scope_owner = $4
 		order by ts asc
@@ -595,7 +595,7 @@ func (r *Runner) loadEpisodesByID(ctx context.Context, q dbscope.Querier, scope 
 		return nil, nil
 	}
 	rows, err := q.QueryContext(ctx, `
-		select id, input_text, output_text, key_version from episodes
+		select id, input_text, output_text, key_version, ts from episodes
 		where id = any($1::text[]) and scope_kind = $2 and scope_owner = $3
 		order by ts asc
 	`, pgfmt.TextArray(ids), scope.Kind, scope.Owner)
@@ -612,7 +612,8 @@ func (r *Runner) scanEpisodeSources(ctx context.Context, rows *sql.Rows, scope i
 		var id string
 		var inputCT, outputCT []byte
 		var keyVersion int
-		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion); err != nil {
+		var ts time.Time
+		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion, &ts); err != nil {
 			return nil, err
 		}
 		enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
@@ -627,7 +628,7 @@ func (r *Runner) scanEpisodeSources(ctx context.Context, rows *sql.Rows, scope i
 		if err != nil {
 			return nil, fmt.Errorf("decrypt episode %s output_text: %w", id, err)
 		}
-		out = append(out, textSource{id: id, text: EpisodeEmbedText(input, output)})
+		out = append(out, textSource{id: id, text: EpisodeEmbedText(input, output), date: ts.Format("2006-01-02")})
 	}
 	return out, rows.Err()
 }
@@ -785,10 +786,19 @@ func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, leve
 	return ConsolidationOutput{}, lastErr
 }
 
+// joinSources mirrors buildSummaryPrompt's own date-label format
+// (prompts.go) — the grounding checker needs the same date context the
+// consolidation model got, or it has no way to judge a correctly
+// resolved absolute date ("2023-05-07") as actually supported by a
+// source that only literally says "yesterday".
 func joinSources(sources []textSource) string {
 	var out string
 	for _, s := range sources {
-		out += fmt.Sprintf("--- id: %s ---\n%s\n\n", s.id, s.text)
+		if s.date != "" {
+			out += fmt.Sprintf("--- id: %s (date: %s) ---\n%s\n\n", s.id, s.date, s.text)
+		} else {
+			out += fmt.Sprintf("--- id: %s ---\n%s\n\n", s.id, s.text)
+		}
 	}
 	return out
 }

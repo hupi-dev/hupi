@@ -1,6 +1,9 @@
 package consolidation
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestExtractJSON(t *testing.T) {
 	cases := []struct {
@@ -67,5 +70,39 @@ func TestExtractJSON(t *testing.T) {
 				t.Errorf("extractJSON(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBuildSummaryPromptIncludesSourceDateWhenPresent is
+// docs/BENCHMARK_IMPROVEMENT_PLAN.md step 5's core check: a source with
+// a known date must show it in the labeled block the consolidation
+// model sees, since that's the only thing giving it anything to resolve
+// a relative reference ("yesterday") against.
+func TestBuildSummaryPromptIncludesSourceDateWhenPresent(t *testing.T) {
+	sources := []textSource{
+		{id: "ep_1", text: "I lost my job yesterday.", date: "2023-05-08"},
+	}
+	got := buildSummaryPrompt("daily", "2023-05-08", sources, "")
+	want := "--- id: ep_1 (date: 2023-05-08) ---"
+	if !strings.Contains(got, want) {
+		t.Errorf("buildSummaryPrompt() = %q, want it to contain %q", got, want)
+	}
+}
+
+// TestBuildSummaryPromptOmitsDateLabelWhenAbsent confirms a source with
+// no known date (a rollup source: a lower-level summary, which never
+// sets textSource.date) falls back to the old, unlabeled format exactly
+// as before this step — this is additive, not a requirement on every
+// caller.
+func TestBuildSummaryPromptOmitsDateLabelWhenAbsent(t *testing.T) {
+	sources := []textSource{
+		{id: "sum_1", text: "Weekly rollup content."},
+	}
+	got := buildSummaryPrompt("weekly", "2023-W19", sources, "")
+	if strings.Contains(got, "date:") {
+		t.Errorf("buildSummaryPrompt() = %q, want no date label for a source with no known date", got)
+	}
+	if !strings.Contains(got, "--- id: sum_1 ---") {
+		t.Errorf("buildSummaryPrompt() = %q, want the plain unlabeled format preserved", got)
 	}
 }

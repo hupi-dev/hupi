@@ -27,6 +27,8 @@ const summarySystemPrompt = `You are HUPI's consolidation engine (see MEMORY_FOR
 
 Only include a key_fact if it is directly and specifically supported by the source texts you were given. Cite the exact source ids it came from. Do not include anything you are inferring, generalizing, or guessing beyond what the source text states.
 
+A source text speaks as of its own labeled date (the "(date: YYYY-MM-DD)" shown after that source's id, when present), not today. When a source uses a relative time reference — "yesterday", "last week", "next month", "this morning" — resolve it against THAT source's own date and write the resulting absolute date (YYYY-MM-DD) into the summary and any key_fact that states it, instead of repeating the relative phrase. For example, a source dated 2023-05-08 saying "I lost my job yesterday" becomes a key_fact stating the job loss happened on 2023-05-07, not one that says "lost his job yesterday" — a relative phrase written into a summary today becomes meaningless the next time anyone reads it. If a source has no labeled date, leave its own relative phrasing as-is rather than guessing what date it means.
+
 Only include a relationship if the source texts directly and specifically state a connection between two entities — the same evidentiary bar as a key_fact. Leave valid_from/valid_until as empty strings rather than guessing a date the source text doesn't state.
 
 CRITICAL constraint on relationships: subject_kind/subject_name and object_kind/object_name MUST exactly match the kind and name of an entry you also placed in entities_touched in this same response — same kind value, same name spelling, character for character. A relationship whose subject or object doesn't appear in entities_touched will be silently dropped, so before including any relationship, re-check that both sides are already listed in entities_touched; if either one isn't a real entity worth recording on its own, add it there first (or leave the relationship out entirely). For example, if you write a relationship with object_name "her husband", entities_touched must contain a person entity named exactly "her husband" (or you should give that person's real name in both places if the source text states it) — a vague reference that only appears inside the relationship and nowhere in entities_touched will not be recorded.`
@@ -56,7 +58,11 @@ func buildSummaryPrompt(level, period string, sources []textSource, establishedR
 	}
 	fmt.Fprintf(&sb, "Level: %s\nPeriod: %s\n\nSource texts:\n", level, period)
 	for _, s := range sources {
-		fmt.Fprintf(&sb, "\n--- id: %s ---\n%s\n", s.id, s.text)
+		if s.date != "" {
+			fmt.Fprintf(&sb, "\n--- id: %s (date: %s) ---\n%s\n", s.id, s.date, s.text)
+		} else {
+			fmt.Fprintf(&sb, "\n--- id: %s ---\n%s\n", s.id, s.text)
+		}
 	}
 	return sb.String()
 }
