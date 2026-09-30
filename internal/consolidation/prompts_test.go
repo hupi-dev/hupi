@@ -82,7 +82,7 @@ func TestBuildSummaryPromptIncludesSourceDateWhenPresent(t *testing.T) {
 	sources := []textSource{
 		{id: "ep_1", text: "I lost my job yesterday.", date: "2023-05-08"},
 	}
-	got := buildSummaryPrompt("daily", "2023-05-08", sources, "")
+	got := buildSummaryPrompt("daily", "2023-05-08", sources, "", nil)
 	want := "--- id: ep_1 (date: 2023-05-08) ---"
 	if !strings.Contains(got, want) {
 		t.Errorf("buildSummaryPrompt() = %q, want it to contain %q", got, want)
@@ -98,7 +98,7 @@ func TestBuildSummaryPromptOmitsDateLabelWhenAbsent(t *testing.T) {
 	sources := []textSource{
 		{id: "sum_1", text: "Weekly rollup content."},
 	}
-	got := buildSummaryPrompt("weekly", "2023-W19", sources, "")
+	got := buildSummaryPrompt("weekly", "2023-W19", sources, "", nil)
 	if strings.Contains(got, "date:") {
 		t.Errorf("buildSummaryPrompt() = %q, want no date label for a source with no known date", got)
 	}

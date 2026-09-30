@@ -316,24 +316,43 @@ than a standalone heuristic — because this session's own "1b"
 re-ranking attempt already showed plain lexical/heuristic scoring
 doesn't reliably judge semantic sameness.
 
-1. **Same-fact-different-key-name detection for entity attributes.**
-   `upsertEntities` (`internal/consolidation/store.go`) already loads an
-   entity's *existing* attributes before merging in a new extraction's
-   — that read is already exactly the context a human would need to
-   judge "is this key restating an existing one under a different
-   name." The design: extend the consolidation LLM's own structured
-   output schema (`EntityUpdate`, `internal/consolidation/types.go`)
-   with an optional `supersedes_keys: []string` field per entity update,
-   and pass the entity's *current* attributes into the consolidation
-   prompt (`buildSummaryPrompt`) the same way `establishedRecord`
-   already gives the model the day's own current draft for continuity —
-   instructed to populate `supersedes_keys` only when confident a new
-   attribute is an update to a specifically-named existing key, not a
-   new, different fact. `upsertEntities`'s merge step then deletes each
-   named superseded key before adding the new one, instead of the
-   current flat overlay that lets both sit side by side forever.
-   Bounded, self-contained, no new LLM call (folds into the existing
-   consolidation call) — the lower-risk of the two sub-problems.
+1. **Same-fact-different-key-name detection for entity attributes. ✅
+   Implemented and real-verified.** `upsertEntities`
+   (`internal/consolidation/store.go`) already loaded an entity's
+   *existing* attributes before merging in a new extraction's — that
+   read is exactly the context a human would need to judge "is this key
+   restating an existing one under a different name." Implementation:
+   `EntityUpdate` (`internal/consolidation/types.go`) gained an optional
+   `SupersedesKeys []string` field in the consolidation LLM's structured
+   output; a new `findKnownEntities` (`internal/consolidation/supersession.go`)
+   does a cheap, read-only scan (mirroring `internal/store/retrieve.go`'s
+   `stage1EntityMatches` pattern, just in the opposite direction) for
+   existing entities whose name appears in a day's own raw episode text,
+   run inside `RunDaily`'s existing quick-reads transaction; their
+   current attributes are fed into the consolidation prompt
+   (`buildSummaryPrompt`) as a new "KNOWN ENTITIES" block, the same
+   continuity role `establishedRecord` already plays for a day's own
+   prose. `upsertEntities`'s merge step deletes each named superseded key
+   before merging, instead of the flat overlay that let both sit side by
+   side forever. No new LLM call — folds into the single existing
+   consolidation call, scoped to `RunDaily` only (not `RunRollup`, which
+   summarizes summaries rather than raw episode text where entity names
+   literally appear). 5 new unit tests, including a real
+   `findKnownEntities` DB-integration test.
+
+   **Real end-to-end verification with real GPT-4.1** (not just the
+   hand-constructed unit tests): a synthetic two-day scenario mirroring
+   the actual Wells Fargo case — day 1, "pre-approved for a $250,000
+   mortgage from Wells Fargo"; day 2, "Wells Fargo... bumped my max home
+   loan budget to $300,000" (deliberately different phrasing to avoid
+   just testing whether the model reuses one key name by coincidence).
+   The model genuinely populated `supersedes_keys` on day 2
+   (`superseded_keys=[mortgage_preapproval_amount mortgage_preapproval_date]`,
+   confirmed via a new permanent diagnostic log line), and the final
+   entity attributes are clean — only the updated $300,000 value, no
+   stale duplicate key sitting alongside it. This is a real, live
+   confirmation of the exact failure mode Wells Fargo demonstrated, not
+   a synthetic pass against hand-fed JSON.
 2. **Cross-period summary key_fact supersession.** Real schema check:
    `summaries.entities_touched` is already a stored, queryable column,
    so "which other current summaries touch the same entities as today's
@@ -640,12 +659,25 @@ belonging here:
   events is retrieval-complete but blocked on Gap 4's now-confirmed
   answer-time reasoning limit. Ibotta remains unfixed — blocked on
   per-episode fact extraction, not yet built.
-- Phase C (contradiction detection): not started — still needs a real
-  design pass on detection precision before any code, per this
-  document's own note on why it's the most invasive item here.
-- Phase D item 4 (rollup re-run-awareness): not started — explicitly
-  gated on Phase C existing first (its own premise is "a contradiction
-  gets resolved," which needs Phase C's mechanism to exist).
+- **Phase C sub-problem 1 (entity attribute key-aliasing): ✅ implemented,
+  real-verified, shipped.** `EntityUpdate.SupersedesKeys`,
+  `findKnownEntities`/`formatKnownEntities`
+  (`internal/consolidation/supersession.go`), `buildSummaryPrompt`'s new
+  "KNOWN ENTITIES" block, `upsertEntities`'s delete-before-merge — all
+  folded into the existing single consolidation call, no new LLM call,
+  scoped to `RunDaily` only. Real end-to-end verification with real
+  GPT-4.1 against a synthetic scenario mirroring the actual Wells Fargo
+  case: the model genuinely populated `supersedes_keys` when the same
+  fact was restated under a different key name across two days
+  (confirmed via a new permanent diagnostic log line), and the final
+  entity attributes are clean — only the updated value, no stale
+  duplicate key. 5 new unit tests, `go test ./...` clean.
+- Phase C sub-problem 2 (cross-period `key_fact` supersession): designed
+  (see Phase C's own writeup above), not yet built — now unblocked
+  since sub-problem 1 is real-verified working.
+- Phase D item 4 (rollup re-run-awareness): not started — still gated
+  on Phase C sub-problem 2 specifically (its own premise is "a
+  contradiction gets resolved," which needs that mechanism to exist).
 - Phase E: not started — gated on Phases B/C/D, per its own section.
 - Per-episode fact extraction (Phase B's second design option): not
   started — confirmed necessary for the Ibotta case specifically (see
@@ -666,11 +698,18 @@ belonging here:
 Everything below is real and confirmed-needed (not speculative), just
 not yet built:
 
-- **Phase C** (contradiction detection, the Wells Fargo case) — needs a
-  real design pass on detection precision before any code; the most
-  invasive item in this document.
-- **Phase D item 4** (rollup re-run-awareness) — explicitly gated on
-  Phase C existing first.
+- **Phase C sub-problem 1** (entity attribute key-aliasing): ✅ done —
+  implemented and real-verified end to end with real GPT-4.1 against
+  the actual Wells Fargo failure mode.
+- **Phase C sub-problem 2** (cross-period `key_fact` supersession) —
+  designed (reuses `entities_touched` overlap + a focused follow-up LLM
+  call, `storeSummary` called directly with the old summary's own
+  period/level rather than through `Runner.Correct`), not yet built.
+  Sequenced after sub-problem 1 per this phase's own stated ordering —
+  now unblocked.
+- **Phase D item 4** (rollup re-run-awareness) — still gated on Phase C
+  sub-problem 2 specifically (its own premise, "a contradiction gets
+  resolved," needs that mechanism to exist).
 - **Phase E** (retrieval date-relevance, if it turns out to still
   matter) — gated on Phases B/C/D.
 - **Per-episode fact extraction** (Phase B's second design option) —

@@ -688,6 +688,100 @@ func TestCorrect_ReplacesEntityAttributesWholesale(t *testing.T) {
 	}
 }
 
+// TestUpsertEntities_SupersedesKeysDeletesOldKeyBeforeMerging is Phase C
+// sub-problem 1's real fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): the
+// same concurrency_limit-vs-concurrent_jobs_per_node scenario as
+// TestCorrect_ReplacesEntityAttributesWholesale above, but via the
+// automatic, non-human daily consolidation path (upsertEntities' default
+// merge, not Correct's wholesale replace) — an EntityUpdate naming an old
+// key in SupersedesKeys should have that key deleted before the merge,
+// not left sitting side by side with the new one forever, the real Wells
+// Fargo failure mode this closes.
+func TestUpsertEntities_SupersedesKeysDeletesOldKeyBeforeMerging(t *testing.T) {
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, `{"summary": "unused", "key_facts": [], "entities_touched": []}`, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-supersedes-keys"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2026-09-20",
+		output: ConsolidationOutput{
+			Summary: "Initial daily summary.",
+			EntitiesTouched: []EntityUpdate{
+				{ID: "project:widget", Kind: "project", Name: "Widget", Attributes: map[string]string{"concurrency_limit": "500", "language": "Go"}},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed initial summary+entity: %v", err)
+	}
+
+	// A later day's own automatic consolidation, not a human correction —
+	// storeSummary's default merge path (replaceEntityAttrs left false).
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2026-09-21",
+		output: ConsolidationOutput{
+			Summary: "Later daily summary.",
+			EntitiesTouched: []EntityUpdate{
+				{
+					ID:             "project:widget",
+					Kind:           "project",
+					Name:           "Widget",
+					Attributes:     map[string]string{"concurrent_jobs_per_node": "2000"},
+					SupersedesKeys: []string{"concurrency_limit"},
+				},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("store later summary+entity update: %v", err)
+	}
+
+	var attrsCT []byte
+	var keyVersion int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select attributes, key_version from entities where id = 'project:widget' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&attrsCT, &keyVersion)
+	}); err != nil {
+		t.Fatalf("load entity: %v", err)
+	}
+	enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
+	if err != nil {
+		t.Fatalf("resolve key version: %v", err)
+	}
+	attrsJSON, err := enc.Decrypt(attrsCT)
+	if err != nil {
+		t.Fatalf("decrypt entity attributes: %v", err)
+	}
+	var attrs map[string]string
+	if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
+		t.Fatalf("parse entity attributes: %v", err)
+	}
+
+	if got, want := attrs["concurrent_jobs_per_node"], "2000"; got != want {
+		t.Errorf("concurrent_jobs_per_node = %q, want %q", got, want)
+	}
+	if v, exists := attrs["concurrency_limit"]; exists {
+		t.Errorf("concurrency_limit = %q still present — SupersedesKeys should have deleted it before merging, not left it side by side with the new key", v)
+	}
+	if got, want := attrs["language"], "Go"; got != want {
+		t.Errorf("language = %q, want %q — the default merge path (unlike Correct's replace) should still preserve an untouched attribute", got, want)
+	}
+}
+
 // TestCorrect_RejectsAlreadySupersededTarget is a regression test for a
 // real bug found via manual end-to-end testing: Correct never checked
 // whether -summary-id was still the current version before applying a

@@ -54,16 +54,32 @@ type EntityUpdate struct {
 	Kind       string            `json:"kind"`
 	Name       string            `json:"name"`
 	Attributes map[string]string `json:"attributes"`
+
+	// SupersedesKeys names existing attribute keys (see the entity's
+	// *current* attributes, passed into the consolidation prompt the
+	// same way establishedRecord gives continuity for a day's own prose)
+	// that a key in Attributes above updates under a new name —
+	// docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase C sub-problem 1: the
+	// real, reproduced Wells Fargo failure mode is a later extraction
+	// restating the same real-world fact under a different key
+	// (`preapproval_amount` vs `pre_approved_amount`), and mergeAttributes'
+	// flat per-key overlay leaves both sitting side by side forever with
+	// no precedence. Populated only when the model is confident a new
+	// key is an update to a specifically-named existing one, not a new,
+	// different fact — upsertEntities deletes each named key before
+	// merging in the rest, rather than the default additive overlay.
+	SupersedesKeys []string `json:"supersedes_keys,omitempty"`
 }
 
 // entityUpdateWire mirrors EntityUpdate field-for-field except
 // Attributes, which is deliberately json.RawMessage-valued rather than
 // string-valued — see UnmarshalJSON below for why.
 type entityUpdateWire struct {
-	ID         string                     `json:"id"`
-	Kind       string                     `json:"kind"`
-	Name       string                     `json:"name"`
-	Attributes map[string]json.RawMessage `json:"attributes"`
+	ID             string                     `json:"id"`
+	Kind           string                     `json:"kind"`
+	Name           string                     `json:"name"`
+	Attributes     map[string]json.RawMessage `json:"attributes"`
+	SupersedesKeys []string                   `json:"supersedes_keys"`
 }
 
 // UnmarshalJSON accepts any JSON value for an attribute, not only a
@@ -84,6 +100,7 @@ func (e *EntityUpdate) UnmarshalJSON(data []byte) error {
 	e.ID = wire.ID
 	e.Kind = wire.Kind
 	e.Name = wire.Name
+	e.SupersedesKeys = wire.SupersedesKeys
 	if len(wire.Attributes) == 0 {
 		e.Attributes = nil
 		return nil

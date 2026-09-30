@@ -80,9 +80,16 @@ func maxClustersPerDay() int {
 // degenerates to one cluster, this falls back to exactly today's
 // single-call behavior rather than erroring the whole day's
 // consolidation over an optimization.
-func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope, period string, sources []textSource, establishedRecord string) (ConsolidationOutput, error) {
+//
+// knownEntities (RunDaily's own findKnownEntities result, computed once
+// for the whole day) is passed unchanged to every cluster's
+// generateSummary call — Phase C sub-problem 1 doesn't need to
+// re-scope it per cluster, since the same existing entities are
+// relevant context regardless of which cluster a given episode landed
+// in.
+func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope, period string, sources []textSource, establishedRecord string, knownEntities []knownEntityContext) (ConsolidationOutput, error) {
 	if len(sources) <= clusterEpisodeThreshold {
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 	}
 
 	texts := make([]string, len(sources))
@@ -92,23 +99,23 @@ func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope,
 	embedResp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: texts})
 	if err != nil {
 		slog.Warn("consolidation: embed sources for clustering failed, falling back to single-pass summary", "period", period, "error", err)
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 	}
 	if len(embedResp.Vectors) != len(sources) {
 		slog.Warn("consolidation: embedder returned mismatched vector count, falling back to single-pass summary", "period", period, "want", len(sources), "got", len(embedResp.Vectors))
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 	}
 
 	clusters := clusterSources(sources, embedResp.Vectors)
 	if len(clusters) <= 1 {
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord)
+		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 	}
 
 	slog.Info("consolidation: clustering busy day into topic groups", "period", period, "sources", len(sources), "clusters", len(clusters))
 
 	outputs := make([]ConsolidationOutput, 0, len(clusters))
 	for _, cluster := range clusters {
-		out, err := r.generateSummary(ctx, scope, "daily", period, cluster, establishedRecord)
+		out, err := r.generateSummary(ctx, scope, "daily", period, cluster, establishedRecord, knownEntities)
 		if err != nil {
 			return ConsolidationOutput{}, fmt.Errorf("generate cluster summary for %s: %w", period, err)
 		}

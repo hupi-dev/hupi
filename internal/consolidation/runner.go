@@ -104,13 +104,27 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 
 	var sources []textSource
 	var existingCurrentID string
+	var knownEntities []knownEntityContext
 	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		var err error
 		sources, err = r.loadDailyEpisodes(ctx, tx, scope, date)
 		if err != nil {
 			return err
 		}
+		if len(sources) == 0 {
+			return nil
+		}
 		existingCurrentID, err = r.currentSummaryID(ctx, tx, scope, "daily", period)
+		if err != nil {
+			return err
+		}
+		// Phase C sub-problem 1 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
+		// a quick, read-only scan for existing entities this day's raw
+		// text mentions, alongside the other quick reads this same
+		// transaction already does — the consolidation LLM call itself
+		// (a network call) still happens outside any transaction, below.
+		combined := joinSources(sources)
+		knownEntities, err = r.findKnownEntities(ctx, tx, scope, combined)
 		return err
 	})
 	if err != nil {
@@ -137,7 +151,7 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		}
 	}
 
-	output, err := r.generateDailySummary(ctx, scope, period, sources, establishedRecord)
+	output, err := r.generateDailySummary(ctx, scope, period, sources, establishedRecord, knownEntities)
 	if err != nil {
 		return fmt.Errorf("consolidation: generate daily summary for %s: %w", period, err)
 	}
@@ -552,8 +566,11 @@ func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sou
 
 	// No establishedRecord: RunRollup only ever generates when
 	// summaryExists says nothing exists yet for this level+period, so
-	// there's never a prior draft to preserve continuity with.
-	output, err := r.generateSummary(ctx, scope, level, period, sources, "")
+	// there's never a prior draft to preserve continuity with. No
+	// knownEntities either — Phase C sub-problem 1 is scoped to raw
+	// daily episode text for now (see generateSummary's own doc
+	// comment).
+	output, err := r.generateSummary(ctx, scope, level, period, sources, "", nil)
 	if err != nil {
 		return fmt.Errorf("consolidation: generate %s summary for %s: %w", level, period, err)
 	}
@@ -753,8 +770,11 @@ func (r *Runner) loadSummaries(ctx context.Context, q dbscope.Querier, scope ide
 // Runner.TeamPromptOverride) before calling the consolidation LLM.
 // establishedRecord is non-empty only when RunDaily is re-consolidating a
 // day that already has a current draft — see buildSummaryPrompt's doc
-// comment for why that needs special handling.
-func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, level, period string, sources []textSource, establishedRecord string) (ConsolidationOutput, error) {
+// comment for why that needs special handling. knownEntities is
+// generateDailySummary's own findKnownEntities result (nil from
+// RunRollup — Phase C sub-problem 1 is scoped to raw daily episode text
+// for now, see docs/CONSOLIDATION_COMPLETENESS_PLAN.md).
+func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, level, period string, sources []textSource, establishedRecord string, knownEntities []knownEntityContext) (ConsolidationOutput, error) {
 	systemPrompt := summarySystemPrompt
 	if r.TeamPromptOverride != nil {
 		if p, ok := r.TeamPromptOverride(scope); ok {
@@ -765,7 +785,7 @@ func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, leve
 	req := provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: systemPrompt},
-			{Role: provider.RoleUser, Content: buildSummaryPrompt(level, period, sources, establishedRecord)},
+			{Role: provider.RoleUser, Content: buildSummaryPrompt(level, period, sources, establishedRecord, knownEntities)},
 		},
 	}
 

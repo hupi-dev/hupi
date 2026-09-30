@@ -355,6 +355,20 @@ func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.
 					return fmt.Errorf("parse existing attributes for entity %s: %w", e.ID, jsonErr)
 				}
 			}
+			// Phase C sub-problem 1 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
+			// a key named here is the consolidation LLM's own judgment
+			// (informed by this entity's current attributes, fed into its
+			// prompt via findKnownEntities) that a key in e.Attributes
+			// updates this existing key under a new name — delete it
+			// before merging, rather than the default additive overlay
+			// that would otherwise leave both sitting side by side
+			// forever (the real Wells Fargo failure mode this fixes).
+			if len(e.SupersedesKeys) > 0 {
+				slog.Info("consolidation: entity attribute key superseded", "entity", e.ID, "superseded_keys", e.SupersedesKeys)
+			}
+			for _, staleKey := range e.SupersedesKeys {
+				delete(existing, staleKey)
+			}
 			merged = mergeAttributes(existing, e.Attributes)
 		}
 
