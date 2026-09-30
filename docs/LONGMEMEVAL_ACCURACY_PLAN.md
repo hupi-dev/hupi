@@ -49,47 +49,67 @@ clean category. The fix should widen entity retrieval generally for
 detected preference-seeking queries, not filter by `kind=preference`
 specifically — a kind-based filter would under-fire on real data.
 
-**Status: ✅ implemented, verified against real data — real, partial
-improvement, not a clean benchmark win.** `looksLikeRecommendationRequest`
-(`internal/store/retrieve.go`) detects the query shape via a keyword
-list (`recommendationKeywords`); when matched, `vectorSearchEntities`
-runs with `recommendationEntitySimilarityThreshold` (0.25, vs. the
-normal 0.50) and `recommendationEntityMaxResults` (10, vs. the normal 5)
-instead of the defaults — both reasoned starting points, not yet
-measured the way the file's other thresholds were.
+**Status: ✅ implemented, verified against real data, widened once —
+real, measured, partial improvement, not a clean benchmark win.**
+`looksLikeRecommendationRequest` (`internal/store/retrieve.go`) detects
+the query shape via a keyword list (`recommendationKeywords`); when
+matched, `vectorSearchEntities` runs with
+`recommendationEntitySimilarityThreshold` (0.25, vs. the normal 0.50) and
+`recommendationEntityMaxResults` (10, vs. the normal 5) instead of the
+defaults — both reasoned starting points, not yet measured the way the
+file's other thresholds were.
 
-Re-verified against the 5 real LongMemEval questions that failed this
-exact way, reusing their already-consolidated scopes (`-answer-only`,
-real GPT-4.1, real GPT-4o judge):
+**First real verification** (5 real LongMemEval questions, reused
+already-consolidated scopes, `-answer-only`): initial read was "3 of 5
+moved from blank to real content, score stayed 0/5." That first pass
+turned out to be muddied by a real, separate methodology bug (below) —
+see "capture contamination" for why the initial per-question comparisons
+weren't fully trustworthy.
 
-- **3 of 5 moved from "found nothing" to "found real, different
-  preference facts"** — e.g. the cultural-events question now surfaces a
-  real "volunteering at cultural festivals" interest instead of "you
-  haven't mentioned your location or interests"; the baking question now
-  surfaces a real prior cookie-platter memory instead of a blank
-  fallback. Genuine retrieval improvement, verified, not assumed.
-- **Score on this narrow slice stayed 0/5** — LongMemEval's grader
-  requires the one specific fact its own answer key designated as
-  canonical (e.g. the baking gold answer specifically wants "lemon
-  poppyseed cake," not any true baking-preference fact). Widening
-  recall found *a* real fact, not necessarily *that* one, when multiple
-  true facts about the same person exist. That's a different, harder
-  problem (precision/ranking among several true candidates) than what
-  this step was scoped to fix (recall — finding anything at all).
-- **2 of 5 unchanged**, for two different real reasons: the bike
-  question's phrasing ("Could there be a reason for this?") doesn't
-  match any `recommendationKeywords` entry — a real detector-coverage
-  gap, exactly the risk flagged above; the publications question's
-  detector *did* fire, but a competing (wrong) entity already outranked
-  the correct one before any widening, so a wider net didn't change
-  which one came out on top.
+**Real methodology bug found and fixed along the way**:
+`cmd/hupi-bench`'s QA-answering calls never set `X-Hupi-Capture: off` —
+unlike `cmd/hupi-answer-question`, which has this exact lesson already
+documented in its own doc comment ("repeated diagnostic calls against
+the same run_ctx must not accumulate as real episodes"). Every
+`-answer-only` re-check this whole session had been silently writing its
+own answers back into the scope as new episodes, meaning a later
+re-check on the same scope could retrieve an earlier re-check's own
+answer as "memory." Fixed (`cmd/hupi-bench/replay.go`): `sendChatTurn`
+now takes an explicit `skipCapture` argument — `true` for QA-answering
+turns, `false` for session replay (which should capture normally, since
+that's the real conversation history this benchmark measures recall
+against).
 
-**Two real follow-ups this surfaced, not yet built**: broaden
-`recommendationKeywords` to catch more phrasings (a real, bounded
-follow-up), and a genuinely different mechanism for the multi-candidate
-ranking problem (widening the net doesn't help once several true facts
-about the same person are all in reach — that needs picking the *right*
-one, not finding *a* one).
+**Keyword list widened** after the first pass surfaced a real
+detector-coverage gap: `recommendationKeywords` broadened
+(`"what do you think i"` → `"do you think"`, plus `"could there be a
+reason"`, `"why might"`, `"any idea why"`) to catch phrasings like
+"Could there be a reason for this?" that the original, narrower list
+missed entirely.
+
+**Clean re-verification** (same 5 questions, same scopes, this time with
+capture correctly off): **1 of 5 now genuinely, verifiably correct** —
+up from 0/5. The cultural-events question now correctly surfaces the
+specific "language diversity"/cultural-exchange preference the gold
+answer wants, not just *some* real fact. Real, measured progress,
+confirmed by the real GPT-4o judge, not assumed.
+
+The other 4 remain wrong, for the same real reasons the first pass
+already found: the publications question's detector fires, but a
+competing (wrong, topically-related) entity already outranks the
+correct one regardless of how wide the net is — a ranking problem, not
+a recall problem. The reunion and baking questions now surface *real*,
+different preference facts about the same person (reaching out to old
+friends before the reunion; a prior cookie-platter bake) rather than
+blank answers, but not the one specific fact LongMemEval's own answer
+key designated as canonical — the same "multi-candidate ranking, not
+recall" gap as the publications case.
+
+**One real follow-up still open, not yet built**: a genuinely different
+mechanism for the multi-candidate ranking problem — widening the net
+doesn't help once several true facts about the same person are all in
+reach; that needs picking the *right* one, not finding *a* one. Not
+designed in this pass.
 
 ## Category 2: `temporal-reasoning` — three distinct causes, not one
 
@@ -114,14 +134,7 @@ one, not finding *a* one).
    source date, then computed the wrong duration from it (a raw
    reasoning error, not a retrieval one).
 
-**Design**:
-- For (1): same query-shape detection as Category 1's fix, but for
-  ordering/counting/sequence questions (keywords: "order", "sequence",
-  "first...then", "how many times/events", "in a row") — when detected,
-  widen retrieval the same way (lower threshold and/or reduced MMR
-  diversity penalty specifically for this query shape, since exhaustive
-  recall of same-topic items is exactly what's wanted here, not a
-  diverse sample).
+**Design (original, for causes 2 and 3 — unchanged)**:
 - For (2): a targeted addition to `qaConcisenessPrompt`, mirroring its
   existing "double-check WHO the information is about" instruction with
   a new "double-check WHAT was actually asked" one: if the question
@@ -131,8 +144,57 @@ one, not finding *a* one).
 - For (3): a smaller prompt addition asking the model to show its date
   arithmetic explicitly (state both dates, then compute the
   difference) rather than estimating — a cheap intervention, lower
-  confidence than (1)/(2) since this is partly a raw-model-arithmetic
+  confidence than (2) since this is partly a raw-model-arithmetic
   reliability limit no prompt fully closes.
+
+**Cause (1) — corrected root cause, real fix scoped differently.**
+The original hypothesis (widen retrieval selection for detected
+ordering/counting questions) was implemented, then real-verified against
+the 3 actual failing questions — **and had zero measured effect. All 3
+answers came back byte-for-byte identical to the pre-fix versions.**
+This wasn't a "didn't help much" result; it was a clean signal that the
+fix targeted the wrong stage. Traced precisely with a real diagnostic
+(`HUPI_DEBUG_FUSION`) and a direct `hupi-export-memory` dump of the real
+scope for the clearest case (`gpt4_45189cb4`, "what's the order of the
+sports events I watched in January" — missing the NFL playoffs, the
+third of three events):
+
+- Every candidate the fusion trace saw had `vectorRank=-1` — vector
+  search for summaries returned *nothing* for this query. Only 2
+  candidates existed in the entire fused pool (via keyword search),
+  both already selected. Widening the final-selection count or MMR's
+  diversity penalty can't help when the candidate pool itself is this
+  small — there's nothing sitting just outside the cutoff to let in.
+- Decrypting and reading all 5 real daily summaries for this scope
+  directly confirmed: **none of them mention the NFL playoffs at all.**
+  The scope has 47 real episodes but only 5 consolidated daily
+  summaries — LongMemEval's `_abs` haystack format crams many separate
+  sessions onto a handful of real calendar dates (one date alone had
+  16+ sessions), and the missing fact was a passing aside inside an
+  unrelated (food-recommendation) message on one of those busy days.
+  Whatever wrote that day's summary evidently prioritized other topics
+  from that session pile-up and dropped this one — a real
+  **consolidation completeness gap**, not a retrieval gap.
+- The fact also isn't found via raw episode search, for the same
+  underlying reason at a different layer: the episode containing it is
+  dominantly *about* ordering food, with the NFL mention buried as an
+  aside — the same "buried fact diluted inside longer text" problem
+  this file's own similarity-threshold calibration comments already
+  document for summaries, recurring at the episode level.
+
+**This connects directly to Category 3's own finding**: both are cases
+of "retrieval can't retrieve what consolidation never wrote down (or
+wrote down so diluted it can't be found)" — not a retrieval-time
+problem at all. The real fix belongs in consolidation (don't let a busy
+multi-session day's summary silently drop minor-but-real details), the
+same territory as Category 3's Phase 2, not in `internal/store`'s
+retrieval-selection code. **Not designed in detail in this pass** —
+flagged as a real, corrected follow-up, alongside Category 3 Phase 2,
+rather than force-fitting the original (now-disproven) retrieval-side
+hypothesis. The retrieval-widening code for this cause has been reverted
+(see `internal/store/retrieve.go`'s `fusedSearchSummaries` — back to
+always using `maxVectorResults()`/`mmrLambda()` directly, no
+per-query-shape override) since it's confirmed to do nothing useful.
 
 ## Category 3: `knowledge-update` — no recency precedence across periods
 
@@ -179,36 +241,52 @@ in code comments as previously-observed production issues:
 ## Sequenced steps
 
 1. Category 1 fix: query-shape detection (recommendation-seeking) +
-   widened entity retrieval pass.
-2. Category 2 fix (1): query-shape detection (ordering/counting) +
-   widened/less-diversity-penalized retrieval for that shape.
+   widened entity retrieval pass. ✅ shipped, keyword list widened after
+   real verification (see Category 1's own Status block) — real,
+   measured improvement (0/5 → 1/5).
+2. ~~Category 2 fix (1): query-shape detection (ordering/counting) +
+   widened/less-diversity-penalized retrieval for that shape.~~
+   **Attempted and reverted.** Real verification (`HUPI_DEBUG_FUSION` +
+   `hupi-export-memory` trace) proved this had zero effect on the actual
+   failing questions — the bottleneck is upstream, at consolidation time,
+   not the final-selection stage this step targeted. See Category 2's
+   own "Cause (1) — corrected root cause" block. The code
+   (`looksLikeOrderingRequest`, the widened `fusedSearchSummaries` params)
+   has been fully removed rather than left in place unproven.
 3. Category 2 fix (2): compound-question abstention prompt addition.
 4. Category 2 fix (3): date-arithmetic prompt addition.
 5. Category 3 Phase 1: recency-preference prompt addition (reuses
    existing date labels).
-6. Category 3 Phase 2: consolidation-time contradiction detection —
-   flagged as needing its own design pass before implementation, not
-   bundled into this same sequence.
+6. Category 3 Phase 2 / Category 2 cause (1): consolidation-time
+   contradiction detection **and** consolidation completeness (busy-day
+   summary dilution) — flagged as needing its own design pass before
+   implementation, not bundled into this same sequence. These two are
+   now understood to be the same underlying class of gap (consolidation
+   not preserving enough of the source material), not two separate
+   problems.
 
-Steps 1-5 are all real, bounded, independently testable changes to
+Steps 1, 3, 4, 5 are real, bounded, independently testable changes to
 existing mechanisms (query-shape detection already has a precedent in
 `stage1KeywordSignal`; prompt additions follow the exact pattern
-`qaConcisenessPrompt`'s own WHO-check already established). Step 6 is
-explicitly sequenced last and separately, matching this session's own
-established discipline of not bundling a deep, higher-risk redesign into
-the same pass as cheaper, well-understood fixes.
+`qaConcisenessPrompt`'s own WHO-check already established). Step 2
+turned out to belong in this same "cheap, retrieval-side" category by
+design but not by result — it's kept here only as a record of what was
+tried and disproven. Step 6 is explicitly sequenced last and separately,
+matching this session's own established discipline of not bundling a
+deep, higher-risk redesign into the same pass as cheaper, well-understood
+fixes.
 
 ## Non-goals for this pass
 
-- Step 6 (consolidation-time contradiction detection) is not being
-  designed in detail yet — flagged for its own follow-up plan once
-  steps 1-5 are verified, not scoped further here.
+- Step 6 (consolidation-time contradiction detection and completeness)
+  is not being designed in detail yet — flagged for its own follow-up
+  plan once steps 1, 3, 4, 5 are verified, not scoped further here.
 - Not attempting a general-purpose "resolve any factual contradiction"
   system — scoped specifically to the same-entity/same-topic,
   different-day case actually observed.
 - Not changing `maxVectorResults()`'s global default — widening is
-  scoped to detected query shapes (preference-seeking,
-  ordering/counting), not a blanket increase for every query.
+  scoped to detected query shapes (preference-seeking). The
+  ordering/counting analog was tried and reverted (step 2 above).
 
 ## Verification
 

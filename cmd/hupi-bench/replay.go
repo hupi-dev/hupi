@@ -58,7 +58,20 @@ type wireChatResponse struct {
 // own retrieved-memory system message in front of whatever's sent here
 // (internal/gateway/handler.go's own "step 3: context injection"), so
 // this one just rides along after it, not in place of it.
-func sendChatTurn(handler *gateway.Handler, userID, model, systemPrompt, content string) (string, error) {
+//
+// skipCapture sets X-Hupi-Capture: off — real, hard-won lesson from this
+// same benchmark work, already documented and applied in
+// cmd/hupi-answer-question's own doc comment but missed here until a
+// real re-verification run surfaced it: repeated QA-phase calls against
+// the same scope must not accumulate as real episodes, or a later
+// -answer-only re-check on that same scope could retrieve an earlier
+// re-check's own answer as if it were the user's real memory. Callers
+// pass true for QA-answering turns (answerQuestions,
+// runBaselineConversation) and false for session replay
+// (replayConversation), which should capture normally — that's
+// simulating the real conversation history this benchmark measures
+// recall against, not a diagnostic call.
+func sendChatTurn(handler *gateway.Handler, userID, model, systemPrompt, content string, skipCapture bool) (string, error) {
 	msgs := []wireMessage{}
 	if systemPrompt != "" {
 		msgs = append(msgs, wireMessage{Role: "system", Content: systemPrompt})
@@ -75,6 +88,9 @@ func sendChatTurn(handler *gateway.Handler, userID, model, systemPrompt, content
 	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+userID)
+	if skipCapture {
+		req.Header.Set("X-Hupi-Capture", "off")
+	}
 	rec := httptest.NewRecorder()
 
 	handler.HandleChatCompletions(rec, req)
@@ -122,7 +138,7 @@ func replayConversation(handler *gateway.Handler, userID, answerModel string, co
 		if content == "" {
 			continue
 		}
-		if _, err := sendChatTurn(handler, userID, answerModel, "", content); err != nil {
+		if _, err := sendChatTurn(handler, userID, answerModel, "", content, false); err != nil {
 			return nil, fmt.Errorf("bench: replay session %d of %s: %w", i+1, conv.id, err)
 		}
 		day := sess.date.Truncate(24 * time.Hour)
@@ -244,7 +260,7 @@ func runBaselineConversation(handler *gateway.Handler, userID, answerModel strin
 		content := fmt.Sprintf("%s\n\nQuestion: %s", fullTranscript, qa.question)
 		var context string
 		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
-		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), content)
+		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), content, true)
 		if aerr != nil {
 			// Log and continue rather than aborting the whole
 			// conversation: a single transient failure (rate limit,
@@ -284,7 +300,7 @@ func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv 
 		handler.Now = func() time.Time { return qt }
 		var context string
 		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
-		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), qa.question)
+		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), qa.question, true)
 		if aerr != nil {
 			// Log and continue rather than aborting the whole
 			// conversation — see runBaselineConversation's identical

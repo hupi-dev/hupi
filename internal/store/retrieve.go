@@ -171,7 +171,8 @@ var stage1SignalKeywords = []string{
 // gate whether search runs at all).
 var recommendationKeywords = []string{
 	"recommend", "suggest", "should i", "any tips", "any advice",
-	"what do you think i", "any ideas", "what would you", "any suggestions",
+	"do you think", "any ideas", "what would you", "any suggestions",
+	"could there be a reason", "why might", "any idea why",
 }
 
 // looksLikeRecommendationRequest detects a question asking for a
@@ -339,6 +340,15 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// searches (vector picks first, keyword only adds what's left
 		// over) for now. See fusedSearchSummaries' own doc comment for
 		// why summaries specifically.
+		//
+		// docs/LONGMEMEVAL_ACCURACY_PLAN.md category 2 originally
+		// threaded an explicit finalK/lambda through this call to widen
+		// it for detected ordering/counting questions — reverted after
+		// real verification showed zero effect: the actual bottleneck
+		// for those failures was upstream (consolidation never wrote the
+		// fact down, or buried it beyond recognition), not the
+		// final-selection stage this call controls. See that doc's own
+		// corrected root cause.
 		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations)
 		if err != nil {
 			return fmt.Errorf("fused search summaries: %w", err)

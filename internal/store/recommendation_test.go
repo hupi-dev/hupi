@@ -13,6 +13,11 @@ func TestLooksLikeRecommendationRequestDetectsRealFailingQuestions(t *testing.T)
 		"Can you recommend some interesting cultural events happening around me this weekend?",
 		"Can you recommend some recent publications or conferences that I might find interesting?",
 		"I'm thinking of inviting my colleagues over for a small gathering. Any tips on what to bake?",
+		// These two didn't match the original, narrower keyword list —
+		// found during real verification (see the plan doc's own honest
+		// writeup) and why recommendationKeywords was widened.
+		"I noticed my bike seems to be performing even better during my Sunday group rides. Could there be a reason for this?",
+		"I've been feeling nostalgic lately. Do you think it would be a good idea to attend my high school reunion?",
 	}
 	for _, q := range real {
 		if !looksLikeRecommendationRequest(q) {
