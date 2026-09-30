@@ -398,7 +398,7 @@ further this pass — flagged as a real, open design question for
 benchmark scale, not something to speculatively "fix" against one
 hand-traced example.
 
-### LongMemEval result: 71.67% task-averaged on a 30/48 partial run (up from 52.1%), full run not completed
+### LongMemEval result: 56.25% task-averaged on a 44/48 run (up from 52.1%, but not a clean win), full run not completed
 
 The original pre-fix run hit a real OpenAI credit-exhaustion outage
 partway through (documented below), which also exposed a real gap in
@@ -412,20 +412,46 @@ correctly skipped the 6 already-done conversations and cleanly reset the
 one that was mid-consolidation.
 
 The resumed run (with the v7 fixes: MMR, RRF fusion, date resolution,
-key-fact promotion, conciseness fix) was intentionally stopped after 30
-of 48 instances to bound cost, rather than run to completion. Scored with
-LongMemEval's own real, unmodified GPT-4o-judge scoring:
+key-fact promotion, conciseness fix) was stopped at 44 of 48 instances
+(cost/time tradeoff). Scored with LongMemEval's own real, unmodified
+GPT-4o-judge scoring, at two checkpoints along the way:
 
 | | Task-averaged | Overall | Abstention |
 |---|---|---|---|
 | Original (48 instances) | 52.1% | — | 75% |
-| v7 fixes (30 instances, partial) | **71.67%** | 73.33% | 66.67% |
+| v7 fixes, checkpoint at 30 instances | 71.67% | 73.33% | 66.67% |
+| **v7 fixes, final at 44 instances** | **56.25%** | **52.27%** | **62.5%** |
 
-Directionally consistent with LoCoMo's own improvement (50.2% → 57.3%),
-but **not promoted to a new published headline** — see
-`docs/BENCHMARKS.md` §7 for why a 30-instance partial run shouldn't
-replace a completed 48-instance one. A full-scale LongMemEval
-re-verification remains open (`docs/BENCHMARKS.md` §8).
+The 30-instance checkpoint looked like a strong win — it wasn't. The 14
+additional instances that completed after it pulled three categories
+down hard: `single-session-preference` 80% → 37.5%, `temporal-reasoning`
+66.7% → 37.5%, `knowledge-update` 33.3% → 12.5%.
+`single-session-user`/`single-session-assistant` held at 100% throughout;
+`multi-session` held at 50%. **Honest net result**: task-averaged
+accuracy is a modest improvement over baseline; overall accuracy is
+essentially flat. Materially weaker than LoCoMo's own clean +7.1pp
+improvement — **not promoted to a new published headline** (see
+`docs/BENCHMARKS.md` §7 for the full per-category failure analysis and
+why a 44/48 run still doesn't replace a completed 48-instance one). A
+full-scale LongMemEval re-verification remains open
+(`docs/BENCHMARKS.md` §8).
+
+**Real failures, inspected directly, not guessed at**:
+- `single-session-preference`: every failure is the model correctly
+  attempting a personalized recommendation (the preference-aware prompt
+  from step 1 works) but retrieval finding nothing — the preference was
+  stated in an earlier, differently-worded session, and vocabulary
+  overlap wasn't enough to bridge it. A retrieval-generalization gap, not
+  a prompt problem.
+- `temporal-reasoning`: inconsistent in both directions (one
+  over-confident answer where abstention was correct, one over-cautious
+  abstention where the answer was retrievable), one real date-arithmetic
+  error, one incomplete multi-event retrieval. No single fixable cause.
+- `knowledge-update`: the clearest pattern — HUPI answers with a real,
+  specific, *previously true* value instead of the one that superseded
+  it (a mortgage pre-approval amount, an old item storage location), plus
+  undercounts on incrementally-updated totals. Finding something, just
+  the wrong vintage of it. Not yet root-caused to a specific mechanism.
 
 ### Harness resilience fix (`ebafe29`)
 

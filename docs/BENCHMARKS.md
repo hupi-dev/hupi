@@ -213,27 +213,62 @@ a preference-satisfying recommendation needs. Fixing this well means a
 benchmark/question-type-aware answer prompt, not a retrieval change —
 flagged for the next iteration, not fixed in this pass.
 
-**Partial re-verification with the v7 fixes above (30 of 48 instances)**:
-after the same MMR/RRF/date-resolution/conciseness changes described in
-§1 and [BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md),
-task-averaged accuracy on the 30 instances that finished consolidating
-was **71.67%** (overall 73.33%, abstention 66.67%), real GPT-4o judge, up
-from the 52.1% baseline above. This run was stopped intentionally before
-covering all 48 (cost/time tradeoff, not a failure — see the improvement
-plan doc's own incident log for the real credit-exhaustion interruption
-this run recovered from). **Not promoted to the headline number above**:
-30/48 is a smaller, differently-composed sample than the 48-instance
-figure it would be replacing, and every other number in this document
-holds to a "fully run, not partial" bar — a full-scale LongMemEval
-re-verification remains open (see §8).
+**Re-verification with the v7 fixes above (44 of 48 instances)**: after
+the same MMR/RRF/date-resolution/conciseness changes described in §1 and
+[BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md), task-averaged
+accuracy on the 44 instances that finished was **56.25%** (overall
+52.27%, abstention 62.5%), real GPT-4o judge. An earlier check at 30/48
+looked much stronger (71.67% task-averaged) — a real small-n artifact,
+not a stable result: the 14 additional instances that completed since
+then pulled three categories down hard (`single-session-preference` 80%
+→ 37.5%, `temporal-reasoning` 66.7% → 37.5%, `knowledge-update` 33.3% →
+12.5%), while `single-session-user`/`single-session-assistant` stayed at
+100% and `multi-session` held at 50% throughout. This is exactly the
+"don't trust a partial sample" caution this document's own §7 pilot
+section already learned once, at n=3 vs n=8 — it applies again here at
+n=30 vs n=44.
+
+**Net honest read**: task-averaged accuracy (56.25%) is a modest
+improvement over the 52.1% baseline; overall accuracy (52.27%) is
+essentially flat. This is a materially weaker result than LoCoMo's own
+clean +7.1pp improvement (§1), and **still not promoted to the headline
+number above**: 44/48 is close but not the full sample, and every other
+number in this document holds to a "fully run, not partial" bar. Stopped
+at 44/48 deliberately (cost/time tradeoff) rather than run to
+completion — see the improvement plan doc for the full incident log.
+
+**Per-category failure analysis, not just the numbers** — real
+inspected failures, not guessed:
+- `single-session-preference` (37.5%): every failure shows the same
+  pattern — HUPI answers "you haven't mentioned any preferences" when a
+  real preference *was* stated, just in an earlier, differently-worded
+  session. The preference-aware answer prompt (step 1) is working
+  correctly — the model does try to give a personalized recommendation —
+  it simply has nothing retrieved to work with. A genuine cross-session
+  retrieval-generalization gap, not a prompt issue.
+- `temporal-reasoning` (37.5%): inconsistent in both directions — one
+  case answered confidently when it should have abstained, another
+  abstained when the answer was actually retrievable, one real
+  date-arithmetic error (computed 6 weeks instead of 4), and one
+  incomplete multi-event retrieval. No single fixable root cause.
+- `knowledge-update` (12.5%): the clearest pattern of the three, and the
+  one this category's name literally describes — HUPI answered with a
+  real, specific, *previously true* value instead of the one that later
+  superseded it (a mortgage pre-approval amount, an old storage location
+  for a pair of shoes), plus several undercounts on incrementally-updated
+  totals. It's finding something, just the wrong vintage of it — under
+  investigation, not yet root-caused to a specific fix.
 
 ## 8. Still open
 
 - **Finish the full-scale (48-instance) LongMemEval re-verification**
-  under the v7 fixes — §7's 30/48 partial run is real, directional
-  evidence (task-averaged 71.67% vs. 52.1%) but was intentionally stopped
-  short of a full run; a complete, judge-scored 48-instance number should
-  replace both the 52.1% headline and this note once run.
+  under the v7 fixes — §7's 44/48 result is real, but this document's own
+  n=3-vs-n=8 pilot lesson (and now n=30-vs-n=44) says even 44/48 could
+  still move on the last 4; a complete, judge-scored 48-instance number
+  should replace both the 52.1% headline and this note once run.
+- **Root-cause the `knowledge-update` stale-value pattern** — real,
+  reproduced (§7), not yet traced to a specific mechanism (entity
+  attribute merge vs. summary supersession vs. something else).
 - **A `single-session-preference`-aware answer prompt** for LongMemEval
   — done as part of the v7 work
   ([BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md) step
