@@ -154,14 +154,7 @@ nothing resolves which one wins. A fix that only makes consolidation
 preserve more facts, without also addressing precedence, increases the
 surface area for Gap 3 rather than reducing it.
 
-### Gap 4 — Two mechanisms flagged, not yet confirmed as real bugs
-
-Kept separate and explicitly labeled speculative, per this session's
-own evidentiary discipline (real verification before claiming a bug
-exists) — every concrete example chased down for the two mechanisms
-below turned out, on inspection, to actually be Gap 1 or Gap 3 in
-disguise. That is real signal that they're not the dominant problem,
-but it is not proof they never occur:
+### Gap 4 — Two mechanisms, one now confirmed real, one still unobserved
 
 1. **Retrieval has no temporal-relevance signal.** Ranking is pure
    embedding similarity to the question's words; nothing boosts a
@@ -169,20 +162,49 @@ but it is not proof they never occur:
    the question implies ("last month," "since my trip"). A
    textually-similar but temporally-wrong summary could in principle
    outrank the correct one even with perfect, non-contradictory
-   consolidation. Every real failure traced this session happened to be
-   explained by Gap 1 first, so this mechanism has never been isolated
-   — it may be hiding behind the bigger, confirmed problem.
-2. **Raw date-arithmetic/aggregation errors at answer time** — the
-   model has the right, complete, unambiguous facts and still computes
-   the wrong duration or miscounts/misorders events. This was the
-   original hypothesis for two of Category 2's three causes; every
-   candidate example turned out to be Gap 1 underneath once traced to
-   the actual consolidated data. Cheap to guard against regardless (an
-   explicit "state both dates, then compute" prompt instruction) since
-   it costs nothing and touches no retrieval/consolidation behavior —
-   worth shipping as insurance even without a confirmed example, unlike
-   every other change in this document, which is gated on real evidence
-   first.
+   consolidation. Still unobserved — every real failure traced this
+   session happened to be explained by Gap 1 or a retrieval-admission
+   gap first, so this mechanism has never been isolated. Not designed or
+   built; would need a real example before doing either, per this
+   document's own discipline.
+2. **Raw aggregation errors at answer time — ✅ confirmed real** (not
+   merely plausible). Real-verified against the charity-events case
+   once Phase D items 1-2 made both needed facts reliably present in
+   context (`HUPI_DEBUG_FUSION` and direct string search both confirm
+   this): the model still answers "no information available" even
+   though everything it needs — both dated charity-event facts — is
+   there for it to find. This isn't a retrieval or consolidation problem
+   anymore; it's the model failing to (a) recognize which two of
+   several charity-event mentions are "the pair on consecutive days" and
+   (b) compute the requested duration from that pair.
+
+   **A prompt-only fix was tried and reverted, twice, escalating
+   specificity each time** — matching the outcome of every other
+   prompt-only attempt at a consolidation/retrieval-adjacent problem in
+   this document:
+   - First addition: a general instruction to scan every retrieved
+     memory block for each separate occurrence of a multi-part question
+     before answering, rather than stopping at the first one found. No
+     measured effect — answer unchanged.
+   - Second addition (compounding on the first, not replacing it): an
+     explicit, structured instruction — for "in a row"/"consecutive
+     days" phrasing specifically, list every occurrence found with its
+     own date, then check each pair for exactly one calendar day apart.
+     Still no measured effect.
+   
+   Both reverted (`git checkout`) rather than left in place with zero
+   demonstrated benefit, the same discipline as every other disproven
+   change in this document. This looks like a genuine model-capability
+   limit on a real multi-step task (find N candidates across a large,
+   generically-similar context, pair them by date, then compute a
+   derived quantity from the winning pair) rather than something prompt
+   wording alone can close — consistent with this mechanism's own
+   original framing as "partly a raw-model-arithmetic reliability limit
+   no prompt fully closes." Not chasing a third prompt iteration; if
+   this needs fixing, the honest next step is a different mechanism
+   entirely (e.g., a dedicated multi-fact-aggregation reasoning pass
+   with visible intermediate steps, not a single-shot concise-answer
+   prompt) — not scoped further here.
 
 ## Why these are one family of problem, not four unrelated ones
 
@@ -535,7 +557,51 @@ belonging here:
   None of these three require reversing Phase B — it's a confirmed,
   real, net-positive foundation. They're follow-up work, tracked
   separately below, not blocking this commit.
-- Phases C, D, E: not started.
+- **Phase D item 1 (budget-aware context assembly): ✅ implemented,
+  real-verified, shipped.** See that item's own writeup above for the
+  two disproven intermediate designs before landing on the working
+  one. Both charity-event facts confirmed present in context now; NFL
+  case confirmed no regression. Exposed Gap 4 mechanism 2 as real (see
+  below).
+- **Phase D item 2 (retrieval breadth widening, re-attempted): ✅
+  implemented, real-verified, shipped.** Widened the vector fetch's own
+  similarity threshold and caps (the actual bottleneck, per real
+  tracing), not just final-selection count (the original, correctly-
+  reverted attempt's mistake). Sports-order case now fully correct
+  end-to-end, gold-matching order. No regressions on NFL or charity.
+- **Phase D item 3 (`maxClustersPerDay` calibration): ✅ investigated —
+  real ceiling found, not a tuning miss.** Made configurable
+  (`HUPI_MAX_CLUSTERS_PER_DAY`); raising it from 6 to 10 for the Ibotta
+  case took effect (confirmed 10 real clusters, a grounding hiccup on
+  the larger batch self-corrected via existing retry) but still didn't
+  recover the fact — that day's real topic diversity exceeds even the
+  raised cap. Left the default at 6; per-episode fact extraction (Phase
+  B's own second design option) is the real next step for this specific
+  failure mode, not further cap tuning.
+- **Gap 4 mechanism 2 (raw aggregation errors at answer time): ✅
+  confirmed real** (previously only flagged as plausible). Two
+  escalating prompt-only fix attempts against the now-retrieval-complete
+  charity case both showed zero measured effect and were reverted. Looks
+  like a genuine model-capability limit on a real multi-step task, not
+  something prompt wording alone closes — not chasing further prompt
+  iterations; a different mechanism (a dedicated multi-fact-aggregation
+  reasoning pass) would be the honest next step if this needs fixing,
+  not scoped further here.
+- **Net picture across the 4 original Phase B follow-up cases**: NFL
+  playoffs and sports-order are now fully fixed end-to-end. Charity
+  events is retrieval-complete but blocked on Gap 4's now-confirmed
+  answer-time reasoning limit. Ibotta remains unfixed — blocked on
+  per-episode fact extraction, not yet built.
+- Phase C (contradiction detection): not started — still needs a real
+  design pass on detection precision before any code, per this
+  document's own note on why it's the most invasive item here.
+- Phase D item 4 (rollup re-run-awareness): not started — explicitly
+  gated on Phase C existing first (its own premise is "a contradiction
+  gets resolved," which needs Phase C's mechanism to exist).
+- Phase E: not started — gated on Phases B/C/D, per its own section.
+- Per-episode fact extraction (Phase B's second design option): not
+  started — confirmed necessary for the Ibotta case specifically (see
+  Phase D item 3 above), not yet designed in detail.
 - Category 1 (`single-session-preference`) work is separate, already
   shipped (PR #11), and unaffected by this document — see
   `docs/LONGMEMEVAL_ACCURACY_PLAN.md` for its own status and the
