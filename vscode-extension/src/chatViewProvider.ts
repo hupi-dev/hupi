@@ -13,15 +13,30 @@ import { promptSignInRequired } from './oidcAuth';
 type FromWebview = { type: 'send'; text: string } | { type: 'clear' };
 type ToWebview =
   | { type: 'userEcho'; text: string }
+  | { type: 'fileContext'; relativePath: string }
   | { type: 'delta'; text: string }
   | { type: 'citations'; items: Citation[] }
   | { type: 'done' }
   | { type: 'error'; message: string };
 
-export function currentFileContext(): string {
+export interface FileContext {
+  /** The block prepended to the user's message, sent to the gateway. */
+  text: string;
+  relativePath: string;
+  uri: vscode.Uri;
+}
+
+/** Builds the active-file/selection context block prepended to every chat
+ *  turn, unless disabled via hupi.fileContext.enabled (review finding
+ *  A13 — this used to be silent and unconditional, with no UI indication
+ *  anything beyond the user's typed text was sent, and no way to turn it
+ *  off for a sensitive file). Returns the relativePath/uri alongside the
+ *  text so callers can surface a visible "context attached" indicator
+ *  without re-deriving them. */
+export function currentFileContext(): FileContext | undefined {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    return '';
+    return undefined;
   }
   const doc = editor.document;
   const selection = editor.selection;
@@ -32,7 +47,12 @@ export function currentFileContext(): string {
   // is long-term memory; this context block is only meant to ground the
   // model in *what you're looking at right now*, not replace that.
   const capped = text.length > 8000 ? text.slice(0, 8000) + '\n... (truncated)' : text;
-  return `Context — ${label} from ${vscode.workspace.asRelativePath(doc.uri)}:\n\`\`\`${doc.languageId}\n${capped}\n\`\`\``;
+  const relativePath = vscode.workspace.asRelativePath(doc.uri);
+  return {
+    text: `Context — ${label} from ${relativePath}:\n\`\`\`${doc.languageId}\n${capped}\n\`\`\``,
+    relativePath,
+    uri: doc.uri,
+  };
 }
 
 export class HupiChatViewProvider implements vscode.WebviewViewProvider {
@@ -86,9 +106,14 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const context = currentFileContext();
-    const userContent = context ? `${context}\n\n${trimmed}` : trimmed;
+    const settings = vscode.workspace.getConfiguration('hupi');
+    const fileContextEnabled = settings.get<boolean>('fileContext.enabled', true);
+    const context = fileContextEnabled ? currentFileContext() : undefined;
+    const userContent = context ? `${context.text}\n\n${trimmed}` : trimmed;
     this.history.push({ role: 'user', content: userContent });
+    if (context) {
+      this.post(webview, { type: 'fileContext', relativePath: context.relativePath });
+    }
 
     let cfg;
     try {
@@ -103,7 +128,6 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const settings = vscode.workspace.getConfiguration('hupi');
     const citationsEnabled = settings.get<boolean>('citations.enabled', true);
     const deepCitations = settings.get<boolean>('citations.deep', false);
 
@@ -212,6 +236,10 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     .msg p:last-child { margin-bottom: 0; }
     .msg pre { background: var(--vscode-textCodeBlock-background); padding: 8px; overflow-x: auto; border-radius: 4px; }
     .msg code { font-family: var(--vscode-editor-font-family, monospace); }
+    .fileContextBadge {
+      margin-top: 6px; font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+    }
     .citations {
       margin-top: 8px; padding-top: 6px;
       border-top: 1px solid var(--hupi-border);
