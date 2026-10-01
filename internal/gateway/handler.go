@@ -258,7 +258,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// Request lifecycle step 2: retrieval, unless the client opted out
 	// (ARCHITECTURE.md § Retrieval Engine, "Per-request opt-out").
 	result := RetrievalResult{Gate: GateSkipped}
-	if r.Header.Get("X-Hupi-Memory") != "off" {
+	if !strings.EqualFold(r.Header.Get("X-Hupi-Memory"), "off") {
 		var err error
 		result, err = h.Retriever.Retrieve(ctx, actingUser, workspace, messages, h.now())
 		if err != nil {
@@ -279,7 +279,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// every debounced typing pause (vscode-extension's
 	// inlineCompletionProvider.ts) — since capture previously ran
 	// unconditionally regardless of how trivial the turn was.
-	skipCapture := r.Header.Get("X-Hupi-Capture") == "off"
+	skipCapture := strings.EqualFold(r.Header.Get("X-Hupi-Capture"), "off")
 
 	// Opt-in citations (docs/ANSWER_CITATIONS_PLAN.md): retrieval already
 	// computes Citations unconditionally (cheap — no extra LLM call, see

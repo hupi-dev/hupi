@@ -176,6 +176,36 @@ func TestHandleChatCompletions_BothOptOutsTogether(t *testing.T) {
 	}
 }
 
+// TestHandleChatCompletions_OptOutHeadersAreCaseInsensitive is the real
+// regression test for review finding C2: both opt-out headers used to be
+// exact-match comparisons against the literal string "off" — a client
+// sending "Off" or "OFF" (e.g. a proxy/library that normalizes header
+// casing) silently got the opposite of what it asked for, with retrieval
+// or capture running unexpectedly. Fails toward the safe default (memory
+// stays on), which is why this was filed as minor rather than a real
+// bug, but it's still a real behavior mismatch worth closing.
+func TestHandleChatCompletions_OptOutHeadersAreCaseInsensitive(t *testing.T) {
+	for _, variant := range []string{"Off", "OFF", "oFF"} {
+		t.Run(variant, func(t *testing.T) {
+			retriever := &fakeRetriever{}
+			capturer := &fakeCapturer{}
+			h := newTestHandler(t, retriever, capturer)
+
+			w := postChatCompletion(t, h, map[string]string{"X-Hupi-Memory": variant, "X-Hupi-Capture": variant})
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			if retriever.calls != 0 {
+				t.Errorf("X-Hupi-Memory: %q: retriever.calls = %d, want 0", variant, retriever.calls)
+			}
+			if len(capturer.episodes) != 0 {
+				t.Errorf("X-Hupi-Capture: %q: len(capturer.episodes) = %d, want 0", variant, len(capturer.episodes))
+			}
+		})
+	}
+}
+
 // TestHandleChatCompletions_OnRetrieveSeesExactResult is the seam
 // docs/EVALMEM_INTEGRATION_PLAN.md's retrieve_original/C_original
 // requirement needs: external diagnostic tooling must see the *exact*
