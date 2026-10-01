@@ -134,6 +134,39 @@ func TestGuaranteedFactFallsBackToFirstFactWithoutAClearWinner(t *testing.T) {
 	}
 }
 
+// TestGuaranteedFactTiedAmongRelevantFactsStillPicksARelevantOne is a
+// real regression test (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): a real
+// 41-episode/112-fact busy day had several facts tie at the same
+// nonzero score (each sharing exactly one query term, everything else
+// scoring 0) — guaranteedFact used to call mostRelevantFactIndex
+// directly, whose winner-take-all tie-break treats "several facts tied
+// at the top" identically to "nothing relevant at all" (returns -1),
+// falling back to facts[0] regardless of its own score. On the real
+// busy day this was found against, facts[0] was an entirely unrelated
+// tire-pressure fact, guaranteed into context ahead of the NFL-playoffs
+// fact a "what order did I watch sports events" question actually
+// needed — which was left stranded in the lower-priority depth section,
+// where a tight context budget cut it away entirely. Unlike
+// TestGuaranteedFactFallsBackToFirstFactWithoutAClearWinner (a genuine
+// tie where every candidate is equally relevant), this fixture's tied
+// facts are relevant while facts[0] itself scores 0 — rankFactsByRelevance
+// must not discard that distinction.
+func TestGuaranteedFactTiedAmongRelevantFactsStillPicksARelevantOne(t *testing.T) {
+	facts := []string{
+		"Measuring tire pressure is advised after hot laps.",
+		"Melanie watched a documentary about volcanoes.",
+		"Melanie watched the NFL playoffs over the weekend.",
+		"Melanie watched a cooking show on Tuesday.",
+	}
+	got := guaranteedFact("prose", facts, []string{"melanie", "watched"})
+	if got == facts[0] {
+		t.Errorf("guaranteedFact() = %q, want a fact that actually matches the query, not the unrelated facts[0]", got)
+	}
+	if !strings.Contains(got, "Melanie watched") {
+		t.Errorf("guaranteedFact() = %q, want one of the tied-but-relevant facts", got)
+	}
+}
+
 // TestGuaranteedFactGuaranteesAllWhenFewEnough is the real, measured fix
 // (docs/CONSOLIDATION_COMPLETENESS_PLAN.md, Phase E adversarial case):
 // picking just one fact from a small set is a real lottery when neither
@@ -210,5 +243,108 @@ func TestDepthTextIncludesProseAndAllFacts(t *testing.T) {
 	got := depthText("the prose", facts, nil)
 	if !strings.Contains(got, "the prose") || !strings.Contains(got, "fact one") || !strings.Contains(got, "fact two") {
 		t.Errorf("depthText() = %q, want it to contain the prose and every fact", got)
+	}
+}
+
+// TestRankFactsByRelevanceOrdersByScoreDescending is the core new
+// behavior (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): unlike
+// mostRelevantFactIndex (pick one winner or bail), every fact gets
+// ordered, not just the top one.
+func TestRankFactsByRelevanceOrdersByScoreDescending(t *testing.T) {
+	facts := []string{
+		"Her daughter recently started kindergarten.",                         // 0 shared terms
+		"Melanie enjoys painting landscapes in her free time.",                // 1 shared term (melanie)
+		"Melanie has camped at the beach, in the mountains, and in the forest.", // 2 shared terms (melanie, camped)
+	}
+	queryTerms := []string{"where", "has", "melanie", "camped"}
+	got := rankFactsByRelevance(facts, queryTerms)
+	want := []int{2, 1, 0}
+	if len(got) != len(want) {
+		t.Fatalf("rankFactsByRelevance() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("rankFactsByRelevance() = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+// TestRankFactsByRelevanceStableOnTies confirms tied facts keep their
+// original relative order rather than one winning arbitrarily — this is
+// what distinguishes rankFactsByRelevance from mostRelevantFactIndex's
+// own tie behavior (bail to -1, discard the signal entirely).
+func TestRankFactsByRelevanceStableOnTies(t *testing.T) {
+	facts := []string{"Melanie went camping at the beach.", "Melanie went camping in the mountains."}
+	queryTerms := []string{"melanie", "camping"}
+	got := rankFactsByRelevance(facts, queryTerms)
+	if len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Errorf("rankFactsByRelevance() = %v, want [0 1] (tied facts keep original order)", got)
+	}
+}
+
+func TestRankFactsByRelevanceNoQueryTermsReturnsOriginalOrder(t *testing.T) {
+	facts := []string{"fact a", "fact b", "fact c"}
+	got := rankFactsByRelevance(facts, nil)
+	for i, idx := range got {
+		if idx != i {
+			t.Errorf("rankFactsByRelevance(no query terms) = %v, want [0 1 2] (original order preserved)", got)
+			break
+		}
+	}
+}
+
+// TestWriteKeyFactsOrdersEntireListNotJustTheWinner is the real,
+// measured fix this investigation found necessary
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): a real 112-fact busy day
+// summary (41 episodes clustered together) tied out on
+// mostRelevantFactIndex's own winner-take-all scoring, and the one fact
+// that actually answered the question was left buried in raw
+// cluster-merge order among the other ~110, indistinguishable from
+// completely unrelated facts. This test reconstructs that shape at a
+// manageable scale: several relevant facts plus many irrelevant ones,
+// none of them a clean single "winner" (so mostRelevantFactIndex bails),
+// confirming every relevant fact still lands ahead of every irrelevant
+// one once writeKeyFacts is in play.
+func TestWriteKeyFactsOrdersEntireListNotJustTheWinner(t *testing.T) {
+	facts := []string{
+		"The user collects vintage postcards.",
+		"The user enjoys sports on television.",
+		"The user has been working on a thesis for six months.",
+		"The user attended several events last month.",
+		"The user is interested in embroidery.",
+		"The user traveled to Chicago in January for a conference.",
+		"The user started a spreadsheet log.",
+	}
+	queryTerms := []string{"what", "is", "the", "order", "of", "sports", "events", "i", "watched", "in", "january"}
+
+	// Confirm the real failure mode actually reproduces here first: three
+	// separate facts each share exactly one query term (sports/events/
+	// january), tying for the top score, so mostRelevantFactIndex bails
+	// rather than picking a single winner — matching the real bug's
+	// shape (no clean winner once multiple facts are each genuinely
+	// relevant).
+	if best := mostRelevantFactIndex(facts, queryTerms); best != -1 {
+		t.Fatalf("test setup: mostRelevantFactIndex() = %d, want -1 (three facts should tie, matching the real bug's shape)", best)
+	}
+
+	var sb strings.Builder
+	writeKeyFacts(&sb, facts, queryTerms)
+	got := sb.String()
+
+	relevant := []string{"enjoys sports", "several events", "Chicago in January"}
+	irrelevant := []string{"postcards", "thesis", "embroidery", "spreadsheet log"}
+	lastRelevant := -1
+	for _, f := range relevant {
+		if idx := strings.Index(got, f); idx > lastRelevant {
+			lastRelevant = idx
+		} else if idx < 0 {
+			t.Fatalf("writeKeyFacts() missing expected fact containing %q", f)
+		}
+	}
+	for _, f := range irrelevant {
+		if idx := strings.Index(got, f); idx >= 0 && idx < lastRelevant {
+			t.Errorf("writeKeyFacts() placed irrelevant fact %q (at %d) ahead of the last relevant sports fact (at %d) — relevant facts should cluster toward the front even without a single clean winner", f, idx, lastRelevant)
+		}
 	}
 }

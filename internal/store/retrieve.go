@@ -1225,20 +1225,27 @@ func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc 
 }
 
 // writeKeyFacts is appendKeyFacts' original writing half — one bullet
-// per fact, the most query-relevant one (if any stands out) promoted to
-// the front and marked, same behavior as before the loadKeyFacts split.
+// per fact, in descending relevance order (rankFactsByRelevance), the
+// most query-relevant one (if any clearly stands out) additionally
+// marked. Real, measured fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
+// this used to write facts in raw insertion order beyond the single
+// promoted winner — fine for a normal busy day's worth of facts, but a
+// real 112-fact day (41 episodes clustered into one summary) buried the
+// one fact that actually answered the question under a hundred unrelated
+// ones, with no way to find it short of reading the entire list.
+// Ordering by relevance means it isn't just "marked if it happens to be
+// the single standout" — it's near the front regardless, and the
+// eventual truncateToBudget backstop (for a summary big enough to still
+// need one even after this) lands on the least relevant tail instead of
+// whatever cluster-merge order happened to put last.
 func writeKeyFacts(sb *strings.Builder, facts []string, queryTerms []string) {
-	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
-		sb.WriteString(fmt.Sprintf("\n  - (most relevant) %s", facts[best]))
-		for i, fact := range facts {
-			if i != best {
-				sb.WriteString(fmt.Sprintf("\n  - %s", fact))
-			}
+	best := mostRelevantFactIndex(facts, queryTerms)
+	for _, idx := range rankFactsByRelevance(facts, queryTerms) {
+		if idx == best {
+			sb.WriteString(fmt.Sprintf("\n  - (most relevant) %s", facts[idx]))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n  - %s", facts[idx]))
 		}
-		return
-	}
-	for _, fact := range facts {
-		sb.WriteString(fmt.Sprintf("\n  - %s", fact))
 	}
 }
 
@@ -1270,19 +1277,39 @@ const guaranteedFactMaxCount = 3
 // of any depth, is needed at all). Below guaranteedFactMaxCount, every
 // fact is guaranteed together — see that constant's own doc comment for
 // why picking just one is a real lottery at that scale. At or above it,
-// prefers the fact sharing the most query vocabulary
-// (mostRelevantFactIndex); falls back to the first fact if none stands
-// out; falls back to a short prose snippet only when the summary has no
-// grounded key facts at all (rare — see loadKeyFacts/writeKeyFacts' own
-// doc comment on why only grounded facts are ever surfaced).
+// prefers the single highest-scoring fact
+// (rankFactsByRelevance(facts, queryTerms)[0]); falls back to a short
+// prose snippet only when the summary has no grounded key facts at all
+// (rare — see loadKeyFacts/writeKeyFacts' own doc comment on why only
+// grounded facts are ever surfaced).
 //
-// Above the threshold, this ranking still isn't perfect — real-verified
-// against the charity-events LongMemEval case that mostRelevantFactIndex's
-// plain lexical-overlap scoring can promote the wrong fact on a summary
-// with many candidates, the same real limitation that sank the
-// preference-ranking "1b" attempt elsewhere in this file — which is
-// exactly why depthText's own (uncapped) facts are real insurance beyond
-// this one guaranteed pick, not a redundant duplicate of it.
+// Used to call mostRelevantFactIndex directly instead, falling back to
+// facts[0] whenever it returned -1 — real-verified against a genuine
+// 41-episode/112-fact busy day (the same investigation that produced
+// rankFactsByRelevance for writeKeyFacts) that this was a real, distinct
+// bug: with that many candidates, several facts legitimately tie at the
+// top score (e.g. two facts both sharing one query term, everything
+// else scoring 0), and mostRelevantFactIndex's winner-take-all tie-break
+// treats that exactly like "no signal at all," discarding the ranking
+// and falling back to whatever fact happened to be extracted first —
+// which, on the real busy day this was found against, was an entirely
+// unrelated tire-pressure fact guaranteed into context ahead of the
+// NFL-playoffs fact the question actually needed, with that correct
+// fact left stranded in depthText's own lower-priority section where a
+// tight budget cut it away entirely. rankFactsByRelevance never gives up
+// this way — ties still produce a real top-scorer (stable on further
+// ties), and the true "nothing matches" case (every fact scores 0)
+// already degrades to the original facts[0], identical to the old
+// fallback — so this is a strict improvement, not a behavior change for
+// the cases that already worked.
+//
+// This ranking still isn't perfect — real-verified against the
+// charity-events LongMemEval case that plain lexical-overlap scoring can
+// promote the wrong fact on a summary with many candidates, the same
+// real limitation that sank the preference-ranking "1b" attempt
+// elsewhere in this file — which is exactly why depthText's own
+// (uncapped) facts are real insurance beyond this one guaranteed pick,
+// not a redundant duplicate of it.
 func guaranteedFact(prose string, facts []string, queryTerms []string) string {
 	if len(facts) == 0 {
 		return truncateToBudget(prose, guaranteedProseFallbackChars)
@@ -1290,10 +1317,8 @@ func guaranteedFact(prose string, facts []string, queryTerms []string) string {
 	if len(facts) <= guaranteedFactMaxCount {
 		return strings.Join(facts, " ")
 	}
-	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
-		return facts[best]
-	}
-	return facts[0]
+	ranked := rankFactsByRelevance(facts, queryTerms)
+	return facts[ranked[0]]
 }
 
 // guaranteedProseFallbackChars caps guaranteedFact's no-facts fallback —
@@ -1344,6 +1369,30 @@ func summaryCitationSnippet(prose string, facts []string, queryTerms []string) s
 	return prose
 }
 
+// factScores computes a per-fact query-relevance score — how many
+// distinct query terms the fact shares — the one shared metric behind
+// both mostRelevantFactIndex (pick the single fact that clearly stands
+// out) and rankFactsByRelevance (order all of them). A single scoring
+// definition, not two, so the two can never silently disagree about
+// what "relevant" means.
+func factScores(facts []string, queryTerms []string) []int {
+	querySet := make(map[string]bool, len(queryTerms))
+	for _, t := range queryTerms {
+		querySet[t] = true
+	}
+	scores := make([]int, len(facts))
+	for i, fact := range facts {
+		score := 0
+		for t := range tokenSet(fact) {
+			if querySet[t] {
+				score++
+			}
+		}
+		scores[i] = score
+	}
+	return scores
+}
+
 // mostRelevantFactIndex returns the index (within facts, in its original
 // order) of the fact sharing the most query vocabulary, or -1 if there
 // are fewer than 2 facts, no query terms, or every fact ties (including
@@ -1352,18 +1401,9 @@ func mostRelevantFactIndex(facts []string, queryTerms []string) int {
 	if len(facts) < 2 || len(queryTerms) == 0 {
 		return -1
 	}
-	querySet := make(map[string]bool, len(queryTerms))
-	for _, t := range queryTerms {
-		querySet[t] = true
-	}
+	scores := factScores(facts, queryTerms)
 	best, bestScore, tied := -1, 0, false
-	for i, fact := range facts {
-		score := 0
-		for t := range tokenSet(fact) {
-			if querySet[t] {
-				score++
-			}
-		}
+	for i, score := range scores {
 		switch {
 		case score > bestScore:
 			best, bestScore, tied = i, score, false
@@ -1375,6 +1415,36 @@ func mostRelevantFactIndex(facts []string, queryTerms []string) int {
 		return -1
 	}
 	return best
+}
+
+// rankFactsByRelevance returns every index into facts, ordered by
+// descending query-relevance score (factScores' own metric) — stable on
+// ties, so equally-scored facts keep their original relative order
+// rather than one winning arbitrarily. Real, measured fix
+// (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): mostRelevantFactIndex's own
+// winner-take-all tie-break degrades as a summary's fact count grows — a
+// real 112-fact busy day (41 episodes clustered into one summary) tied
+// out entirely (two or more facts sharing the same top score), falling
+// back to raw cluster-merge insertion order with no relevance signal
+// applied at all, burying the one fact that actually answered the
+// question under a hundred unrelated ones. This doesn't change the
+// scoring itself (same crude-but-cheap word overlap as before) — it just
+// stops discarding that signal the moment two facts tie, and stops
+// leaving everything beyond a single winner in arbitrary order. No fact
+// is ever dropped here, only reordered — when the existing global
+// truncateToBudget backstop does have to cut something at extreme scale,
+// it now lands on the least relevant tail, not an arbitrary one.
+func rankFactsByRelevance(facts []string, queryTerms []string) []int {
+	order := make([]int, len(facts))
+	for i := range order {
+		order[i] = i
+	}
+	if len(queryTerms) == 0 {
+		return order
+	}
+	scores := factScores(facts, queryTerms)
+	sort.SliceStable(order, func(a, b int) bool { return scores[order[a]] > scores[order[b]] })
+	return order
 }
 
 // vectorSearchEntities is vectorSearchSummaries' sibling over `entities`
