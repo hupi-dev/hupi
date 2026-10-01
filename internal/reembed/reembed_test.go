@@ -381,7 +381,7 @@ func TestReembed_LogRunWritesAuditEntry(t *testing.T) {
 	}
 }
 
-// TestReembed_ResolveKeyForRow_RecoversFromPrunedStaleVersion is the real
+// TestReembed_DecryptWithRetry_RecoversFromPrunedStaleVersion is the real
 // regression test for review finding B19: a reembed batch's initial
 // SELECT reads a row's key_version, then — with real wall-clock time and
 // a real embedding-provider call in between — resolves the key for that
@@ -391,18 +391,43 @@ func TestReembed_LogRunWritesAuditEntry(t *testing.T) {
 // row is perfectly readable under its new, current version.
 //
 // This reproduces the DB-visible end state of that exact race directly
-// (rotate+prune already happened; only the stale version number a
-// batch's earlier SELECT would have captured is "left over"), then
-// proves resolveKeyForRow recovers by re-reading the row's current
-// key_version — rather than requiring a true concurrent goroutine race
-// against a window with no test seam to pause inside.
-func TestReembed_ResolveKeyForRow_RecoversFromPrunedStaleVersion(t *testing.T) {
+// (rotate+prune already happened; only the stale version number and
+// ciphertext a batch's earlier SELECT would have captured are "left
+// over"), and proves recovery refreshes *both* together: an earlier
+// version of this fix refreshed only the key_version on retry, still
+// decrypting against the original stale ciphertext, which reliably fails
+// (a real AES-GCM auth-tag mismatch) since rotate's migration always
+// re-encrypts a row's ciphertext and bumps its key_version together, in
+// the same transaction.
+func TestReembed_DecryptWithRetry_RecoversFromPrunedStaleVersion(t *testing.T) {
 	db, keys := testDB(t)
 	ctx := context.Background()
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-reembed-rotate-race"}
-	t.Cleanup(func() { cleanup(t, db, scope) })
+	// scope_keys isn't touched by `cleanup` — this test hardcodes "version
+	// 1" as the stale version throughout, which only holds if seeding
+	// below actually creates a fresh version 1, not whatever version a
+	// previous run of this test left behind as "current".
+	t.Cleanup(func() {
+		cleanup(t, db, scope)
+		db.Exec(`delete from scope_keys where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+	})
+	if _, err := db.Exec(`delete from scope_keys where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner); err != nil {
+		t.Fatalf("clear any leftover scope_keys from a previous run: %v", err)
+	}
 
 	seedSummary(t, ctx, db, keys, scope, "sum_race", "summary race text", "openai:text-embed-2", true)
+
+	// Captured before the simulated rotate below — exactly the stale
+	// ciphertext a real batch's own initial SELECT would have read, which
+	// is no longer decryptable once rotate re-encrypts the row under a
+	// new key version (review finding: resolveKeyForRow previously only
+	// refreshed the key version, not the ciphertext that goes with it).
+	var staleCT []byte
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select summary from summaries where id = $1`, "sum_race").Scan(&staleCT)
+	}); err != nil {
+		t.Fatalf("capture stale ciphertext: %v", err)
+	}
 
 	// Simulate internal/rotate having already migrated this row to a new
 	// key version and pruned the old one. Uses its own KeyStore instance,
@@ -451,24 +476,14 @@ func TestReembed_ResolveKeyForRow_RecoversFromPrunedStaleVersion(t *testing.T) {
 	}
 
 	r := New(db, reembedSideKeys, newFakeEmbedder("openai", "text-embed-3"))
-	// 1 is the stale version a batch's earlier SELECT would have
-	// captured before the simulated rotate+prune above.
-	enc, err := r.resolveKeyForRow(ctx, scope, "summaries", "sum_race", 1)
+	// 1 is the stale version, and staleCT the stale ciphertext, a batch's
+	// earlier SELECT would have captured before the simulated rotate+prune
+	// above — exactly what reembedSummaryBatch's own call site passes.
+	texts, err := r.decryptWithRetry(ctx, scope, "summaries", "sum_race", 1, []string{"summary"}, [][]byte{staleCT})
 	if err != nil {
-		t.Fatalf("resolveKeyForRow should have recovered by re-reading the row's current key_version, got: %v", err)
+		t.Fatalf("decryptWithRetry should have recovered by re-reading the row's current key_version and ciphertext, got: %v", err)
 	}
-
-	var summaryCT []byte
-	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `select summary from summaries where id = $1`, "sum_race").Scan(&summaryCT)
-	}); err != nil {
-		t.Fatalf("load summary ciphertext: %v", err)
-	}
-	text, err := enc.Decrypt(summaryCT)
-	if err != nil {
-		t.Fatalf("decrypt with the recovered key: %v", err)
-	}
-	if text != "summary race text" {
-		t.Errorf("decrypted text = %q, want the original seeded text", text)
+	if texts[0] != "summary race text" {
+		t.Errorf("decrypted text = %q, want the original seeded text", texts[0])
 	}
 }
