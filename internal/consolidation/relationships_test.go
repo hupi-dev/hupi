@@ -63,7 +63,7 @@ func TestRunDaily_WritesRelationship(t *testing.T) {
 			{"subject_kind": "person", "subject_name": "Caroline", "predicate": "works_at", "object_kind": "organization", "object_name": "Acme Corp", "valid_from": "2026-01-15", "valid_until": ""}
 		]
 	}`
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	runner, db := testRunner(t, consolidationJSON, groundingJSON)
 
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-relationships-1"}
@@ -129,7 +129,7 @@ func TestRunDaily_SkipsRelationshipReferencingUnextractedEntity(t *testing.T) {
 			{"subject_kind": "person", "subject_name": "Caroline", "predicate": "took_part_in", "object_kind": "project", "object_name": "Charity Race", "valid_from": "", "valid_until": ""}
 		]
 	}`
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	runner, db := testRunner(t, consolidationJSON, groundingJSON)
 
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-relationships-unextracted"}

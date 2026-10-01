@@ -43,7 +43,7 @@ func TestRunDaily_DropsKeyFactCitationNotAmongRealSourceEpisodes(t *testing.T) {
 		"key_facts": [{"fact": "Decided to use pgvector", "source_episode_ids": ["ep_test_citation_real", "ep_test_citation_hallucinated"]}],
 		"entities_touched": []
 	}`
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	consolidationProvider := fakeConsolidationProvider{response: consolidationJSON}
 	groundingProvider := fakeConsolidationProvider{response: groundingJSON}
 	runner := New(db, keys, consolidationProvider, groundingProvider, consolidationProvider)

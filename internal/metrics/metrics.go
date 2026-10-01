@@ -86,6 +86,21 @@ var (
 		Help: `Facts checked by the independent grounding pass, by outcome: grounded is "true" or "false".`,
 	}, []string{"grounded"})
 
+	// GroundingSalvageTotal distinguishes a fact forced to ungrounded
+	// because the grounding model's response couldn't be cleanly matched
+	// to it ("unindexed" — a real, reproduced failure mode, see
+	// grounding_test.go's
+	// TestLiveGroundingCheckReproducesBatchMismatchWithRealData) from a
+	// fact whose verdict the response did index cleanly ("matched",
+	// whether that verdict was itself true or false). Previously the
+	// unindexed case was only visible by grepping logs for "mismatched
+	// result count", and cost every fact in the whole batch rather than
+	// just the unmatched one.
+	GroundingSalvageTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hupi_grounding_salvage_total",
+		Help: `Grounding verdicts by how they were resolved against the model's response: "matched" or "unindexed" (forced ungrounded).`,
+	}, []string{"resolution"})
+
 	RollupRunsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "hupi_rollup_runs_total",
 		Help: `Weekly/monthly/yearly rollup runs, by outcome: "ok" or "error".`,
