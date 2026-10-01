@@ -468,7 +468,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		}
 		refs = append(refs, summaryRefs...)
 
-		episodeRefs, err := s.vectorSearchEpisodes(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations)
+		episodeRefs, err := s.vectorSearchEpisodes(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, query, now)
 		if err != nil {
 			return fmt.Errorf("vector search episodes: %w", err)
 		}
@@ -1813,9 +1813,9 @@ func centeredExcerpt(text string, queryTerms []string, maxChars int) string {
 // episodeVectorSimilarityThreshold, not vectorSimilarityThreshold — see
 // that constant's own doc comment for the real measurement showing they
 // need to differ.
-func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
+func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, query string, now time.Time) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, input_text, output_text, key_version, (embedding <=> $1::vector) as distance
+		select id, input_text, output_text, key_version, ts, (embedding <=> $1::vector) as distance
 		from episodes
 		where embedding is not null and type = 'interaction'
 		  and (embedding_model is null or embedding_model = $5)
@@ -1828,13 +1828,19 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 	}
 	defer rows.Close()
 
-	var refs []identity.Ref
+	type match struct {
+		id            string
+		input, output string
+		ts            time.Time
+	}
+	var matches []match
 	for rows.Next() {
 		var id string
 		var inputCT, outputCT []byte
 		var keyVersion int
+		var ts time.Time
 		var distance float64
-		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion, &distance); err != nil {
+		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion, &ts, &distance); err != nil {
 			return nil, err
 		}
 		similarity := 1 - distance
@@ -1853,15 +1859,54 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 		if err != nil {
 			return nil, err
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s): %s", id, centeredExcerpt(fmt.Sprintf("USER: %s ASSISTANT: %s", input, output), queryTerms, episodeExchangeCap)))
-		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: id})
+		matches = append(matches, match{id: id, input: input, output: output, ts: ts})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Same answer-time-reasoning hard filter keywordSearchEpisodes applies
+	// to this exact same table (docs/CONSOLIDATION_COMPLETENESS_PLAN.md,
+	// docs/CODEBASE_SURVEY_AND_REVIEW.md finding B7): a raw episode
+	// vector-matched directly (bypassing consolidation/summaries and
+	// keywordSearchEpisodes' own equivalent fix entirely — a semantic
+	// match needs no literal keyword hit) can surface a temporally-wrong
+	// exchange verbatim for a "last month"-shaped query, the one retrieval
+	// path into this table that had no such filter at all. Same backoff
+	// behavior as keywordSearchEpisodes/fusedSearchSummaries (not
+	// vectorSearchEntities' own deliberate no-backoff choice): excludes
+	// only matches with a confidently-resolved timeframe whose own exact
+	// ts clearly falls outside it, backing off to the unfiltered set if
+	// excluding would leave nothing.
+	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
+	if hasTimeframe {
+		kept := make([]match, 0, len(matches))
+		for _, m := range matches {
+			if m.ts.Before(tfStart) || !m.ts.Before(tfEnd) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		if len(kept) > 0 {
+			matches = kept
+		}
+	}
+
+	var refs []identity.Ref
+	for _, m := range matches {
+		dateLabel := ""
+		if rel := relativeDateLabel(m.ts, now); rel != "" {
+			dateLabel = fmt.Sprintf(", dated %s (%s)", m.ts.Format("2006-01-02"), rel)
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s%s): %s", m.id, dateLabel, centeredExcerpt(fmt.Sprintf("USER: %s ASSISTANT: %s", m.input, m.output), queryTerms, episodeExchangeCap)))
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m.id})
 		*citations = append(*citations, gateway.Citation{
-			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: id},
-			Snippet: fmt.Sprintf("USER: %s ASSISTANT: %s", input, output),
+			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m.id},
+			Snippet: fmt.Sprintf("USER: %s ASSISTANT: %s", m.input, m.output),
 		})
 		*strongHit = true
 	}
-	return refs, rows.Err()
+	return refs, nil
 }
 
 // keywordSearchEnabled is the installing admin's own escape hatch for
