@@ -58,7 +58,7 @@ internal/
   demo/                   anonymous guest-session lifecycle (create/resolve/sweep) backing the public hosted demo — used by cmd/hupi-demo, cmd/hupi-demo-sweep
   metrics/                every Prometheus metric HUPI exposes at /metrics, plus an http.HandlerFunc-wrapping helper — used by cmd/hupi, cmd/hupi-demo, internal/gateway
 
-schema/                   numbered SQL migrations, applied in order 0001 -> 0020
+schema/                   numbered SQL migrations, applied in order 0001 -> 0021
                           migrate.sh — POSIX-sh idempotent runner used by the Docker image/Kubernetes migrate Job (install.sh's bash equivalent is for bare-metal; kept as two separate implementations on purpose, see migrate.sh's own comment)
                           migration_scripts_consistency_test.go — a `schema`-package Go test parsing both migrate.sh and install.sh, failing if they ever disagree on the migration file set or a probe's SQL (the two scripts' own duplication is deliberate, see migrate.sh's comment; this only guards against it silently drifting)
 docs/                      this file, and everything else under docs/
@@ -145,7 +145,7 @@ ever needing to know Postgres exists.
 | `consolidation` | Nightly rollup: episodes -> grounded summaries | `Runner` (`RunDaily`, `RunRollup`, `Correct`) |
 | `hpmf` | Portable memory format read/write (MEMORY_FORMAT.md) + age packaging | `ExportScope`, `ExportBundle`, `ImportScope`, `PackAndEncrypt`, `DecryptAndUnpack`, `Manifest` |
 | `rotate` | Online, resumable per-scope key rotation | `Runner` (`Start`, `Continue`, `Status`, `Prune`), `MaxBatchSize` (5000, enforced by `clampBatchSize` at the top of `Continue` — a caller-requested batch above the cap is silently capped, non-positive is coerced to 1) |
-| `reembed` | Bulk re-embed a scope's summaries/high-importance episodes/entities after an embedding-provider change | `Runner` (`Status`, `Continue`, `LogRun`) |
+| `reembed` | Bulk re-embed a scope's summaries/high-importance episodes/entities/grounded key facts after an embedding-provider change | `Runner` (`Status`, `Continue`, `LogRun`) |
 | `selfcheck` | Run probes against a live `Retriever` | `Probe`, `Result`, `Run` |
 | `bootstrap` | Read config, connect Postgres, build the `KeyStore` | `Deps`, `Load` |
 | `demo` | Anonymous guest-session lifecycle (create/resolve/sweep), capped usage — backs the public hosted demo | `Store` (`CreateSession`, `Resolve`, `ConsolidateNow`, `Sweep`), `IPRateLimiter` |
@@ -357,17 +357,24 @@ ones.
    resume from a saved position.
 3. Loop `reembed.Runner.Continue(ctx, scope, batchSize)` until `done`:
    each call processes up to `batchSize` rows from whichever table has
-   work first (`summaries` -> `episodes` -> `entities`) — decrypt via
-   `r.decryptWithRetry` (`internal/reembed/reembed.go`), re-embed via
-   `provider.Provider.Embed`, write back `embedding`/`embedding_model`
-   inside a `dbscope.Run` transaction per batch. Episodes only count if
-   `type='interaction' and importance >= consolidation.EpisodeEmbedImportanceThreshold`
-   — one never meant to be embedded is simply out of scope, not pending.
-   `decryptWithRetry` exists because a batch's `key_version`/ciphertext
-   pair, read at the top of the batch, can go stale if `internal/rotate`
-   migrates and then prunes the row's old version before this call
-   decrypts it: `KeyStore.GetVersion` fails with
-   `crypto.ErrKeyVersionNotFound`, and the retry re-reads *both* the
+   work first (`summaries` -> `episodes` -> `entities` ->
+   `summary_key_facts`) — decrypt via `r.decryptWithRetry`
+   (`internal/reembed/reembed.go`), re-embed via `provider.Provider.Embed`,
+   write back `embedding`/`embedding_model` inside a `dbscope.Run`
+   transaction per batch. Episodes only count if `type='interaction' and
+   importance >= consolidation.EpisodeEmbedImportanceThreshold`, and key
+   facts only count if `grounded` and belonging to a current (non-
+   superseded) summary — one never meant to be embedded, or never meant
+   to be read again, is simply out of scope, not pending.
+   `reembedKeyFactBatch` is the one exception to "one row, one `Embed`
+   call": facts are short, so a whole batch is embedded in a single
+   request (same reasoning `internal/consolidation`'s own write-time
+   `embedKeyFacts` uses), with a mismatched vector count treated as a hard
+   error rather than silently skipped. `decryptWithRetry` exists because a
+   batch's `key_version`/ciphertext pair, read at the top of the batch,
+   can go stale if `internal/rotate` migrates and then prunes the row's
+   old version before this call decrypts it: `KeyStore.GetVersion` fails
+   with `crypto.ErrKeyVersionNotFound`, and the retry re-reads *both* the
    current `key_version` and the ciphertext columns together (not just
    the version — a stale ciphertext paired with the fresh version fails
    decryption too) before retrying once.

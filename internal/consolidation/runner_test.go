@@ -31,8 +31,9 @@ var errFakeNotImplemented = errors.New("fake provider: not implemented, not need
 // actually threaded the established-record text into the prompt) without
 // needing a real LLM to react to it correctly.
 type fakeConsolidationProvider struct {
-	response         string
-	capturedRequests *[]provider.ChatRequest
+	response              string
+	capturedRequests      *[]provider.ChatRequest
+	capturedEmbedRequests *[]provider.EmbedRequest // records every batch embedKeyFacts (and embedSummary/embedEntities) sends, for asserting on batching/content
 }
 
 func (fakeConsolidationProvider) Name() string   { return "fake" }
@@ -50,7 +51,10 @@ func (fakeConsolidationProvider) StreamChatCompletion(context.Context, provider.
 	return nil, errFakeNotImplemented
 }
 
-func (fakeConsolidationProvider) Embed(_ context.Context, req provider.EmbedRequest) (provider.EmbedResponse, error) {
+func (f fakeConsolidationProvider) Embed(_ context.Context, req provider.EmbedRequest) (provider.EmbedResponse, error) {
+	if f.capturedEmbedRequests != nil {
+		*f.capturedEmbedRequests = append(*f.capturedEmbedRequests, req)
+	}
 	vecs := make([][]float32, len(req.Input))
 	for i := range req.Input {
 		v := make([]float32, 1536)
@@ -193,6 +197,138 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 	}
 	if embeddingCount != 1 {
 		t.Error("expected the summary to have been embedded")
+	}
+}
+
+// TestRunDaily_EmbedsOnlyGroundedKeyFactsInOneBatchedCall is the
+// consolidation-side counterpart of the semantic fact-ranking tests in
+// internal/store — confirms embedKeyFacts (schema/0021) actually runs as
+// part of a normal RunDaily: exactly one batched Embed call carrying only
+// the grounded facts' text (ungrounded facts are never retrieved, so
+// embedding them would be pure waste — see embedKeyFacts' own doc
+// comment), and the resulting summary_key_facts rows have an
+// embedding/embedding_model recorded only for the grounded ones.
+func TestRunDaily_EmbedsOnlyGroundedKeyFactsInOneBatchedCall(t *testing.T) {
+	dsn := os.Getenv("HUPI_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("HUPI_TEST_DATABASE_URL not set; skipping integration test")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	keys := crypto.NewKeyStore(db, make([]byte, 32))
+
+	consolidationJSON := `{
+		"summary": "Discussed two topics.",
+		"key_facts": [
+			{"fact": "The user decided to use pgvector.", "source_episode_ids": ["ep_test_embed_facts"]},
+			{"fact": "A hallucinated, ungrounded fact.", "source_episode_ids": ["ep_test_embed_facts"]}
+		],
+		"entities_touched": []
+	}`
+	// Only the first fact is grounded — grounding.go's real groundingCheck
+	// is bypassed by this fake, but storeSummary's own handling of the
+	// grounded[] result is exactly what's under test here.
+	groundingJSON := `{"grounded": [true, false]}`
+	var embedRequests []provider.EmbedRequest
+	fake := fakeConsolidationProvider{response: consolidationJSON, capturedEmbedRequests: &embedRequests}
+	groundingFake := fakeConsolidationProvider{response: groundingJSON}
+	runner := New(db, keys, fake, groundingFake, fake)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-embed-key-facts"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	inputCT, _ := enc.Encrypt("what should we use for the vector index?")
+	outputCT, _ := enc.Encrypt("let's use pgvector")
+	date := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+			values ('ep_test_embed_facts', $1, 'interaction', $2, $3, 'sha256:test', 0.5, $4, $5)
+		`, date, inputCT, outputCT, scope.Kind, scope.Owner)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
+
+	if err := runner.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("RunDaily: %v", err)
+	}
+
+	// embedSummary makes its own, separate Embed call — only the *second*
+	// captured request (summary first, per storeSummary's call order) is
+	// embedKeyFacts' own batch.
+	var factEmbedReq *provider.EmbedRequest
+	for i := range embedRequests {
+		if len(embedRequests[i].Input) == 1 && embedRequests[i].Input[0] == "The user decided to use pgvector." {
+			factEmbedReq = &embedRequests[i]
+		}
+	}
+	if factEmbedReq == nil {
+		t.Fatalf("no Embed call carried the grounded fact's text; captured requests: %+v", embedRequests)
+	}
+	if len(factEmbedReq.Input) != 1 {
+		t.Errorf("key-facts Embed request had %d inputs, want exactly 1 (only the grounded fact — the ungrounded one must never be embedded)", len(factEmbedReq.Input))
+	}
+
+	var summaryID string
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select id from summaries where level = 'daily' and period = '2026-09-10' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&summaryID)
+	})
+	if err != nil {
+		t.Fatalf("expected a daily summary: %v", err)
+	}
+
+	type factRow struct {
+		grounded       bool
+		hasEmbedding   bool
+		embeddingModel sql.NullString
+	}
+	var rows []factRow
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		r, err := tx.QueryContext(ctx, `select grounded, embedding is not null, embedding_model from summary_key_facts where summary_id = $1`, summaryID)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		for r.Next() {
+			var fr factRow
+			if err := r.Scan(&fr.grounded, &fr.hasEmbedding, &fr.embeddingModel); err != nil {
+				return err
+			}
+			rows = append(rows, fr)
+		}
+		return r.Err()
+	})
+	if err != nil {
+		t.Fatalf("load key fact rows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d key fact rows, want 2", len(rows))
+	}
+	for _, r := range rows {
+		if r.grounded && !r.hasEmbedding {
+			t.Errorf("grounded fact row has no embedding, want one written by embedKeyFacts")
+		}
+		if !r.grounded && r.hasEmbedding {
+			t.Errorf("ungrounded fact row has an embedding, want none (never retrieved, so never worth embedding)")
+		}
 	}
 }
 

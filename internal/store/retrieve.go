@@ -1129,7 +1129,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	type pickedSummary struct {
 		c     *candidate
 		label string
-		facts []string
+		facts []keyFact
 	}
 	picks := make([]pickedSummary, 0, len(picked))
 	for _, idx := range picked {
@@ -1145,11 +1145,26 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		case c.keywordRank >= 0:
 			label = ", keyword match"
 		}
-		facts, err := loadKeyFacts(ctx, q, c.id, c.enc)
+		facts, err := loadKeyFacts(ctx, q, c.id, c.enc, queryVector, s.currentEmbeddingModel())
 		if err != nil {
 			return nil, err
 		}
 		picks = append(picks, pickedSummary{c: c, label: label, facts: facts})
+	}
+
+	if os.Getenv("HUPI_DEBUG_FUSION") != "" {
+		for _, p := range picks {
+			order, best := rankKeyFacts(p.facts, queryTerms)
+			mode := "lexical"
+			if len(order) > 0 && p.facts[order[0]].similarity.Valid {
+				mode = "semantic"
+			}
+			top := order
+			if len(top) > 5 {
+				top = top[:5]
+			}
+			fmt.Fprintf(os.Stderr, "FACTRANK_DEBUG summary=%s mode=%s n=%d top=%v guaranteed=%d\n", p.c.id, mode, len(p.facts), top, best)
+		}
 	}
 
 	// Two real passes over picks, not one interleaved loop — see
@@ -1278,30 +1293,202 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 // guarantee one, then bound the rest — before anything gets written to
 // sb, instead of appendKeyFacts writing everything the moment it's
 // loaded.
-func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor) ([]string, error) {
+// keyFact is one summary_key_facts row as loaded for ranking: the
+// decrypted fact text plus, when schema/0021's embedding column is
+// populated under the currently-active embedding model, its cosine
+// similarity to this retrieval's query embedding. similarity is invalid
+// (Valid == false) for a fact that was never embedded, or embedded under
+// a since-changed model — rankKeyFacts treats that as "no semantic signal
+// for this fact" and falls back to lexical scoring for the whole summary
+// rather than mixing two incomparable scales (see rankKeyFacts' own doc
+// comment).
+type keyFact struct {
+	text       string
+	similarity sql.NullFloat64
+}
+
+// loadKeyFacts loads a summary's grounded facts along with each one's
+// cosine similarity to the query, computed in SQL (`1 - (embedding <=>
+// $queryVector)`) so Go never has to parse a 1536-float vector just to
+// rank a handful of facts — the same division of labor
+// vectorSearchEntities already uses. similarity is NULL whenever a fact
+// has no embedding yet (not reembedded since schema/0021, or the
+// consolidation-time embed call failed — see
+// internal/consolidation/store.go's embedKeyFacts, best-effort by
+// design) or was embedded under a different model than the one currently
+// active (embedding_model != $3 — mixing vectors across models produces
+// noise, not a real signal, same reasoning as summaries/entities).
+func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryVector string, embeddingModel string) ([]keyFact, error) {
 	rows, err := q.QueryContext(ctx, `
-		select fact from summary_key_facts
+		select fact,
+		       case when embedding is not null and embedding_model = $3
+		            then 1 - (embedding <=> $2::vector) end as similarity
+		from summary_key_facts
 		where summary_id = $1 and grounded = true
 		order by id
-	`, summaryID)
+	`, summaryID, queryVector, embeddingModel)
 	if err != nil {
 		return nil, fmt.Errorf("load key facts for summary %s: %w", summaryID, err)
 	}
 	defer rows.Close()
 
-	var facts []string
+	var facts []keyFact
 	for rows.Next() {
 		var factCT []byte
-		if err := rows.Scan(&factCT); err != nil {
+		var similarity sql.NullFloat64
+		if err := rows.Scan(&factCT, &similarity); err != nil {
 			return nil, err
 		}
 		fact, err := enc.Decrypt(factCT)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
 		}
-		facts = append(facts, fact)
+		facts = append(facts, keyFact{text: fact, similarity: similarity})
 	}
 	return facts, rows.Err()
+}
+
+// keyFactTexts extracts plain fact text, for the lexical scoring
+// functions (factScores/rankFactsByRelevance/mostRelevantFactIndex) that
+// predate per-fact embeddings and operate on []string — kept as the
+// always-available fallback/tie-breaker rather than rewritten to take
+// []keyFact directly.
+func keyFactTexts(facts []keyFact) []string {
+	texts := make([]string, len(facts))
+	for i, f := range facts {
+		texts[i] = f.text
+	}
+	return texts
+}
+
+// semanticFactRankingEnabled is an opt-out kill switch, same pattern as
+// keywordSearchEnabled — lets the semantic path be A/B tested or disabled
+// on an existing binary without a rebuild.
+func semanticFactRankingEnabled() bool {
+	return os.Getenv("HUPI_ENABLE_SEMANTIC_FACT_RANKING") != "false"
+}
+
+// factMarkerFusedMargin is the minimum fused-RRF-score gap over the
+// runner-up required before rankKeyFacts marks a fact "(most relevant)"
+// rather than just ranking it first — a reasoned starting value in the
+// same RRF units reciprocalRank produces (not yet calibrated against real
+// fused-score distributions the way this file's other thresholds have
+// been), flagged here for that future calibration. Mirrors
+// mostRelevantFactIndex's own refusal to fabricate a "most relevant"
+// label on a near-tie.
+const factMarkerFusedMargin = 0.1
+
+// rankKeyFacts orders a summary's facts for both writeKeyFacts (every
+// fact, most relevant first) and guaranteedFact/summaryCitationSnippet
+// (just the top one) — one ranking shared by all three call sites, the
+// same "single scoring definition" invariant factScores already
+// establishes for the lexical path.
+//
+// Semantic ranking (by cosine similarity to the query) is considered only
+// when *every* fact in this summary has a valid similarity — a mixed
+// state should only be transient in practice (consolidation embeds a
+// summary's facts in one batched call; see internal/reembed for
+// backfilling pre-schema/0021 rows), and cosine similarity and integer
+// word-overlap counts aren't on the same scale, so ranking embedded and
+// unembedded facts directly against each other would be meaningless.
+//
+// Fuses the lexical rank and the semantic rank via Reciprocal Rank Fusion
+// (the same mechanism fusedSearchSummaries already uses to combine vector
+// and keyword search at the summary level — see reciprocalRank/rrfK)
+// rather than letting semantic ranking override lexical outright. A first
+// version did exactly that (semantic primary, lexical only a tie-break on
+// a near-identical score) and real-verified *worse* on a real case this
+// fix was built to help:
+//
+//   - Real motivating case (gpt4_45189cb4, "what is the order of the
+//     sports events I watched in January", a 123-grounded-fact busy-day
+//     summary): the correct fact ("watched the Chiefs defeat the
+//     Bills... NFL playoffs") and an unrelated climate-change fact both
+//     scored exactly one shared lexical term ("watched" vs. "events"
+//     respectively) under factScores — a tie that rankFactsByRelevance's
+//     stable sort broke in favor of whichever fact happened to be
+//     extracted first, the wrong one. Direct cosine-similarity
+//     measurement ranked the real fact #1 of 123 for this query.
+//   - Real regression the semantic-primary version introduced, caught by
+//     live end-to-end re-verification (not assumed): the *same* question,
+//     a *different* picked summary (5 facts, nowhere near busy-day
+//     scale). factScores correctly, unambiguously ranks "the user and
+//     their dad watched the College Football National Championship
+//     game..." first (the only fact sharing "watched" with the query —
+//     no tie at all here). But direct embedding measurement showed
+//     text-embedding-3-small itself scores an unrelated fact ("planned to
+//     check out The Witcher and The Mandalorian TV shows") *higher*
+//     (0.293 vs. 0.218) — a real embedding-model false positive, not a
+//     bug in this ranking code. Semantic-overrides-lexical let that
+//     single noisy embedding comparison discard a clean, unambiguous
+//     lexical signal, and the championship fact was truncated out of the
+//     final context as a result — fixing the original miss by
+//     introducing a new one on the same question.
+//
+// RRF fuses both signals instead of either one unilaterally winning: a
+// fact with no real lexical signal (tied at the bottom with dozens of
+// others, the original bug's shape) is rescued by a strong semantic rank,
+// but a fact with a clean, unambiguous top lexical rank isn't casually
+// outvoted by one noisy embedding comparison the way raw similarity
+// comparison allowed. Reuses rrfK as-is for now (tuned for
+// fusedSearchSummaries' smaller, few-dozen-candidate summary pool, not
+// yet separately calibrated for fact pools that can run into the
+// hundreds) — flagged here, like this file's other reasoned-but-not-yet-
+// calibrated constants, for future tuning rather than re-derived from
+// scratch in this pass.
+//
+// Falls back to the existing lexical order whenever semantic ranking
+// isn't available (kill switch off, no facts, or any fact missing a
+// valid similarity) — byte-identical to this file's pre-embedding
+// behavior, which is exactly what keeps every lexical-only test in
+// keyfacts_test.go passing unchanged.
+func rankKeyFacts(facts []keyFact, queryTerms []string) (order []int, bestIdx int) {
+	texts := keyFactTexts(facts)
+	lexOrder := rankFactsByRelevance(texts, queryTerms)
+	lexBest := mostRelevantFactIndex(texts, queryTerms)
+
+	if !semanticFactRankingEnabled() || len(facts) == 0 {
+		return lexOrder, lexBest
+	}
+	for _, f := range facts {
+		if !f.similarity.Valid {
+			return lexOrder, lexBest
+		}
+	}
+
+	lexRank := make([]int, len(facts))
+	for rank, idx := range lexOrder {
+		lexRank[idx] = rank
+	}
+	semOrder := make([]int, len(facts))
+	for i := range semOrder {
+		semOrder[i] = i
+	}
+	sort.SliceStable(semOrder, func(a, b int) bool {
+		return facts[semOrder[a]].similarity.Float64 > facts[semOrder[b]].similarity.Float64
+	})
+	semRank := make([]int, len(facts))
+	for rank, idx := range semOrder {
+		semRank[idx] = rank
+	}
+
+	fused := make([]float64, len(facts))
+	for i := range facts {
+		fused[i] = reciprocalRank(lexRank[i]) + reciprocalRank(semRank[i])
+	}
+	order = make([]int, len(facts))
+	for i := range order {
+		order[i] = i
+	}
+	// Stable on ties, same as rankFactsByRelevance — falls through to
+	// original insertion order rather than an arbitrary one.
+	sort.SliceStable(order, func(a, b int) bool { return fused[order[a]] > fused[order[b]] })
+
+	best := -1
+	if len(order) >= 2 && fused[order[0]]-fused[order[1]] >= factMarkerFusedMargin {
+		best = order[0]
+	}
+	return order, best
 }
 
 // writeKeyFacts is appendKeyFacts' original writing half — one bullet
@@ -1318,13 +1505,13 @@ func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc 
 // eventual truncateToBudget backstop (for a summary big enough to still
 // need one even after this) lands on the least relevant tail instead of
 // whatever cluster-merge order happened to put last.
-func writeKeyFacts(sb *strings.Builder, facts []string, queryTerms []string) {
-	best := mostRelevantFactIndex(facts, queryTerms)
-	for _, idx := range rankFactsByRelevance(facts, queryTerms) {
+func writeKeyFacts(sb *strings.Builder, facts []keyFact, queryTerms []string) {
+	order, best := rankKeyFacts(facts, queryTerms)
+	for _, idx := range order {
 		if idx == best {
-			sb.WriteString(fmt.Sprintf("\n  - (most relevant) %s", facts[idx]))
+			sb.WriteString(fmt.Sprintf("\n  - (most relevant) %s", facts[idx].text))
 		} else {
-			sb.WriteString(fmt.Sprintf("\n  - %s", facts[idx]))
+			sb.WriteString(fmt.Sprintf("\n  - %s", facts[idx].text))
 		}
 	}
 }
@@ -1383,22 +1570,24 @@ const guaranteedFactMaxCount = 3
 // fallback — so this is a strict improvement, not a behavior change for
 // the cases that already worked.
 //
-// This ranking still isn't perfect — real-verified against the
-// charity-events LongMemEval case that plain lexical-overlap scoring can
-// promote the wrong fact on a summary with many candidates, the same
-// real limitation that sank the preference-ranking "1b" attempt
-// elsewhere in this file — which is exactly why depthText's own
-// (uncapped) facts are real insurance beyond this one guaranteed pick,
-// not a redundant duplicate of it.
-func guaranteedFact(prose string, facts []string, queryTerms []string) string {
+// Lexical-overlap scoring alone still isn't perfect — real-verified
+// against the charity-events LongMemEval case that it can promote the
+// wrong fact on a summary with many candidates, the same real limitation
+// that sank the preference-ranking "1b" attempt elsewhere in this file.
+// rankKeyFacts now ranks by cosine similarity instead, when every fact in
+// the summary has a valid embedding (see its own doc comment) — this is
+// exactly why that fallback exists, not a hypothetical; depthText's own
+// (uncapped) facts remain real insurance beyond this one guaranteed pick
+// either way, for the cases where semantic ranking isn't available.
+func guaranteedFact(prose string, facts []keyFact, queryTerms []string) string {
 	if len(facts) == 0 {
 		return truncateToBudget(prose, guaranteedProseFallbackChars)
 	}
 	if len(facts) <= guaranteedFactMaxCount {
-		return strings.Join(facts, " ")
+		return strings.Join(keyFactTexts(facts), " ")
 	}
-	ranked := rankFactsByRelevance(facts, queryTerms)
-	return facts[ranked[0]]
+	order, _ := rankKeyFacts(facts, queryTerms)
+	return facts[order[0]].text
 }
 
 // guaranteedProseFallbackChars caps guaranteedFact's no-facts fallback —
@@ -1541,7 +1730,7 @@ const summaryDepthCap = 700
 // truncateToBudget call is the final-final backstop if even multiple
 // capped depth sections, episodes, and everything else together still
 // exceed it.
-func depthText(prose string, facts []string, queryTerms []string) string {
+func depthText(prose string, facts []keyFact, queryTerms []string) string {
 	var sb strings.Builder
 	writeKeyFacts(&sb, facts, queryTerms)
 	sb.WriteString("\n" + truncateToBudget(prose, proseDepthCap))
@@ -1549,13 +1738,13 @@ func depthText(prose string, facts []string, queryTerms []string) string {
 }
 
 // summaryCitationSnippet builds a citation's Snippet for a summary: its
-// prose plus, when one stands out, its most query-relevant fact —
-// reuses mostRelevantFactIndex rather than a second ranking scheme, so
-// the citation always agrees with what appendKeyFacts actually promoted
-// in the injected context.
-func summaryCitationSnippet(prose string, facts []string, queryTerms []string) string {
-	if best := mostRelevantFactIndex(facts, queryTerms); best >= 0 {
-		return prose + "\n  - (most relevant) " + facts[best]
+// prose plus, when one stands out, its most query-relevant fact — reuses
+// rankKeyFacts rather than a second ranking scheme, so the citation
+// always agrees with what appendKeyFacts actually promoted in the
+// injected context.
+func summaryCitationSnippet(prose string, facts []keyFact, queryTerms []string) string {
+	if _, best := rankKeyFacts(facts, queryTerms); best >= 0 {
+		return prose + "\n  - (most relevant) " + facts[best].text
 	}
 	return prose
 }

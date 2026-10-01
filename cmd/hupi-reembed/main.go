@@ -42,7 +42,7 @@ func run() error {
 	scopeKind := flag.String("scope-kind", "", "private | shared (required)")
 	scopeOwner := flag.String("scope-owner", "", "user id or team id (required)")
 	status := flag.Bool("status", false, "print how many rows still need re-embedding and exit, without doing any work")
-	batchSize := flag.Int("batch-size", 100, "rows to re-embed per batch (each row is one embedding-provider call)")
+	batchSize := flag.Int("batch-size", 100, "rows to re-embed per batch (one embedding-provider call per row, except summary_key_facts, which embeds a whole batch in a single call)")
 	actor := flag.String("actor", defaultActor(), "who's running this (audit log)")
 	flag.Parse()
 
@@ -71,8 +71,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("re-embedding %s:%s to %s: %d summar(ies), %d episode(s), %d entit(ies) pending\n",
-		scope.Kind, scope.Owner, st.Model, st.SummariesPending, st.EpisodesPending, st.EntitiesPending)
+	fmt.Printf("re-embedding %s:%s to %s: %d summar(ies), %d episode(s), %d entit(ies), %d key fact(s) pending\n",
+		scope.Kind, scope.Owner, st.Model, st.SummariesPending, st.EpisodesPending, st.EntitiesPending, st.KeyFactsPending)
 
 	total, err := reembedAll(ctx, runner, scope, *actor, *batchSize, func(processed int, table string, runningTotal int) {
 		fmt.Printf("  re-embedded %d %s (%d total)\n", processed, table, runningTotal)
@@ -125,8 +125,8 @@ func printStatus(ctx context.Context, runner *reembed.Runner, scope identity.Sco
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s:%s: current model=%s, pending: %d summar(ies), %d episode(s), %d entit(ies) (%d total)\n",
-		scope.Kind, scope.Owner, st.Model, st.SummariesPending, st.EpisodesPending, st.EntitiesPending, st.Total())
+	fmt.Printf("%s:%s: current model=%s, pending: %d summar(ies), %d episode(s), %d entit(ies), %d key fact(s) (%d total)\n",
+		scope.Kind, scope.Owner, st.Model, st.SummariesPending, st.EpisodesPending, st.EntitiesPending, st.KeyFactsPending, st.Total())
 	return nil
 }
 

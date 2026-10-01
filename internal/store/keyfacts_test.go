@@ -1,10 +1,37 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
 )
+
+// lexicalFacts builds []keyFact fixtures with no similarity (Valid ==
+// false) for every fact — rankKeyFacts' documented fallback condition —
+// so these tests exercise exactly the pre-embedding lexical path
+// unchanged, regardless of any embedding-based behavior added since.
+func lexicalFacts(texts ...string) []keyFact {
+	facts := make([]keyFact, len(texts))
+	for i, t := range texts {
+		facts[i] = keyFact{text: t}
+	}
+	return facts
+}
+
+// semanticFacts builds []keyFact fixtures with real similarity scores —
+// one float per text, same length and order — for tests exercising
+// rankKeyFacts' semantic path.
+func semanticFacts(texts []string, similarities []float64) []keyFact {
+	if len(texts) != len(similarities) {
+		panic("semanticFacts: texts and similarities must be the same length")
+	}
+	facts := make([]keyFact, len(texts))
+	for i, t := range texts {
+		facts[i] = keyFact{text: t, similarity: sql.NullFloat64{Float64: similarities[i], Valid: true}}
+	}
+	return facts
+}
 
 // TestMostRelevantFactIndexPicksClearWinner is the real hypothesis step 6
 // of docs/BENCHMARK_IMPROVEMENT_PLAN.md exists to test: given several key
@@ -76,7 +103,7 @@ func TestSummaryCitationSnippetIncludesMostRelevantFact(t *testing.T) {
 		"Melanie has camped at the beach, in the mountains, and in the forest.",
 	}
 	queryTerms := []string{"where", "has", "melanie", "camped"}
-	got := summaryCitationSnippet("Melanie's hobbies and travels.", facts, queryTerms)
+	got := summaryCitationSnippet("Melanie's hobbies and travels.", lexicalFacts(facts...), queryTerms)
 	want := "Melanie's hobbies and travels.\n  - (most relevant) Melanie has camped at the beach, in the mountains, and in the forest."
 	if got != want {
 		t.Errorf("summaryCitationSnippet() = %q, want %q", got, want)
@@ -109,7 +136,7 @@ func TestGuaranteedFactPrefersMostRelevant(t *testing.T) {
 		"Melanie collects vintage postcards.",
 	}
 	queryTerms := []string{"where", "has", "melanie", "camped"}
-	got := guaranteedFact("Melanie's hobbies and travels.", facts, queryTerms)
+	got := guaranteedFact("Melanie's hobbies and travels.", lexicalFacts(facts...), queryTerms)
 	want := "Melanie has camped at the beach, in the mountains, and in the forest."
 	if got != want {
 		t.Errorf("guaranteedFact() = %q, want the most relevant fact %q", got, want)
@@ -128,7 +155,7 @@ func TestGuaranteedFactFallsBackToFirstFactWithoutAClearWinner(t *testing.T) {
 		"Melanie went camping in the desert.",
 		"Melanie went camping by the lake.",
 	}
-	got := guaranteedFact("Melanie's hobbies and travels.", facts, []string{"melanie", "camping"})
+	got := guaranteedFact("Melanie's hobbies and travels.", lexicalFacts(facts...), []string{"melanie", "camping"})
 	if got != facts[0] {
 		t.Errorf("guaranteedFact() = %q, want the first fact %q when nothing stands out", got, facts[0])
 	}
@@ -158,7 +185,7 @@ func TestGuaranteedFactTiedAmongRelevantFactsStillPicksARelevantOne(t *testing.T
 		"Melanie watched the NFL playoffs over the weekend.",
 		"Melanie watched a cooking show on Tuesday.",
 	}
-	got := guaranteedFact("prose", facts, []string{"melanie", "watched"})
+	got := guaranteedFact("prose", lexicalFacts(facts...), []string{"melanie", "watched"})
 	if got == facts[0] {
 		t.Errorf("guaranteedFact() = %q, want a fact that actually matches the query, not the unrelated facts[0]", got)
 	}
@@ -181,7 +208,7 @@ func TestGuaranteedFactGuaranteesAllWhenFewEnough(t *testing.T) {
 		"On 2024-05-15, the user attended a downtown robotics event.",
 		"At the event, actuators and control systems were featured.",
 	}
-	got := guaranteedFact("prose", facts, []string{"what", "did", "i", "learn", "at", "the", "ai", "conference"})
+	got := guaranteedFact("prose", lexicalFacts(facts...), []string{"what", "did", "i", "learn", "at", "the", "ai", "conference"})
 	for _, f := range facts {
 		if !strings.Contains(got, f) {
 			t.Errorf("guaranteedFact() = %q, want it to include both facts, missing %q", got, f)
@@ -197,7 +224,7 @@ func TestGuaranteedFactPicksOneAtExactlyMaxCountPlusOne(t *testing.T) {
 	for i := range atThreshold {
 		atThreshold[i] = fmt.Sprintf("fact %d", i)
 	}
-	got := guaranteedFact("prose", atThreshold, nil)
+	got := guaranteedFact("prose", lexicalFacts(atThreshold...), nil)
 	for _, f := range atThreshold {
 		if !strings.Contains(got, f) {
 			t.Errorf("guaranteedFact() at exactly the threshold = %q, want all facts included, missing %q", got, f)
@@ -205,7 +232,7 @@ func TestGuaranteedFactPicksOneAtExactlyMaxCountPlusOne(t *testing.T) {
 	}
 
 	overThreshold := append(atThreshold, "one fact too many")
-	got = guaranteedFact("prose", overThreshold, nil)
+	got = guaranteedFact("prose", lexicalFacts(overThreshold...), nil)
 	if got != overThreshold[0] {
 		t.Errorf("guaranteedFact() one over the threshold = %q, want just the first fact %q", got, overThreshold[0])
 	}
@@ -240,7 +267,7 @@ func TestGuaranteedFactTruncatesLongProseFallback(t *testing.T) {
 // the caller to truncate.
 func TestDepthTextIncludesProseAndAllFacts(t *testing.T) {
 	facts := []string{"fact one", "fact two"}
-	got := depthText("the prose", facts, nil)
+	got := depthText("the prose", lexicalFacts(facts...), nil)
 	if !strings.Contains(got, "the prose") || !strings.Contains(got, "fact one") || !strings.Contains(got, "fact two") {
 		t.Errorf("depthText() = %q, want it to contain the prose and every fact", got)
 	}
@@ -329,7 +356,7 @@ func TestWriteKeyFactsOrdersEntireListNotJustTheWinner(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	writeKeyFacts(&sb, facts, queryTerms)
+	writeKeyFacts(&sb, lexicalFacts(facts...), queryTerms)
 	got := sb.String()
 
 	relevant := []string{"enjoys sports", "several events", "Chicago in January"}
@@ -413,6 +440,173 @@ func TestCenteredExcerptFallsBackToHeadTruncateWithoutAMatch(t *testing.T) {
 	want := hardTruncate(text, 50)
 	if got != want {
 		t.Errorf("centeredExcerpt() = %q, want the same as hardTruncate() = %q", got, want)
+	}
+}
+
+// TestRankKeyFacts_SemanticSimilarityBreaksTheRealLexicalTie_gpt4_45189cb4
+// is a real regression test for the live LongMemEval failure this schema/
+// internal/store change exists to fix: a 123-grounded-fact busy-day
+// summary where the correct fact ("watched the Chiefs defeat the
+// Bills... NFL playoffs") and an unrelated climate-change fact both
+// scored exactly one shared lexical term ("watched" vs. "events"
+// respectively) — a tie that the old lexical-only rankFactsByRelevance
+// broke in favor of whichever fact was extracted first (the climate one,
+// at an earlier index), for "what is the order of the sports events I
+// watched in January." Similarities below are the real values measured
+// against the live OpenAI text-embedding-3-small API for this exact
+// question against this scope's real facts (the NFL fact ranked #1 of
+// 125). The fixture includes 10 facts, not 4 — a toy-sized fixture
+// initially passed with a design (semantic similarity overriding lexical
+// outright) that real end-to-end re-verification then showed regressed a
+// *different* real fact in this same scope (see
+// TestRankKeyFacts_RRFDoesNotLetOneNoisyEmbeddingOverrideAClearLexicalSignal_gpt4_45189cb4
+// below) — a small, flat tie between exactly two candidates doesn't
+// exercise RRF's actual rank-fusion behavior the way a realistically
+// proportioned candidate pool does.
+func TestRankKeyFacts_SemanticSimilarityBreaksTheRealLexicalTie_gpt4_45189cb4(t *testing.T) {
+	// text, lexical-relevant?, real-measured cosine similarity to the
+	// query "what is the order of the sports events I watched in January"
+	type fixtureFact struct {
+		text        string
+		similarity  float64
+		lexicalHint string // which query term, if any, this fact shares — for readability only
+	}
+	fixture := []fixtureFact{
+		{"Rising temperatures and increased frequency of extreme weather events are affecting crop yields.", 0.08, "events"},
+		{"The user recently participated in the 3-day 'Turbocharged' autocross event at the fairgrounds.", 0.15, ""},
+		{"The user is planning to join a recreational volleyball league that starts in a few weeks.", 0.10, ""},
+		{"The user has been practicing their tennis serve on their own at least once a week.", 0.12, ""},
+		{"The user was considering planning a fantasy football draft with friends.", 0.11, ""},
+		{"The user hopes to finish reading a novel by the end of the month.", 0.05, ""},
+		{"The user needs to follow up on some leads from the Tech Expo last month.", 0.09, ""},
+		{"The user is planning a sports-themed scavenger hunt around the Staples Center.", 0.19, "sports"},
+		{"The user watched the Kansas City Chiefs defeat the Buffalo Bills in the Divisional Round of the NFL playoffs.", 0.267, "watched"},
+		{"The user discussed a painting class with a friend.", 0.07, ""},
+	}
+	queryTerms := []string{"order", "sports", "events", "watched", "january"}
+
+	texts := make([]string, len(fixture))
+	sims := make([]float64, len(fixture))
+	for i, f := range fixture {
+		texts[i] = f.text
+		sims[i] = f.similarity
+	}
+	const nflIdx, climateIdx, scavengerIdx = 8, 0, 7
+
+	// Confirm the real failure mode reproduces first: facts 0, 7, and 8
+	// all share exactly one query term each, tying for the top lexical
+	// score, and the stable sort keeps the earliest (wrong) one first.
+	lexOrder, lexBest := rankKeyFacts(lexicalFacts(texts...), queryTerms)
+	if lexBest != -1 {
+		t.Fatalf("test setup: lexical rankKeyFacts bestIdx = %d, want -1 (a genuine 3-way tie, matching the real bug's shape)", lexBest)
+	}
+	if lexOrder[0] != climateIdx {
+		t.Fatalf("test setup: lexical rankKeyFacts order[0] = %d, want %d (the wrong, earliest-indexed fact winning the tie — this must reproduce the real bug before the fix is meaningful)", lexOrder[0], climateIdx)
+	}
+
+	semOrder, _ := rankKeyFacts(semanticFacts(texts, sims), queryTerms)
+	if semOrder[0] != nflIdx {
+		t.Errorf("RRF-fused rankKeyFacts order[0] = %d, want %d (the NFL fact — its dominant semantic rank (#1 of 10) should outweigh the climate fact's and the scavenger-hunt fact's merely-tied lexical rank)", semOrder[0], nflIdx)
+	}
+
+	// The real property that matters: the fact actually reaches the
+	// depth block within summaryDepthCap, not just "ranks first in
+	// isolation."
+	depth := hardTruncate(depthText("prose", semanticFacts(texts, sims), queryTerms), summaryDepthCap)
+	if !strings.Contains(depth, "Kansas City Chiefs") {
+		t.Errorf("depthText() truncated to summaryDepthCap = %q, want it to contain the NFL fact", depth)
+	}
+}
+
+// TestRankKeyFacts_RRFDoesNotLetOneNoisyEmbeddingOverrideAClearLexicalSignal_gpt4_45189cb4
+// is a real regression test caught by live end-to-end re-verification of
+// the fix above, on the *same* real question against a *different* picked
+// summary in the same scope (5 facts — nowhere near busy-day scale). Here
+// factScores unambiguously ranks the College Football National
+// Championship fact first: it's the only one of the five sharing "watched"
+// with the query, no tie at all. A first version of rankKeyFacts (semantic
+// similarity overriding lexical outright, falling back to lexical only on
+// a near-exact-tie) got this case wrong: real measurement against the
+// live OpenAI text-embedding-3-small API showed the embedding model itself
+// scores an unrelated fact (a TV-show-watching plan) *higher* than the
+// correct one (0.293 vs. 0.218) — a genuine embedding-model false
+// positive, not a bug in this ranking code. That version let the single
+// noisy similarity comparison override a clean, unambiguous lexical
+// signal, truncating the correct fact out of the real assembled context.
+// RRF fusion (reciprocalRank(lexRank) + reciprocalRank(semRank)) is the
+// fix: a fact with a clean top lexical rank keeps real weight even when
+// one embedding comparison disagrees, rather than being unilaterally
+// overruled by it.
+func TestRankKeyFacts_RRFDoesNotLetOneNoisyEmbeddingOverrideAClearLexicalSignal_gpt4_45189cb4(t *testing.T) {
+	texts := []string{
+		"On 2023-01-13, Georgia defeated Alabama 33-18 in the College Football National Championship game.",
+		"The user and their dad watched the College Football National Championship game at home on 2023-01-13.", // the correct fact — the only one sharing "watched"
+		"On 2023-01-14, the user had not played The Witcher video games or read the books before starting the TV show.",
+		"On 2023-01-14, the user planned to check out The Witcher and The Mandalorian TV shows after finishing another series.", // the real embedding false positive — no shared query vocabulary at all
+		"On 2023-01-14, the user was considering planning a fantasy football draft with friends.",
+	}
+	// Real cosine similarities measured against the live OpenAI API for
+	// "what is the order of the sports events I watched in January".
+	sims := []float64{0.1986, 0.2177, 0.1858, 0.2926, 0.2530}
+	queryTerms := []string{"order", "sports", "events", "watched", "january"}
+	const championshipIdx, falsePositiveIdx = 1, 3
+
+	// Confirm the lexical signal really is clean and unambiguous first —
+	// no tie, nothing for RRF to need to rescue on the lexical side.
+	lexOrder, lexBest := rankKeyFacts(lexicalFacts(texts...), queryTerms)
+	if lexBest != championshipIdx || lexOrder[0] != championshipIdx {
+		t.Fatalf("test setup: lexical rankKeyFacts = (order[0]=%d, best=%d), want a clean, unambiguous winner at %d", lexOrder[0], lexBest, championshipIdx)
+	}
+
+	// Confirm the embedding model itself really does score the false
+	// positive higher — this is what makes the regression real, not a
+	// fixture artifact.
+	if sims[falsePositiveIdx] <= sims[championshipIdx] {
+		t.Fatalf("test setup: similarity[%d]=%.4f should exceed similarity[%d]=%.4f for this to be a real false positive", falsePositiveIdx, sims[falsePositiveIdx], championshipIdx, sims[championshipIdx])
+	}
+
+	order, _ := rankKeyFacts(semanticFacts(texts, sims), queryTerms)
+	if order[0] != championshipIdx {
+		t.Errorf("RRF-fused rankKeyFacts order[0] = %d, want %d (the championship fact) — its clean top lexical rank should outweigh one noisy embedding comparison", order[0], championshipIdx)
+	}
+
+	depth := hardTruncate(depthText("prose", semanticFacts(texts, sims), queryTerms), summaryDepthCap)
+	if !strings.Contains(depth, "College Football National Championship") {
+		t.Errorf("depthText() truncated to summaryDepthCap = %q, want it to contain the championship fact", depth)
+	}
+}
+
+// TestRankKeyFacts_MixedEmbeddingStateFallsBackToLexical confirms a
+// summary with some embedded and some unembedded facts (a partial
+// reembed, or a fact written just before an embedding-provider switch)
+// doesn't mix two incomparable scales — it falls back to the existing
+// lexical ranking entirely, rather than ranking embedded facts by
+// similarity and unembedded ones arbitrarily.
+func TestRankKeyFacts_MixedEmbeddingStateFallsBackToLexical(t *testing.T) {
+	facts := []keyFact{
+		{text: "Melanie enjoys painting landscapes in her free time."},
+		{text: "Melanie has camped at the beach, in the mountains, and in the forest.", similarity: sql.NullFloat64{Float64: 0.9, Valid: true}},
+	}
+	queryTerms := []string{"where", "has", "melanie", "camped"}
+	order, best := rankKeyFacts(facts, queryTerms)
+	wantOrder, wantBest := rankFactsByRelevance(keyFactTexts(facts), queryTerms), mostRelevantFactIndex(keyFactTexts(facts), queryTerms)
+	if order[0] != wantOrder[0] || best != wantBest {
+		t.Errorf("rankKeyFacts() with a mixed embedding state = (order=%v, best=%d), want the pure lexical result (order=%v, best=%d)", order, best, wantOrder, wantBest)
+	}
+}
+
+// TestRankKeyFacts_KillSwitchForcesLexical confirms
+// HUPI_ENABLE_SEMANTIC_FACT_RANKING=false reproduces the pre-embedding
+// behavior exactly, even when every fact has a real similarity score —
+// the A/B and emergency-disable lever this switch exists for.
+func TestRankKeyFacts_KillSwitchForcesLexical(t *testing.T) {
+	t.Setenv("HUPI_ENABLE_SEMANTIC_FACT_RANKING", "false")
+	texts := []string{"climate events fact", "NFL playoffs watched fact"}
+	queryTerms := []string{"events", "watched"}
+	order, _ := rankKeyFacts(semanticFacts(texts, []float64{0.9, 0.1}), queryTerms)
+	wantOrder := rankFactsByRelevance(texts, queryTerms)
+	if order[0] != wantOrder[0] {
+		t.Errorf("rankKeyFacts() with the kill switch off = order %v, want the pure lexical order %v even though similarities favor a different fact", order, wantOrder)
 	}
 }
 

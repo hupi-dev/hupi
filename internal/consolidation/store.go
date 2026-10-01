@@ -113,6 +113,7 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 	}
 
 	var id string
+	var groundedFacts []keyFactToEmbed
 	err = dbscope.Run(ctx, r.db, in.scope, in.scope, func(tx *sql.Tx) error {
 		var err error
 		id, err = r.nextSummaryID(ctx, tx, in.scope, in.level, in.period)
@@ -181,12 +182,21 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 						"episode_id", epID, "fact", kf.Fact, "scope_kind", in.scope.Kind, "scope_owner", in.scope.Owner)
 				}
 			}
-			_, err = tx.ExecContext(ctx, `
+			var factRowID int64
+			err = tx.QueryRowContext(ctx, `
 				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner)
 				values ($1, $2, $3::text[], $4, $5, $6, $7)
-			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner)
+				returning id
+			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner).Scan(&factRowID)
 			if err != nil {
 				return fmt.Errorf("insert key fact %d for summary %s: %w", i, id, err)
+			}
+			// Only grounded facts are ever retrieved (loadKeyFacts,
+			// checkCrossPeriodContradictions), so only grounded facts need
+			// an embedding — embedding an ungrounded fact would be pure
+			// waste, never reachable by any query path.
+			if grounded[i] {
+				groundedFacts = append(groundedFacts, keyFactToEmbed{rowID: factRowID, text: kf.Fact})
 			}
 		}
 
@@ -261,6 +271,9 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 	}
 	if err := r.embedEntities(ctx, in.scope, entityIDs); err != nil {
 		slog.Warn("consolidation: embed entities failed, rows committed without it", "summary", id, "error", err)
+	}
+	if err := r.embedKeyFacts(ctx, in.scope, groundedFacts); err != nil {
+		slog.Warn("consolidation: embed key facts failed, facts committed without embeddings (lexical ranking fallback)", "summary", id, "facts", len(groundedFacts), "error", err)
 	}
 	return nil
 }
@@ -801,6 +814,84 @@ func (r *Runner) embedEntities(ctx context.Context, scope identity.Scope, ids []
 		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("entity %s: write embedding: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// keyFactToEmbed is the slice of a just-inserted summary_key_facts row
+// embedKeyFacts actually needs — storeSummary collects these from its own
+// insert loop (via `returning id`) rather than re-querying after commit.
+type keyFactToEmbed struct {
+	rowID int64
+	text  string
+}
+
+// keyFactEmbedBatchSize bounds how many facts go into one Embed call.
+// Every real busy-day summary count seen so far (81, 85, 112, 120, 125
+// facts) fits in a single batch at this size, which matters because
+// rankKeyFacts (internal/store/retrieve.go) only ranks a summary
+// semantically when *all* of its facts carry a valid embedding — one call
+// per summary keeps that the common case instead of the exception.
+const keyFactEmbedBatchSize = 256
+
+// keyFactEmbedMaxChars truncates any single runaway fact before it's sent
+// for embedding — well under any provider's token limit, so one
+// oversized input can't fail an entire batch and leave every other fact
+// in it unembedded (a real failure mode: OpenAI rejects a whole request
+// over one input exceeding its token cap).
+const keyFactEmbedMaxChars = 4000
+
+// embedKeyFacts embeds every grounded key fact just written for one
+// summary, batched into as few Embed calls as possible (see
+// keyFactEmbedBatchSize), and writes the resulting vectors back in one
+// transaction. Best-effort, called after storeSummary's own transaction
+// has already committed — same posture as embedSummary/embedEntities: a
+// failed or partial embed leaves the facts fully usable via the existing
+// lexical ranking fallback (internal/store/retrieve.go's rankKeyFacts),
+// never blocks or retries consolidation itself.
+func (r *Runner) embedKeyFacts(ctx context.Context, scope identity.Scope, facts []keyFactToEmbed) error {
+	if len(facts) == 0 {
+		return nil
+	}
+	model := EmbedderIdentity(r.embedder)
+	var errs []error
+	for start := 0; start < len(facts); start += keyFactEmbedBatchSize {
+		end := min(start+keyFactEmbedBatchSize, len(facts))
+		chunk := facts[start:end]
+
+		texts := make([]string, len(chunk))
+		for i, f := range chunk {
+			text := f.text
+			if len(text) > keyFactEmbedMaxChars {
+				text = text[:keyFactEmbedMaxChars]
+			}
+			texts[i] = text
+		}
+
+		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: texts})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("embed key facts batch (rows %d-%d): %w", chunk[0].rowID, chunk[len(chunk)-1].rowID, err))
+			continue
+		}
+		if len(resp.Vectors) != len(chunk) {
+			errs = append(errs, fmt.Errorf("embed key facts batch (rows %d-%d): embedder returned %d vectors, want %d",
+				chunk[0].rowID, chunk[len(chunk)-1].rowID, len(resp.Vectors), len(chunk)))
+			continue
+		}
+
+		err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+			for i, f := range chunk {
+				if _, err := tx.ExecContext(ctx, `
+					update summary_key_facts set embedding = $1::vector, embedding_model = $2 where id = $3
+				`, pgfmt.VectorLiteral(resp.Vectors[i]), model, f.rowID); err != nil {
+					return fmt.Errorf("write embedding for key fact %d: %w", f.rowID, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
