@@ -131,7 +131,25 @@ func TestResolveConsecutivePairHint_RejectsPairTooFarApart(t *testing.T) {
 	}
 }
 
-func TestResolveOrderHint_OrdersChronologically(t *testing.T) {
+// TestResolveAggregationHint_OrderShapedQuestionReturnsEmpty is a real
+// regression test (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): this used to
+// be TestResolveOrderHint_OrdersChronologically, asserting the opposite —
+// that an "order of" question got a computed chronological-order hint via
+// the now-deleted resolveOrderHint. Real end-to-end verification against
+// gpt4_45189cb4 (a real "order of the sports events" LongMemEval question)
+// found the extraction step this hint depends on missed one of three real
+// facts roughly half the time, and the answering model deferred to that
+// incomplete hint over the full, now relevance-ranked context
+// (writeKeyFacts' own rankFactsByRelevance fix, same investigation) —
+// measured 5/5 wrong with the hint present vs. 15/15 correct on the exact
+// same context with no hint at all. "Order" requests still widen
+// retrieval (internal/store's looksLikeOrderingRequest, unchanged) and
+// still benefit from relevance-ranked context; they just no longer get
+// this pass's own extra, unreliable hint layered on top. Only the
+// "consecutive pair" shape still gets a hint from this pass — ranking
+// alone can't tell the model *which two* facts form the specific adjacent
+// pair a "two events in a row" question needs.
+func TestResolveAggregationHint_OrderShapedQuestionReturnsEmpty(t *testing.T) {
 	facts := []parsedAggregationFact{
 		{description: "Watched the triathlon", date: time.Date(2023, 1, 20, 0, 0, 0, 0, time.UTC)},
 		{description: "Watched the 5K", date: time.Date(2023, 1, 5, 0, 0, 0, 0, time.UTC)},
@@ -139,15 +157,8 @@ func TestResolveOrderHint_OrdersChronologically(t *testing.T) {
 	}
 	now := time.Date(2023, 2, 1, 0, 0, 0, 0, time.UTC)
 	got := resolveAggregationHint("what is the order of the sports events I watched in January?", facts, now)
-
-	i5K := strings.Index(got, "5K")
-	iSoccer := strings.Index(got, "soccer")
-	iTriathlon := strings.Index(got, "triathlon")
-	if i5K < 0 || iSoccer < 0 || iTriathlon < 0 {
-		t.Fatalf("resolveAggregationHint() = %q, missing an expected fact", got)
-	}
-	if !(i5K < iSoccer && iSoccer < iTriathlon) {
-		t.Errorf("resolveAggregationHint() = %q, want 5K before soccer before triathlon (chronological order)", got)
+	if got != "" {
+		t.Errorf("resolveAggregationHint(order-shaped question) = %q, want empty — this pass only handles the consecutive-pair shape now", got)
 	}
 }
 
@@ -226,13 +237,15 @@ func TestAggregationHint_NoFactsReturnsEmpty(t *testing.T) {
 // TestHandleChatCompletions_DeepExplainRunsAttributionCheck's own
 // upstream-call-counting/content-detection pattern.
 //
-// postChatCompletion's request body always asks a fixed "hi" — not an
-// "in a row"/"consecutive" phrase — so resolveAggregationHint correctly
-// takes the order-hint branch here, not the pair-hint branch (that
-// distinction is already covered directly by
-// TestResolveConsecutivePairHint_.../TestResolveOrderHint_... above);
-// this test's own job is only to confirm the wiring actually fires and
-// actually injects whatever hint comes back.
+// Unlike the other wiring tests in this file, this one can't reuse the
+// shared postChatCompletion helper (handler_test.go) — its request body
+// is a fixed "hi", which isn't a consecutive-pair-shaped question, and
+// since the "order" hint branch was removed (resolveOrderHint deleted —
+// see TestResolveAggregationHint_OrderShapedQuestionReturnsEmpty above),
+// AggregationHint now short-circuits before the extraction call for
+// anything that isn't pair-shaped. This test builds its own request with
+// a real "two events in a row" question so the pass still has something
+// to fire on.
 func TestHandleChatCompletions_AggregationPassInjectsHintWhenNeeded(t *testing.T) {
 	var upstreamCalls int
 	var finalAnswerMessages []any
@@ -283,7 +296,10 @@ func TestHandleChatCompletions_AggregationPassInjectsHintWhenNeeded(t *testing.T
 	}}
 	h := &Handler{Registry: reg, Retriever: retriever, Capturer: &fakeCapturer{}}
 
-	w := postChatCompletion(t, h, nil)
+	body := strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"how many months since two charity events in a row?"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	h.HandleChatCompletions(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}

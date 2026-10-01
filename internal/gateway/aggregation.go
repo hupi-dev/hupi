@@ -117,18 +117,34 @@ func looksLikeConsecutivePairRequest(question string) bool {
 // combine, or the existing single-fact date-label mechanism already
 // covers it, so this returns "" and the turn proceeds exactly as if this
 // pass didn't exist.
+//
+// Only handles the "consecutive pair" shape — real-verified removal of
+// the "order" shape this used to also cover (resolveOrderHint, now
+// deleted): a real "order of the sports events I watched in January"
+// question had its extraction step miss one of three real facts (the
+// same already-known ~50-65% per-call extraction reliability), producing
+// an incomplete chronological-order hint. The answering model deferred
+// to that incomplete hint wholesale instead of using the full context —
+// which, by then, writeKeyFacts' own relevance-ranking fix (the same
+// investigation, built right before this one) already surfaced reliably
+// on its own (15/15 real runs correct with no hint at all). The hint
+// text's own "use this only if it directly answers the question"
+// caveat didn't save it: the model used an incomplete list anyway. For
+// "order," ranking alone already solves the problem this pass set out to
+// help with; injecting a hint that can silently omit an event is a net
+// negative there, not a redundant-but-harmless extra. The "pair" shape
+// is different and keeps real value: ranking can surface all the right
+// facts prominently but can't itself identify *which two* form the
+// specific adjacent pair a "consecutive days" question needs — that
+// still requires this pass's own resolution step.
 func resolveAggregationHint(question string, facts []parsedAggregationFact, now time.Time) string {
-	if len(facts) < 2 {
+	if len(facts) < 2 || !looksLikeConsecutivePairRequest(question) {
 		return ""
 	}
 	sorted := make([]parsedAggregationFact, len(facts))
 	copy(sorted, facts)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].date.Before(sorted[j].date) })
-
-	if looksLikeConsecutivePairRequest(question) {
-		return resolveConsecutivePairHint(sorted, now)
-	}
-	return resolveOrderHint(sorted)
+	return resolveConsecutivePairHint(sorted, now)
 }
 
 // maxConsecutivePairGapDays bounds how far apart two dates can be and
@@ -185,23 +201,6 @@ func resolveConsecutivePairHint(sorted []parsedAggregationFact, now time.Time) s
 	)
 }
 
-// resolveOrderHint describes the full chronological order of every
-// extracted fact — the other real shape this same query-family covers
-// ("which came first," "order of the sports events"), where the answer
-// needs all of them arranged, not one pair picked out.
-func resolveOrderHint(sorted []parsedAggregationFact) string {
-	var sb strings.Builder
-	sb.WriteString("A separate computation over the retrieved facts found this chronological order (earliest first): ")
-	for i, f := range sorted {
-		if i > 0 {
-			sb.WriteString("; ")
-		}
-		fmt.Fprintf(&sb, "%q (%s)", f.description, f.date.Format("2006-01-02"))
-	}
-	sb.WriteString(". Use this only if it directly answers the question — otherwise ignore it.")
-	return sb.String()
-}
-
 // relativeDelta is a small, self-contained "N weeks/months/years before
 // now" computation — independently implemented from
 // internal/store/temporal.go's own relativeDateLabel rather than shared
@@ -244,12 +243,21 @@ func pluralAgo(n float64, unit string) string {
 }
 
 // AggregationHint is this pass's public entry point — Handler calls it
-// only when RetrievalResult.NeedsAggregationPass is true (Gap 4
-// mechanism 2, docs/CONSOLIDATION_COMPLETENESS_PLAN.md): extract, then
-// resolve. Best-effort throughout — any failure anywhere in this
-// pipeline returns "", and the turn proceeds exactly as it would have
-// without this pass, never blocking or degrading the primary answer.
+// whenever RetrievalResult.NeedsAggregationPass is true (Gap 4 mechanism
+// 2, docs/CONSOLIDATION_COMPLETENESS_PLAN.md). That retrieval-side gate
+// is deliberately broader than what this pass actually acts on (it also
+// covers "order of" questions, still used to widen retrieval breadth —
+// Phase D item 2 — independent of this pass) — so check the narrower
+// shape this pass itself helps with *before* paying for the extraction
+// call, not just when deciding what to do with its result. Otherwise:
+// extract, then resolve. Best-effort throughout — any failure anywhere
+// in this pipeline returns "", and the turn proceeds exactly as it would
+// have without this pass, never blocking or degrading the primary
+// answer.
 func AggregationHint(ctx context.Context, judge provider.Provider, question, contextMessage string, now time.Time) string {
+	if !looksLikeConsecutivePairRequest(question) {
+		return ""
+	}
 	facts := extractAggregationFacts(ctx, judge, question, contextMessage)
 	parsed := parseAggregationFacts(facts)
 	hint := resolveAggregationHint(question, parsed, now)
