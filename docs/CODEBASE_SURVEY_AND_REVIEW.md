@@ -420,7 +420,7 @@ behavior.
 
 ## B. Plausible edge cases
 
-- **Mid-stream provider errors aren't counted in `ProviderCallErrorsTotal`** — only the initial-connect failure path increments it; a failure arriving via a stream chunk's `Err` field only logs. (`internal/gateway/handler.go`)
+- **✅ FIXED ([PR #29](https://github.com/hupi-dev/hupi/pull/29)) — Mid-stream provider errors weren't counted in `ProviderCallErrorsTotal`** — only the initial-connect failure path incremented it; a failure arriving via a stream chunk's `Err` field only logged. (`internal/gateway/handler.go`)
 - **`docs/API_REFERENCE.md` documents team-route functions/line numbers that don't exist in this OSS build** (`HandleTeamChatCompletions`, `resolveTeamScope`) — stale doc from before the current nil-hook mechanism replaced an earlier inline implementation.
 - **Demo's `clientIP` trusts the leftmost `X-Forwarded-For` entry unconditionally** — defeatable under the common "append" reverse-proxy pattern, which would let an attacker fabricate a value and bypass the per-IP session limiter (not confirmed exploitable without the real proxy config, but the one documented purpose of the limiter depends on it).
 - **Retry logic applies identically to `Embed` (idempotent) and `ChatCompletion`/stream (billed, not idempotent) with no idempotency key** — a network error arriving after the upstream provider already received and processed the request can cause a real duplicate-billed/duplicate-generated retry. (`internal/provider/retry.go`)
@@ -504,7 +504,7 @@ just to pad the findings list:
 | Severity | Count |
 |---|---|
 | Likely real bugs | 13 (✅ all 13 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25, A11 PR #26, A12 PR #27, A13 PR #28) |
-| Plausible edge cases | 24 |
+| Plausible edge cases | 28 (✅ 1 fixed — B1 PR #29; 27 remaining; count corrected from a stale 24) |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
 
