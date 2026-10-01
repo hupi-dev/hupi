@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"hupi/internal/auth"
@@ -63,6 +64,15 @@ var DefaultLimits = Limits{
 // `interval '1 day'` SQL literal, with nothing tying Sweep's actual
 // row-deletion timing to it at all.
 const capWindow = 24 * time.Hour
+
+// createSessionLockKey is the pg_advisory_lock key CreateSession holds
+// for its whole count-check-then-insert sequence (docs/
+// CODEBASE_SURVEY_AND_REVIEW.md finding B21, a separate TOCTOU race from
+// A11 above — A11 fixed what gets counted over time, this fixes
+// atomicity of the check itself). Fixed, not scope-derived, since
+// Limits.MaxSessionsPerDay is one global counter across every guest, not
+// per-scope.
+const createSessionLockKey = "demo_sessions_daily_cap"
 
 var (
 	// ErrSessionInvalid covers "never existed," "expired," and (from
@@ -119,8 +129,35 @@ type Session struct {
 // caller (cmd/hupi-demo) also applies a cheaper, in-memory per-IP limit
 // in front of this one.
 func (s *Store) CreateSession(ctx context.Context) (Session, error) {
+	// The count-check below and the insert later in this function used to
+	// run as two independent, unprotected statements — any number of
+	// concurrent CreateSession calls arriving while count was one under
+	// the cap would all read the same pre-increment count, all pass, and
+	// all insert, overshooting the cap by as much as the concurrency
+	// allowed (finding B21). pg_advisory_lock, same pattern as
+	// internal/rotate.Runner.Start's A8 fix: server-wide, held on a
+	// dedicated connection for this whole function so no other
+	// CreateSession call can even begin its own count check until this
+	// one finishes and unlocks.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return Session{}, fmt.Errorf("demo: acquire connection for daily cap lock: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `select pg_advisory_lock(hashtext($1))`, createSessionLockKey); err != nil {
+		return Session{}, fmt.Errorf("demo: acquire daily cap lock: %w", err)
+	}
+	defer func() {
+		// Deliberately a fresh context, not ctx — an unlock must still run
+		// even if ctx was already cancelled, or this lock leaks for the
+		// rest of the connection's lifetime in the pool.
+		if _, unlockErr := conn.ExecContext(context.Background(), `select pg_advisory_unlock(hashtext($1))`, createSessionLockKey); unlockErr != nil {
+			slog.Error("demo: failed to release daily cap lock", "error", unlockErr)
+		}
+	}()
+
 	var count int
-	if err := s.db.QueryRowContext(ctx,
+	if err := conn.QueryRowContext(ctx,
 		`select count(*) from demo_sessions where created_at > $1`,
 		time.Now().Add(-capWindow),
 	).Scan(&count); err != nil {
@@ -145,7 +182,7 @@ func (s *Store) CreateSession(ctx context.Context) (Session, error) {
 	}
 	rawToken := "hupi_demo_" + tokenSuffix
 	expiresAt := time.Now().Add(s.limits.SessionTTL)
-	if _, err := s.db.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`insert into demo_sessions (token_hash, guest_user_id, expires_at) values ($1, $2, $3)`,
 		hashToken(rawToken), guestID, expiresAt,
 	); err != nil {
