@@ -1421,6 +1421,128 @@ better-understood.
   address. Confirmed via direct grep across every saved prediction file
   from today, not assumed.
 
+  **Correction (2026-10-01): this framing turned out to be wrong in an
+  important way, see the new section below.** 852ce960 wasn't actually a
+  case needing a fully general contradiction system — Phase C's own
+  existing, narrowly-scoped mechanism was never even given the chance to
+  compare the two conflicting summaries, due to two real bugs in its
+  candidate-selection step. Fixing those two bugs (no new detection logic,
+  no scope expansion) directly addresses this exact case, within Phase C's
+  original non-goal boundary, not beyond it.
+
+## Post-completion follow-up (2026-10-01): two new real gaps found via live LongMemEval regression
+
+A regression re-run of the same 8-conversation LongMemEval sample used
+throughout this document surfaced two further real gaps, both found by
+direct, repeated testing against the real model and real data rather than
+assumed from the patterns above — this section's own discipline matches
+the rest of this document: measure first, fix precisely, report the
+honest result including what's still only partially resolved.
+
+**New Gap: a light day never got the per-episode insurance pass at all.**
+Phase B's per-episode fact extraction (`extractPerEpisodeFacts`) was
+deliberately gated to days already past `clusterEpisodeThreshold` — a
+reasoned cost tradeoff at the time, since dilution-by-crowding was the
+confirmed mechanism and a light day has nothing to be crowded by. Two
+independent real failures disproved that reasoning: `89527b6b` (a
+4-session day) and `852ce960` (a genuinely *1-session* day) each buried a
+real, specific detail as a trailing aside after a message's own primary
+topic — a children's story's per-dinosaur description, and "...by the
+way, remember when I got pre-approved for $400,000 from Wells Fargo?"
+tacked onto a message about cable TV providers. The single whole-day
+summary call extracted the primary topic and silently dropped the aside,
+on a day with no crowding at all. Fixed in
+[PR #68](https://github.com/hupi-dev/hupi/pull/68): the per-episode pass
+now runs on every day, bounded in cost by `clusterEpisodeThreshold` on a
+light day (the same cap a busy day already pays).
+
+That same PR found two further, more precise issues once the pass was
+running on these days:
+
+1. **Episode length itself dilutes extraction, independent of day
+   crowding.** `cmd/hupi-bench` replays an entire multi-turn LongMemEval
+   session as one captured "episode" — ~11,600 characters across 12 turns
+   for the real 852ce960 case. Direct, repeated testing against the real
+   model found extraction reliability measured 10/10 on the same content
+   as a short, isolated exchange, but dropped to 3/5 once the model saw
+   the full session — the identical needle-in-a-haystack effect this
+   document's own Phase B/D work already diagnosed at the retrieval layer
+   (`writeKeyFacts`' relevance ranking, `centeredExcerpt`'s dense-cluster
+   windowing), recurring here at the raw extraction-input stage. Fixed by
+   chunking any episode longer than 4,000 runes into independent
+   extraction windows before calling the model — measured 5/5 once the
+   relevant turn landed in a single, smaller chunk.
+2. **The extraction prompt was inventing unsupported temporal framing.**
+   Direct, repeated testing against the real grounding model found it
+   consistently (3/3 trials) rejects a fact phrased "...in a previous
+   conversation" when the isolated exchange genuinely has no earlier
+   conversation to confirm that framing against (LongMemEval's own
+   stateless-per-session shape), while accepting the identical fact
+   stated plainly (3/3 trials). The extraction prompt was adding that
+   qualifier on its own for "remember when I...?"-shaped user statements.
+   Fixed by instructing both extraction prompts to report such a
+   statement as a plain, direct fact instead.
+
+Real, measured results: `89527b6b` 0/5 → **5/5** correct on the real
+GPT-4o judge. `852ce960` extraction reliability 0/8 → **8/8** across
+repeat re-consolidation runs — but grounding itself remains measurably
+non-deterministic beyond the phrasing fix (~3/8 full passes across the
+same 8 runs), a real, honest partial improvement, not a complete fix.
+Chasing that residual further would mean touching the shared
+`groundingCheck` prompt used for every fact in the whole system, which
+deserves its own dedicated investigation rather than a change bundled
+into this fix.
+
+**New Gap: Phase C's own candidate-selection step, not its detection
+logic, was broken.** Direct investigation of why Phase C's real,
+already-shipped cross-period contradiction mechanism
+(`findRelatedSummaries`/`checkOneRelatedSummary`, this document's own
+Phase C sub-problem 2) never caught 852ce960's two conflicting Wells
+Fargo pre-approval amounts found two bugs present since that mechanism's
+original implementation, never touched by this document's own later
+follow-up-gap fixes (the re-grounding and prose-rewriting fixes earlier
+in this section):
+
+1. **"Current" meant `supersedes is null`** — backwards, the same mistake
+   `internal/store/retrieve.go`'s `vectorSearchSummaries` doc comment
+   already documents for exactly this reason: a correction writes a
+   brand-new row whose own `supersedes` points backward at the row it
+   replaces, and the replaced row's own `supersedes` stays null forever.
+   This returned exactly the stale, corrected-away summaries and excluded
+   every correction ever made — confirmed live via repeated "applying
+   contradiction correction failed... already superseded" log lines, each
+   a wasted LLM call re-checking a row that should never have been a
+   candidate again.
+2. **Ranking candidates by recency alone let a hub entity dominate.**
+   `person:user` appears in the large majority of a real scope's
+   summaries; ranking the bounded top-5 candidate list by recency alone
+   meant the 5 most-recent summaries sharing *any* entity were almost
+   always ones that only shared that hub, crowding out the one summary
+   sharing the genuinely rare, specific `organization:wells-fargo`
+   (present in only 2 of 34 real summaries that scope).
+
+Fixed in [PR #69](https://github.com/hupi-dev/hupi/pull/69): candidates
+are now ranked by entity specificity (sum of 1/frequency of each shared
+entity across the scope's own current summaries) first, recency only as
+the tiebreak, and the "current" filter uses the correct definition. Both
+are mechanical fixes — no prompt or detection-logic changes, candidate
+cap unchanged at 5 — independently proven via dedicated regression tests
+reproducing both real bugs (fail without the fix, pass with it). Also
+shipped in the same PR: the QA-phase answer-time prompt (previously
+duplicated verbatim between `cmd/hupi-bench` and
+`cmd/hupi-answer-question`) was extracted to a new `internal/qaprompt`
+package and given a recency-preference instruction
+(`docs/LONGMEMEVAL_ACCURACY_PLAN.md` Category 3 Phase 1) — see that
+document for the full detail.
+
+**Honest scope note**: live end-to-end verification against the real
+852ce960 scope was inconclusive on its own even after both PRs — the
+underlying fact's extraction/grounding reliability (fixed, partially, by
+PR #68) and the candidate-selection fix (PR #69) are both real and both
+independently tested, but 852ce960 itself still doesn't reliably score
+correct end to end, since both layers' residual non-determinism compound.
+This is reported honestly rather than claimed as a full fix.
+
 ## Non-goals
 
 - A general-purpose "detect and resolve any factual contradiction"

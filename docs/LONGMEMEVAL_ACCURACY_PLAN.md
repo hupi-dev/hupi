@@ -111,6 +111,25 @@ doesn't help once several true facts about the same person are all in
 reach; that needs picking the *right* one, not finding *a* one. Not
 designed in this pass.
 
+**Update (2026-10-01): closed, for free, as a side effect of a different
+fix.** Investigating a separate real failure (Category 2's `gpt4_45189cb4`
+below) found that this category's own multi-candidate ranking problem and
+that one shared the identical root mechanism: a large `summary_key_facts`
+list where the right fact loses a lexical tie to an irrelevant one. Live
+re-diagnosis of `1d4e3b97` (the bike-performance question above) found the
+premise had shifted since this section was written — there are no
+bike-related *entities* in this scope at all; the chain/cassette fact is
+one of 135 `summary_key_facts` on a single busy day, and it loses a
+12-way lexical tie to an unrelated ALS-research fact sharing the word
+"group." [PR #67](https://github.com/hupi-dev/hupi/pull/67) built real
+semantic (embedding-based) fact ranking, fused with the existing lexical
+score via Reciprocal Rank Fusion, as the fix for `gpt4_45189cb4` — and,
+once this scope's summary was reembedded, it promoted the chain/cassette
+fact with no additional code needed here. Re-verified against the real
+GPT-4o judge: **3/3 correct** (was 0/5 before). The Garmin bike computer
+detail (never extracted as a key fact at all) remains a known residual,
+not required for this question's gold answer to score correct.
+
 ## Category 2: `temporal-reasoning` — originally 3 hypothesized causes, real re-verification found 1
 
 **Real finding**, from inspecting all 5 failures together (initial
@@ -242,6 +261,23 @@ hypothesis. The retrieval-widening code for this cause has been reverted
 always using `maxVectorResults()`/`mmrLambda()` directly, no
 per-query-shape override) since it's confirmed to do nothing useful.
 
+**Update (2026-10-01): the consolidation-completeness gap flagged above
+is now closed, and closing it surfaced — then fixed — a second, distinct
+retrieval-ranking gap underneath.** Fresh live re-diagnosis of
+`gpt4_45189cb4` found the NFL-playoffs fact *was* now present (busy-day
+dilution at the consolidation layer had since been addressed by other
+work), but still wasn't reaching the model: on this scope's 125-fact
+summary, the correct fact and an unrelated climate-change fact tied at
+the same lexical relevance score (one shared word each — "watched" vs.
+"events"), and the old stable-sort tie-break kept the wrong one.
+[PR #67](https://github.com/hupi-dev/hupi/pull/67) replaced plain
+lexical-overlap fact ranking with Reciprocal Rank Fusion of lexical and
+semantic (embedding) rank. Real, measured result: **5/5 correct** on the
+real GPT-4o judge (was 0/5). A first version of that fix (semantic
+ranking overriding lexical outright) was tried and proven wrong by live
+re-verification — see PR #67's own description for the real regression
+it caused and why RRF fusion was used instead.
+
 ## Category 3: `knowledge-update` — no recency precedence across periods
 
 **Real finding, confirmed directly against the real database** (not
@@ -272,6 +308,18 @@ in code comments as previously-observed production issues:
   prefer the most recently dated source. This doesn't fix the
   underlying data model, but it's a same-day, low-risk mitigation using
   data that's already present in context.
+
+  **✅ Shipped (2026-10-01), [PR #69](https://github.com/hupi-dev/hupi/pull/69).**
+  Also moved this prompt (previously duplicated verbatim between
+  `cmd/hupi-bench` and `cmd/hupi-answer-question`) into a new
+  `internal/qaprompt` package as part of the same change, closing a real,
+  live drift risk discovered along the way. The exact instruction is
+  guarded against several real false-positive shapes found investigating
+  the Wells Fargo case directly (a value mentioned only in passing, one
+  repeated more often or ranked "most relevant," an entity's own "last
+  updated" date not dating each individual value within it, genuinely
+  different facts on the same topic, and "what was..." past tense alone
+  not meaning "give the original").
 - **Phase 2 (real fix, consolidation-time)**: extend contradiction
   detection into consolidation itself — when a new day's extraction
   produces a fact that plausibly updates an existing entity attribute or
@@ -284,12 +332,36 @@ in code comments as previously-observed production issues:
   genuinely different facts) before implementation, not something to
   build in the same step as Phase 1.
 
+  **Update (2026-10-01): this mechanism already existed** (built as
+  Phase C sub-problem 2 in `docs/CONSOLIDATION_COMPLETENESS_PLAN.md`,
+  before this plan's own Phase 2 was ever started) — the real Wells Fargo
+  failure wasn't a missing mechanism, it was two bugs in that mechanism's
+  own candidate selection, found and fixed in
+  [PR #69](https://github.com/hupi-dev/hupi/pull/69): a hub entity
+  (`person:user`, present in nearly every summary) crowded out the one
+  summary sharing the actual rare, specific entity
+  (`organization:wells-fargo`) out of a bounded top-5 candidate list, and
+  a backwards "current summary" filter (`supersedes is null`, should be
+  "nothing newer supersedes this one") meant corrected rows were
+  permanently excluded from ever being re-compared while their stale,
+  superseded predecessors kept being re-checked. Both are independently
+  proven fixed via dedicated regression tests. Live end-to-end
+  verification against the real Wells Fargo scope remained inconclusive
+  on its own — the underlying fact's extraction and grounding reliability
+  (see `docs/CONSOLIDATION_COMPLETENESS_PLAN.md`'s own 2026-10-01 update)
+  dominates that specific outcome, independent of whether the right
+  candidate pair gets compared at all. See
+  `docs/CONSOLIDATION_COMPLETENESS_PLAN.md`'s Gap 3 section for the full
+  detail on the underlying mechanism this extends.
+
 ## Sequenced steps
 
 1. Category 1 fix: query-shape detection (recommendation-seeking) +
    widened entity retrieval pass. ✅ shipped, keyword list widened after
    real verification (see Category 1's own Status block) — real,
-   measured improvement (0/5 → 1/5).
+   measured improvement (0/5 → 1/5). **The multi-candidate-ranking
+   follow-up this step originally left open is now also closed (2026-10-01,
+   PR #67) — see Category 1's own Status block for the full update.**
 2. ~~Category 2 fix (1): query-shape detection (ordering/counting) +
    widened/less-diversity-penalized retrieval for that shape.~~
    **Attempted and reverted.** Real verification (`HUPI_DEBUG_FUSION` +
@@ -311,7 +383,8 @@ in code comments as previously-observed production issues:
    re-verified clean, it's also the consolidation-completeness gap, not
    a raw arithmetic error. See the same corrected block.
 5. Category 3 Phase 1: recency-preference prompt addition (reuses
-   existing date labels).
+   existing date labels). **✅ Shipped 2026-10-01, PR #69 — see Category
+   3's own Design section for the full update.**
 6. Category 3 Phase 2 / Category 2 cause (1): consolidation-time
    contradiction detection **and** consolidation completeness (busy-day
    summary dilution) — flagged as needing its own design pass before
@@ -319,7 +392,11 @@ in code comments as previously-observed production issues:
    real, dominant cause behind Category 2 as a whole (causes 1, 2, and 3
    all traced back to it under clean re-verification), not one of three
    equally-weighted causes — raising its priority relative to the
-   original sequencing.
+   original sequencing. **✅ Addressed 2026-10-01: consolidation
+   completeness (busy-day dilution, light-day skipping) fixed in PR #68;
+   the contradiction-detection mechanism's own candidate-selection bugs
+   fixed in PR #69 — see both sections' own Design/Status updates above
+   for what's closed vs. still a known residual.**
 
 Steps 1 and 5 are real, bounded, independently testable changes to
 existing mechanisms (query-shape detection already has a precedent in
@@ -337,10 +414,10 @@ remaining work for this category.
 ## Non-goals for this pass
 
 - Step 6 (consolidation-time contradiction detection and completeness)
-  is not being designed in detail yet — flagged for its own follow-up
-  plan once steps 1 and 5 are verified, not scoped further here. (Steps
-  3 and 4 were investigated and set aside, not verified-then-shipped —
-  see the Sequenced steps entries above.)
+  was not designed in detail in this original pass — addressed 2026-10-01
+  in PR #68/#69, see the Sequenced steps entries above. (Steps 3 and 4
+  were investigated and set aside, not verified-then-shipped — see the
+  Sequenced steps entries above.)
 - Not attempting a general-purpose "resolve any factual contradiction"
   system — scoped specifically to the same-entity/same-topic,
   different-day case actually observed.
