@@ -65,31 +65,44 @@ func ImportScope(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, dir str
 		}
 	}
 
+	// Audits each phase immediately after it commits, not once at the
+	// very end — the same real, confirmed bug and fix shape as
+	// ExportScope just above (docs/CODEBASE_SURVEY_AND_REVIEW.md finding
+	// A10): entities/summaries/episodes each already commit in their own
+	// transaction, so a crash between phases used to leave real,
+	// already-committed imported data with zero audit trail, since the
+	// one combined entry only ever reflected the *end* state. Auditing
+	// per phase means whatever actually committed before a crash is
+	// exactly what gets audited — no more, no less.
+	logPhase := func(phase string, imported, skipped int) error {
+		return dbscope.Run(ctx, db, targetScope, targetScope, func(tx *sql.Tx) error {
+			return audit.Write(ctx, tx, audit.Entry{
+				EventType:      audit.EventImport,
+				Actor:          actor,
+				ActingScope:    targetScope,
+				WorkspaceScope: targetScope,
+				Detail:         map[string]any{"phase": phase, "imported": imported, "skipped": skipped},
+			})
+		})
+	}
+
 	if err := importEntities(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
 		return stats, err
+	}
+	if err := logPhase("entities", stats.EntitiesImported, stats.EntitiesSkipped); err != nil {
+		return stats, fmt.Errorf("hpmf: audit log write for entity import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err)
 	}
 	if err := importSummaries(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
 		return stats, err
 	}
+	if err := logPhase("summaries", stats.SummariesImported, stats.SummariesSkipped); err != nil {
+		return stats, fmt.Errorf("hpmf: audit log write for summary import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err)
+	}
 	if err := importEpisodes(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
 		return stats, err
 	}
-
-	auditErr := dbscope.Run(ctx, db, targetScope, targetScope, func(tx *sql.Tx) error {
-		return audit.Write(ctx, tx, audit.Entry{
-			EventType:      audit.EventImport,
-			Actor:          actor,
-			ActingScope:    targetScope,
-			WorkspaceScope: targetScope,
-			Detail: map[string]any{
-				"episodes_imported": stats.EpisodesImported, "episodes_skipped": stats.EpisodesSkipped,
-				"summaries_imported": stats.SummariesImported, "summaries_skipped": stats.SummariesSkipped,
-				"entities_imported": stats.EntitiesImported, "entities_skipped": stats.EntitiesSkipped,
-			},
-		})
-	})
-	if auditErr != nil {
-		return stats, fmt.Errorf("hpmf: audit log write for import into %s:%s: %w", targetScope.Kind, targetScope.Owner, auditErr)
+	if err := logPhase("episodes", stats.EpisodesImported, stats.EpisodesSkipped); err != nil {
+		return stats, fmt.Errorf("hpmf: audit log write for episode import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err)
 	}
 	return stats, nil
 }
