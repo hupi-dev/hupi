@@ -195,6 +195,20 @@ func (p *Anthropic) StreamChatCompletion(ctx context.Context, req ChatRequest) (
 	go func() {
 		defer close(out)
 		defer resp.Body.Close()
+		// send is a select on ctx.Done() alongside the channel send itself —
+		// see openai_compat.go's identical helper for the real leak this
+		// guards against: an unconditional `out <- chunk` blocks forever
+		// once a caller stops draining (client disconnect, cancelled
+		// context), leaking this goroutine and the response body its
+		// deferred Close() never reaches.
+		send := func(c StreamChunk) bool {
+			select {
+			case out <- c:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		var event string
@@ -213,10 +227,12 @@ func (p *Anthropic) StreamChatCompletion(ctx context.Context, req ChatRequest) (
 						} `json:"delta"`
 					}
 					if err := json.Unmarshal([]byte(payload), &delta); err != nil {
-						out <- StreamChunk{Err: fmt.Errorf("provider %s: decode delta: %w", p.name, err)}
+						send(StreamChunk{Err: fmt.Errorf("provider %s: decode delta: %w", p.name, err)})
 						return
 					}
-					out <- StreamChunk{Delta: delta.Delta.Text}
+					if !send(StreamChunk{Delta: delta.Delta.Text}) {
+						return
+					}
 				case "message_delta":
 					var md struct {
 						Usage struct {
@@ -225,13 +241,13 @@ func (p *Anthropic) StreamChatCompletion(ctx context.Context, req ChatRequest) (
 					}
 					_ = json.Unmarshal([]byte(payload), &md)
 				case "message_stop":
-					out <- StreamChunk{Done: true}
+					send(StreamChunk{Done: true})
 					return
 				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- StreamChunk{Err: fmt.Errorf("provider %s: reading stream: %w", p.name, err)}
+			send(StreamChunk{Err: fmt.Errorf("provider %s: reading stream: %w", p.name, err)})
 		}
 	}()
 	return out, nil
