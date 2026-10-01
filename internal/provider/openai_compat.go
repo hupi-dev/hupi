@@ -82,7 +82,7 @@ type openAIChatResponse struct {
 	Usage Usage `json:"usage"`
 }
 
-func (p *OpenAICompat) do(ctx context.Context, method, path string, body, out any) error {
+func (p *OpenAICompat) do(ctx context.Context, method, path string, idempotent bool, body, out any) error {
 	var buf []byte
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -91,7 +91,7 @@ func (p *OpenAICompat) do(ctx context.Context, method, path string, body, out an
 		}
 		buf = b
 	}
-	status, respBody, err := sendWithRetry(ctx, p.client, p.name, func() (*http.Request, error) {
+	status, respBody, err := sendWithRetry(ctx, p.client, p.name, idempotent, func() (*http.Request, error) {
 		var reader io.Reader
 		if buf != nil {
 			reader = bytes.NewReader(buf)
@@ -128,7 +128,7 @@ func (p *OpenAICompat) ChatCompletion(ctx context.Context, req ChatRequest) (Cha
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 	}
-	if err := p.do(ctx, http.MethodPost, "/chat/completions", body, &raw); err != nil {
+	if err := p.do(ctx, http.MethodPost, "/chat/completions", false, body, &raw); err != nil {
 		return ChatResponse{}, err
 	}
 	if len(raw.Choices) == 0 {
@@ -153,7 +153,7 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 	if err != nil {
 		return nil, fmt.Errorf("provider %s: encode request: %w", p.name, err)
 	}
-	resp, err := connectWithRetry(ctx, p.client, p.name, func() (*http.Request, error) {
+	resp, err := connectWithRetry(ctx, p.client, p.name, false, func() (*http.Request, error) {
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(buf))
 		if err != nil {
 			return nil, fmt.Errorf("provider %s: build request: %w", p.name, err)
@@ -178,6 +178,24 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 	go func() {
 		defer close(out)
 		defer resp.Body.Close()
+		// send is a select on ctx.Done() alongside the channel send itself —
+		// a real, confirmed goroutine/connection leak otherwise: an
+		// unconditional `out <- chunk` blocks forever the moment a caller
+		// stops draining the channel (client disconnect, request context
+		// cancelled mid-stream), since out is unbuffered and nothing is
+		// listening. With no ctx check, this goroutine — and the response
+		// body its deferred Close() never reaches — leaks permanently.
+		// Returning false here lets the read loop below stop scanning
+		// immediately too, instead of continuing to do pointless work for a
+		// caller that's already gone.
+		send := func(c StreamChunk) bool {
+			select {
+			case out <- c:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
@@ -187,7 +205,7 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if payload == "[DONE]" {
-				out <- StreamChunk{Done: true}
+				send(StreamChunk{Done: true})
 				return
 			}
 			var chunk struct {
@@ -199,15 +217,17 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 				Usage *Usage `json:"usage"`
 			}
 			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-				out <- StreamChunk{Err: fmt.Errorf("provider %s: decode stream chunk: %w", p.name, err)}
+				send(StreamChunk{Err: fmt.Errorf("provider %s: decode stream chunk: %w", p.name, err)})
 				return
 			}
 			if len(chunk.Choices) > 0 {
-				out <- StreamChunk{Delta: chunk.Choices[0].Delta.Content, Usage: chunk.Usage}
+				if !send(StreamChunk{Delta: chunk.Choices[0].Delta.Content, Usage: chunk.Usage}) {
+					return
+				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- StreamChunk{Err: fmt.Errorf("provider %s: reading stream: %w", p.name, err)}
+			send(StreamChunk{Err: fmt.Errorf("provider %s: reading stream: %w", p.name, err)})
 		}
 	}()
 	return out, nil
@@ -229,7 +249,7 @@ type openAIEmbedResponse struct {
 func (p *OpenAICompat) Embed(ctx context.Context, req EmbedRequest) (EmbedResponse, error) {
 	var raw openAIEmbedResponse
 	body := openAIEmbedRequest{Model: p.resolveModel(req.Model), Input: req.Input, Dimensions: req.Dimensions}
-	if err := p.do(ctx, http.MethodPost, "/embeddings", body, &raw); err != nil {
+	if err := p.do(ctx, http.MethodPost, "/embeddings", true, body, &raw); err != nil {
 		return EmbedResponse{}, err
 	}
 	vectors := make([][]float32, len(raw.Data))

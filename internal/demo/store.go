@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"hupi/internal/auth"
@@ -52,6 +53,26 @@ var DefaultLimits = Limits{
 	MaxConsolidatesPerSession: 3,
 	MaxSessionsPerDay:         150,
 }
+
+// capWindow is how far back CreateSession counts existing sessions
+// toward MaxSessionsPerDay, and — critically — how long Sweep must keep
+// a demo_sessions row around (even after its guest's real data is long
+// gone) before it stops mattering for that count. A single named
+// constant, not two independently-maintained literals, so the two can
+// never drift apart the way they used to (docs/CODEBASE_SURVEY_AND_REVIEW.md
+// finding A11): this used to be CreateSession's own hardcoded
+// `interval '1 day'` SQL literal, with nothing tying Sweep's actual
+// row-deletion timing to it at all.
+const capWindow = 24 * time.Hour
+
+// createSessionLockKey is the pg_advisory_lock key CreateSession holds
+// for its whole count-check-then-insert sequence (docs/
+// CODEBASE_SURVEY_AND_REVIEW.md finding B21, a separate TOCTOU race from
+// A11 above — A11 fixed what gets counted over time, this fixes
+// atomicity of the check itself). Fixed, not scope-derived, since
+// Limits.MaxSessionsPerDay is one global counter across every guest, not
+// per-scope.
+const createSessionLockKey = "demo_sessions_daily_cap"
 
 var (
 	// ErrSessionInvalid covers "never existed," "expired," and (from
@@ -108,9 +129,37 @@ type Session struct {
 // caller (cmd/hupi-demo) also applies a cheaper, in-memory per-IP limit
 // in front of this one.
 func (s *Store) CreateSession(ctx context.Context) (Session, error) {
+	// The count-check below and the insert later in this function used to
+	// run as two independent, unprotected statements — any number of
+	// concurrent CreateSession calls arriving while count was one under
+	// the cap would all read the same pre-increment count, all pass, and
+	// all insert, overshooting the cap by as much as the concurrency
+	// allowed (finding B21). pg_advisory_lock, same pattern as
+	// internal/rotate.Runner.Start's A8 fix: server-wide, held on a
+	// dedicated connection for this whole function so no other
+	// CreateSession call can even begin its own count check until this
+	// one finishes and unlocks.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return Session{}, fmt.Errorf("demo: acquire connection for daily cap lock: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `select pg_advisory_lock(hashtext($1))`, createSessionLockKey); err != nil {
+		return Session{}, fmt.Errorf("demo: acquire daily cap lock: %w", err)
+	}
+	defer func() {
+		// Deliberately a fresh context, not ctx — an unlock must still run
+		// even if ctx was already cancelled, or this lock leaks for the
+		// rest of the connection's lifetime in the pool.
+		if _, unlockErr := conn.ExecContext(context.Background(), `select pg_advisory_unlock(hashtext($1))`, createSessionLockKey); unlockErr != nil {
+			slog.Error("demo: failed to release daily cap lock", "error", unlockErr)
+		}
+	}()
+
 	var count int
-	if err := s.db.QueryRowContext(ctx,
-		`select count(*) from demo_sessions where created_at > now() - interval '1 day'`,
+	if err := conn.QueryRowContext(ctx,
+		`select count(*) from demo_sessions where created_at > $1`,
+		time.Now().Add(-capWindow),
 	).Scan(&count); err != nil {
 		return Session{}, fmt.Errorf("demo: count today's sessions: %w", err)
 	}
@@ -133,7 +182,7 @@ func (s *Store) CreateSession(ctx context.Context) (Session, error) {
 	}
 	rawToken := "hupi_demo_" + tokenSuffix
 	expiresAt := time.Now().Add(s.limits.SessionTTL)
-	if _, err := s.db.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`insert into demo_sessions (token_hash, guest_user_id, expires_at) values ($1, $2, $3)`,
 		hashToken(rawToken), guestID, expiresAt,
 	); err != nil {
@@ -214,15 +263,43 @@ func (s *Store) ConsolidateNow(ctx context.Context, rawToken string) error {
 	return nil
 }
 
-// Sweep deletes every guest session past its expiry, or past
-// hardBackstopAge regardless of expires_at (a backstop in case TTL logic
-// ever misbehaves), along with everything that guest wrote. Returns how
-// many sessions were swept, for cmd/hupi-demo-sweep's own logging.
+// Sweep runs two independent phases — a real, confirmed fix
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A11) for a bug where they
+// used to be one: deleting a guest's users row (phase 1 below) used to
+// cascade-delete its demo_sessions row in the same instant, so a session
+// stopped counting toward CreateSession's capWindow-based daily cap
+// roughly SessionTTL (3h) after creation, not capWindow (24h) later —
+// letting the real achievable daily session volume run to roughly
+// capWindow/SessionTTL (~8x) the configured limit, since an expired
+// session's "slot" freed up for a new one almost as soon as it was used.
+// schema/0016 changed guest_user_id's foreign key from "on delete
+// cascade" to "on delete set null" specifically so phase 1 can remove a
+// guest's real data without also removing the row that exists purely to
+// be counted.
+//
+// Phase 1 (data cleanup, prompt): every session past its expiry or the
+// hard backstop, whose guest data hasn't already been cleaned up
+// (guest_user_id is not null) — deleteGuest removes the guest's memory
+// content, key, and users row; the demo_sessions row survives with
+// guest_user_id now null.
+//
+// Phase 2 (row cleanup, delayed until capWindow): demo_sessions rows
+// older than capWindow can no longer affect CreateSession's own count
+// regardless of whether phase 1 already ran for them — deleting them
+// here is routine garbage collection of rows that are already
+// irrelevant to the cap, not a privacy-sensitive operation (any real
+// guest data they referenced is long gone by the time a row is this
+// old, since capWindow is always >= the hard backstop in any sane
+// configuration).
+//
+// Returns how many guests had their data cleaned up in phase 1 — the
+// user-visible "did real cleanup happen" count cmd/hupi-demo-sweep logs;
+// phase 2's row count is routine enough not to need its own return value.
 func (s *Store) Sweep(ctx context.Context, hardBackstopAge time.Duration) (int, error) {
 	cutoff := time.Now().Add(-hardBackstopAge)
 	rows, err := s.db.QueryContext(ctx, `
 		select guest_user_id from demo_sessions
-		where expires_at < now() or created_at < $1
+		where guest_user_id is not null and (expires_at < now() or created_at < $1)
 	`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("demo: sweep query: %w", err)
@@ -246,6 +323,11 @@ func (s *Store) Sweep(ctx context.Context, hardBackstopAge time.Duration) (int, 
 			return 0, fmt.Errorf("demo: sweep guest %s: %w", guestID, err)
 		}
 	}
+
+	if _, err := s.db.ExecContext(ctx, `delete from demo_sessions where created_at < $1`, time.Now().Add(-capWindow)); err != nil {
+		return len(guestIDs), fmt.Errorf("demo: sweep phase 2 (row cleanup): %w", err)
+	}
+
 	return len(guestIDs), nil
 }
 
@@ -253,8 +335,10 @@ func (s *Store) Sweep(ctx context.Context, hardBackstopAge time.Duration) (int, 
 // its identity row. episodes/summaries/entities are plain
 // scope_kind/scope_owner text columns, not FK'd to users (scope_owner
 // can name a team instead), so they need explicit deletes; the users row
-// deletion cascades to demo_sessions via its own FK
-// (schema/0014_demo_sessions.sql). Those three tables have row-level
+// deletion nulls out demo_sessions.guest_user_id via its own FK
+// (schema/0016_demo_sessions_decouple_cap_from_cleanup.sql) rather than
+// cascading the session row away — that row survives on purpose, see
+// Sweep's own doc comment. Those three tables have row-level
 // security enabled (schema/0005) and hupi_app is a non-owner role, so
 // the deletes must run inside a dbscope.Run transaction carrying this
 // guest's own scope — the same requirement every other write against

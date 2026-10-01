@@ -380,3 +380,110 @@ func TestReembed_LogRunWritesAuditEntry(t *testing.T) {
 		t.Errorf("detail[rows_reembedded] = %v, want 7", parsed["rows_reembedded"])
 	}
 }
+
+// TestReembed_DecryptWithRetry_RecoversFromPrunedStaleVersion is the real
+// regression test for review finding B19: a reembed batch's initial
+// SELECT reads a row's key_version, then — with real wall-clock time and
+// a real embedding-provider call in between — resolves the key for that
+// captured version. If a concurrent internal/rotate run migrates the row
+// to a new version and an operator immediately prunes the old one in
+// that window, the captured version no longer resolves, even though the
+// row is perfectly readable under its new, current version.
+//
+// This reproduces the DB-visible end state of that exact race directly
+// (rotate+prune already happened; only the stale version number and
+// ciphertext a batch's earlier SELECT would have captured are "left
+// over"), and proves recovery refreshes *both* together: an earlier
+// version of this fix refreshed only the key_version on retry, still
+// decrypting against the original stale ciphertext, which reliably fails
+// (a real AES-GCM auth-tag mismatch) since rotate's migration always
+// re-encrypts a row's ciphertext and bumps its key_version together, in
+// the same transaction.
+func TestReembed_DecryptWithRetry_RecoversFromPrunedStaleVersion(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-reembed-rotate-race"}
+	// scope_keys isn't touched by `cleanup` — this test hardcodes "version
+	// 1" as the stale version throughout, which only holds if seeding
+	// below actually creates a fresh version 1, not whatever version a
+	// previous run of this test left behind as "current".
+	t.Cleanup(func() {
+		cleanup(t, db, scope)
+		db.Exec(`delete from scope_keys where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+	})
+	if _, err := db.Exec(`delete from scope_keys where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner); err != nil {
+		t.Fatalf("clear any leftover scope_keys from a previous run: %v", err)
+	}
+
+	seedSummary(t, ctx, db, keys, scope, "sum_race", "summary race text", "openai:text-embed-2", true)
+
+	// Captured before the simulated rotate below — exactly the stale
+	// ciphertext a real batch's own initial SELECT would have read, which
+	// is no longer decryptable once rotate re-encrypts the row under a
+	// new key version (review finding: resolveKeyForRow previously only
+	// refreshed the key version, not the ciphertext that goes with it).
+	var staleCT []byte
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select summary from summaries where id = $1`, "sum_race").Scan(&staleCT)
+	}); err != nil {
+		t.Fatalf("capture stale ciphertext: %v", err)
+	}
+
+	// Simulate internal/rotate having already migrated this row to a new
+	// key version and pruned the old one. Uses its own KeyStore instance,
+	// not the `keys` used to seed above: in production internal/rotate
+	// and internal/reembed are separate OS processes with independent
+	// in-memory caches (see internal/crypto.KeyStore's own doc comment on
+	// GetOrCreate re-checking the DB rather than trusting a long-lived
+	// cache), so reusing the seeding KeyStore here would mask the race
+	// behind its own cached version-1 Encryptor instead of reproducing
+	// what a real separate reembed process would actually see.
+	rotateSideKeys := crypto.NewKeyStore(db, make([]byte, 32))
+	newVersion, err := rotateSideKeys.CreateNextVersion(ctx, scope)
+	if err != nil {
+		t.Fatalf("create next key version: %v", err)
+	}
+	newEnc, err := rotateSideKeys.GetVersion(ctx, scope, newVersion)
+	if err != nil {
+		t.Fatalf("resolve new key version: %v", err)
+	}
+	// Real rotate migration re-encrypts the ciphertext under the new
+	// version's key, not just bumps the key_version column — do the same
+	// here so the row is actually decryptable once recovered.
+	reencryptedCT, err := newEnc.Encrypt("summary race text")
+	if err != nil {
+		t.Fatalf("re-encrypt under new version: %v", err)
+	}
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `update summaries set key_version = $1, summary = $2 where id = $3`, newVersion, reencryptedCT, "sum_race")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("simulate rotate migrating the row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `delete from scope_keys where scope_kind = $1 and scope_owner = $2 and version = 1`, scope.Kind, scope.Owner); err != nil {
+		t.Fatalf("simulate prune of the old version: %v", err)
+	}
+
+	// A fresh KeyStore — the reembed side's own process, with no cached
+	// version-1 Encryptor to mask the prune.
+	reembedSideKeys := crypto.NewKeyStore(db, make([]byte, 32))
+
+	// Confirm the premise: asking for the now-pruned stale version
+	// directly fails exactly the way the real race produces.
+	if _, err := reembedSideKeys.GetVersion(ctx, scope, 1); !errors.Is(err, crypto.ErrKeyVersionNotFound) {
+		t.Fatalf("GetVersion(1) after prune = %v, want ErrKeyVersionNotFound", err)
+	}
+
+	r := New(db, reembedSideKeys, newFakeEmbedder("openai", "text-embed-3"))
+	// 1 is the stale version, and staleCT the stale ciphertext, a batch's
+	// earlier SELECT would have captured before the simulated rotate+prune
+	// above — exactly what reembedSummaryBatch's own call site passes.
+	texts, err := r.decryptWithRetry(ctx, scope, "summaries", "sum_race", 1, []string{"summary"}, [][]byte{staleCT})
+	if err != nil {
+		t.Fatalf("decryptWithRetry should have recovered by re-reading the row's current key_version and ciphertext, got: %v", err)
+	}
+	if texts[0] != "summary race text" {
+		t.Errorf("decrypted text = %q, want the original seeded text", texts[0])
+	}
+}

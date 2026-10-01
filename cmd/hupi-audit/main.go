@@ -83,6 +83,7 @@ func runQuery(ctx context.Context, db *sql.DB, args []string) error {
 	scopeOwner := fs.String("scope-owner", "", "user id or team id — filters workspace_scope_owner")
 	actor := fs.String("actor", "", "exact actor match")
 	eventType := fs.String("event-type", "", "capture | correct | retrieve | trace | admin_provision | admin_ui_view")
+	targetID := fs.String("target-id", "", "exact target_ref.id match — every event about one summary/entity/episode")
 	since := fs.String("since", "", "RFC3339 timestamp, inclusive lower bound")
 	until := fs.String("until", "", "RFC3339 timestamp, exclusive upper bound")
 	limit := fs.Int("limit", 100, "maximum rows to return")
@@ -95,6 +96,7 @@ func runQuery(ctx context.Context, db *sql.DB, args []string) error {
 		ScopeOwner: *scopeOwner,
 		Actor:      *actor,
 		EventType:  *eventType,
+		TargetID:   *targetID,
 		Limit:      *limit,
 		Ascending:  true,
 	}

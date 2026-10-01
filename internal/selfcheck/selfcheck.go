@@ -29,7 +29,16 @@ type Probe struct {
 	ID              string `yaml:"id"`
 	Query           string `yaml:"query"`
 	ExpectSubstring string `yaml:"expect_substring"` // case-insensitive; empty skips this check
-	ExpectMinGate   string `yaml:"expect_min_gate"`  // "partial" or "full"; empty skips this check
+	ExpectMinGate   string `yaml:"expect_min_gate"`  // "skipped", "partial", or "full"; empty skips this check
+	// ExpectMaxGate is ExpectMinGate's missing ceiling
+	// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding B6): without it, a
+	// probe can only assert a floor on how much retrieval did, never a
+	// limit on how much it should have — so a regression that always
+	// over-matches to "full" for every query, including ones that should
+	// have been skipped or only partially matched, would pass every probe
+	// the previously-shipped probes.yaml could even express. "skipped",
+	// "partial", or "full"; empty skips this check.
+	ExpectMaxGate string `yaml:"expect_max_gate"`
 	// Scope is which scope to probe — a team scope once Tier 3 teams
 	// exist. Zero value defaults to identity.DefaultScope, so existing
 	// probes.yaml files with no scope field keep working unchanged.
@@ -90,6 +99,16 @@ func runOne(ctx context.Context, retriever gateway.Retriever, p Probe) (Result, 
 		}
 		if gateRank[result.Gate] < want {
 			reasons = append(reasons, fmt.Sprintf("gate was %q, wanted at least %q", result.Gate, p.ExpectMinGate))
+		}
+	}
+
+	if p.ExpectMaxGate != "" {
+		want, ok := gateRank[gateway.MemoryGate(p.ExpectMaxGate)]
+		if !ok {
+			return Result{}, fmt.Errorf("probe %s: invalid expect_max_gate %q", p.ID, p.ExpectMaxGate)
+		}
+		if gateRank[result.Gate] > want {
+			reasons = append(reasons, fmt.Sprintf("gate was %q, wanted at most %q", result.Gate, p.ExpectMaxGate))
 		}
 	}
 

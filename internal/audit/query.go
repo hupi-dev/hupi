@@ -18,8 +18,14 @@ import (
 // different defaults each picks.
 type QueryFilter struct {
 	ScopeKind, ScopeOwner, Actor, EventType string
-	Since, Until                            *time.Time
-	Limit                                   int
+	// TargetID filters to events whose target_ref.id exactly matches —
+	// "every event about entity X" (docs/CODEBASE_SURVEY_AND_REVIEW.md
+	// finding B23), served by the expression index
+	// schema/0020_audit_log_target_ref_index.sql adds on
+	// (target_ref->>'id').
+	TargetID     string
+	Since, Until *time.Time
+	Limit        int
 	// Ascending selects `order by ts asc` (cmd/hupi-audit's "query"
 	// subcommand — oldest match first) vs `order by ts desc` (its "tail"
 	// subcommand — most recent N, which the caller then typically reverses
@@ -64,6 +70,9 @@ func Query(ctx context.Context, db *sql.DB, f QueryFilter) ([]LogEntry, error) {
 	}
 	if f.EventType != "" {
 		where = append(where, "event_type = "+arg(f.EventType))
+	}
+	if f.TargetID != "" {
+		where = append(where, "target_ref->>'id' = "+arg(f.TargetID))
 	}
 	if f.Since != nil {
 		where = append(where, "ts >= "+arg(*f.Since))

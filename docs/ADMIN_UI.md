@@ -74,12 +74,16 @@ There's still no session store — every request re-authenticates via
 Basic Auth, which is what lets a stateless audit hook read the
 authenticated operator straight off the request context on every call.
 
-Every view and provisioning action here writes an `audit_log` row
-(`event_type` `admin_ui_view` or `admin_provision`, `actor` = the
-resolved operator's name) — see
-[GAP_CLOSURE_PLAN.md §4.3](GAP_CLOSURE_PLAN.md) and query it with
-`hupi-audit`. `hupi-admin`'s own subcommands log the same way, attributed
-to whoever the `-actor` flag (default `$USER`) says ran them.
+Every detail-page view (a specific user or team) and provisioning action
+here writes an `audit_log` row (`event_type` `admin_ui_view` or
+`admin_provision`, `actor` = the resolved operator's name) — see
+[GAP_CLOSURE_PLAN.md §4.3](GAP_CLOSURE_PLAN.md), whose own stated scope
+is exactly this ("every user/team detail page view"), not every view in
+general. List endpoints (`listUsers`, `listOperators`, `whoami`) write no
+audit row — out of scope by that same §4.3 definition, not an oversight.
+Query the audit log with `hupi-audit`. `hupi-admin`'s own subcommands log
+the same way, attributed to whoever the `-actor` flag (default `$USER`)
+says ran them.
 
 Like `cmd/hupi`, it binds to `127.0.0.1` by default
 (`HUPI_ADMIN_UI_LISTEN_ADDR` to change that) — it is not designed to be

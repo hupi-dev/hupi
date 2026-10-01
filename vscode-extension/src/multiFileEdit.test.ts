@@ -4,6 +4,7 @@ import {
   __getRegisteredCommand,
   __resetVscodeMock,
   __setTextDocuments,
+  __triggerProgressCancellation,
   applyEdit,
   createWebviewPanel,
   executeCommand,
@@ -25,7 +26,7 @@ vi.mock('./oidcAuth', () => ({ promptSignInRequired: vi.fn() }));
 import { createClient, chat, type ChatOptions } from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
-import { parseFileBlocks, registerMultiFileEdit } from './multiFileEdit';
+import { hasTruncatedBlock, parseFileBlocks, registerMultiFileEdit } from './multiFileEdit';
 
 const fakeCfg = { baseUrl: 'http://localhost:8787', model: '', teamId: '', apiKey: 'hupi_sk_test' };
 
@@ -104,6 +105,27 @@ describe('parseFileBlocks', () => {
 
   it('returns an empty array when nothing matches', () => {
     expect(parseFileBlocks('no changes needed')).toEqual([]);
+  });
+});
+
+// Real regression tests for review finding B26: a truncated mid-file
+// response used to be silently indistinguishable from "nothing needed to
+// change."
+describe('hasTruncatedBlock', () => {
+  it('is false when every opened block closed', () => {
+    expect(hasTruncatedBlock('---FILE: a.ts---\nconst a = 1;\n---END---')).toBe(false);
+  });
+
+  it('is false for plain text with no file blocks at all', () => {
+    expect(hasTruncatedBlock('No changes are needed.')).toBe(false);
+  });
+
+  it('is true when a block was opened but never closed (truncated mid-file)', () => {
+    expect(hasTruncatedBlock('---FILE: a.ts---\nconst a = 1;\n---END---\n---FILE: b.ts---\nconst b = ')).toBe(true);
+  });
+
+  it('is true even when the truncated block is the only one', () => {
+    expect(hasTruncatedBlock('---FILE: a.ts---\nconst a = ')).toBe(true);
   });
 });
 
@@ -204,7 +226,50 @@ describe('registerMultiFileEdit', () => {
     await command();
 
     expect(showInformationMessage).toHaveBeenCalledWith('HUPI: no changes proposed.');
+    expect(showWarningMessage).not.toHaveBeenCalledWith(expect.stringContaining('cut off'));
     expect(createWebviewPanel).not.toHaveBeenCalled();
+  });
+
+  // Real regression tests for review finding B26: before this fix, a
+  // truncated mid-file response (hit max_tokens, a dropped connection,
+  // anything) was silently indistinguishable from the model genuinely
+  // having nothing to change.
+  it('warns the response was cut off, instead of "no changes proposed," when a block never closed', async () => {
+    const docA = fakeDoc('a.ts', 'const a = 1;');
+    const command = setUpCommand([docA]);
+    showQuickPick.mockResolvedValue([{ label: 'a.ts', doc: docA }]);
+    showInputBox.mockResolvedValue('rewrite a.ts');
+    vi.mocked(chat).mockResolvedValue('---FILE: a.ts---\nconst a = 2;\n'); // no ---END---
+
+    await command();
+
+    expect(showWarningMessage).toHaveBeenCalledWith(
+      "HUPI: the model's response appears to have been cut off before any file edit finished — no changes could be parsed. Try again, or select fewer/smaller files.",
+    );
+    expect(showInformationMessage).not.toHaveBeenCalledWith('HUPI: no changes proposed.');
+    expect(createWebviewPanel).not.toHaveBeenCalled();
+  });
+
+  it('still opens the review panel for completed blocks, but warns a later block was cut off', async () => {
+    const docA = fakeDoc('a.ts', 'const a = 1;');
+    const docB = fakeDoc('b.ts', 'const b = 1;');
+    const command = setUpCommand([docA, docB]);
+    showQuickPick.mockResolvedValue([
+      { label: 'a.ts', doc: docA },
+      { label: 'b.ts', doc: docB },
+    ]);
+    showInputBox.mockResolvedValue('rewrite both files');
+    vi.mocked(chat).mockResolvedValue(
+      '---FILE: a.ts---\nconst a = 2;\n---END---\n---FILE: b.ts---\nconst b = 2;\n', // b.ts never closed
+    );
+    createWebviewPanel.mockReturnValue(fakeWebviewPanel().panel);
+
+    await command();
+
+    expect(showWarningMessage).toHaveBeenCalledWith(
+      'HUPI: the response was truncated — only 1 file edit could be parsed. Re-run if you expected more files to change.',
+    );
+    expect(createWebviewPanel).toHaveBeenCalled();
   });
 
   it('drops a block whose content is unchanged and one for a file outside the selection', async () => {
@@ -318,5 +383,59 @@ describe('registerMultiFileEdit', () => {
 
     expect(applyEdit).not.toHaveBeenCalled();
     expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it('aborts the in-flight request and shows no error when the user cancels the progress notification (review finding A12)', async () => {
+    const docA = fakeDoc('a.ts', 'const a = 1;');
+    const command = setUpCommand([docA]);
+    showQuickPick.mockResolvedValue([{ label: 'a.ts', doc: docA }]);
+    showInputBox.mockResolvedValue('rename a to x');
+
+    let capturedSignal: AbortSignal | undefined;
+    vi.mocked(chat).mockImplementation(
+      (_client, opts) =>
+        new Promise((_resolve, reject) => {
+          capturedSignal = opts.signal;
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+
+    const run = command();
+    await vi.waitFor(() => expect(chat).toHaveBeenCalled());
+    __triggerProgressCancellation();
+    await run;
+
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(showErrorMessage).not.toHaveBeenCalled();
+    expect(createWebviewPanel).not.toHaveBeenCalled();
+  });
+
+  it('aborts a still-in-flight request when the command is re-triggered before it finishes (review finding A12)', async () => {
+    const docA = fakeDoc('a.ts', 'const a = 1;');
+    const command = setUpCommand([docA]);
+    showQuickPick.mockResolvedValue([{ label: 'a.ts', doc: docA }]);
+    showInputBox.mockResolvedValue('rename a to x');
+
+    let firstSignal: AbortSignal | undefined;
+    vi.mocked(chat).mockImplementationOnce(
+      (_client, opts) =>
+        new Promise((_resolve, reject) => {
+          firstSignal = opts.signal;
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+
+    const firstRun = command();
+    await vi.waitFor(() => expect(chat).toHaveBeenCalledTimes(1));
+
+    vi.mocked(chat).mockResolvedValueOnce('---FILE: a.ts---\nconst x = 1;\n---END---');
+    createWebviewPanel.mockReturnValue(fakeWebviewPanel().panel);
+    const secondRun = command();
+
+    await Promise.all([firstRun, secondRun]);
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(showErrorMessage).not.toHaveBeenCalled();
+    expect(chat).toHaveBeenCalledTimes(2);
   });
 });

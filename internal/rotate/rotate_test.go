@@ -82,8 +82,8 @@ func seed(t *testing.T, ctx context.Context, db *sql.DB, keys *crypto.KeyStore, 
 				return err
 			}
 			_, err := tx.ExecContext(ctx, `
-				insert into summary_key_facts (summary_id, fact, grounded) values ($1, $2, true)
-			`, "sum_"+suffix, factCT)
+				insert into summary_key_facts (summary_id, fact, grounded, scope_kind, scope_owner) values ($1, $2, true, $3, $4)
+			`, "sum_"+suffix, factCT, scope.Kind, scope.Owner)
 			return err
 		})
 		if err != nil {
@@ -119,6 +119,60 @@ func runToCompletion(t *testing.T, ctx context.Context, r *Runner, scope identit
 	}
 	t.Fatal("rotation did not complete within 1000 Continue calls — likely stuck")
 	return total
+}
+
+// TestClampBatchSize is the real regression test for review finding C7:
+// Continue used to trust whatever batchSize a caller requested verbatim,
+// with no ceiling — a large value holds a transaction's real
+// decrypt-then-re-encrypt row locks open for real wall-clock time,
+// directly in tension with this package's own "online, no downtime"
+// design.
+func TestClampBatchSize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"negative", -5, 1},
+		{"zero", 0, 1},
+		{"one", 1, 1},
+		{"typical default", 500, 500},
+		{"exactly the max", MaxBatchSize, MaxBatchSize},
+		{"one over the max", MaxBatchSize + 1, MaxBatchSize},
+		{"wildly oversized", 10_000_000, MaxBatchSize},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := clampBatchSize(c.in); got != c.want {
+				t.Errorf("clampBatchSize(%d) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRotate_ContinueCoercesNonPositiveBatchSizeInsteadOfStalling confirms
+// Continue itself applies the clamp, not just the helper in isolation:
+// without it, batchSize=0 would make every migrate*Batch query's LIMIT 0
+// — zero rows migrated per call, forever, while the cursor still walks
+// episodes->summaries->entities->done and the rotation gets marked
+// "completed" having silently migrated nothing at all.
+func TestRotate_ContinueCoercesNonPositiveBatchSizeInsteadOfStalling(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-rotate-batch-zero"}
+	t.Cleanup(func() { cleanup(t, db, scope) })
+
+	seed(t, ctx, db, keys, scope, 1, "batch-zero")
+
+	r := New(db, keys)
+	if _, _, err := r.Start(ctx, scope, "test"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	total := runToCompletion(t, ctx, r, scope, 0)
+	if total != 3 { // 1 episode + 1 summary + 1 entity
+		t.Errorf("migrated %d rows with batchSize=0, want 3 (coerced to 1 per call, not silently skipped)", total)
+	}
 }
 
 func TestRotate_FullLifecycle(t *testing.T) {
@@ -365,5 +419,79 @@ func TestRotate_StartIsIdempotentWhileInProgress(t *testing.T) {
 	}
 	if current != to1 {
 		t.Errorf("current version = %d after calling Start twice, want it to still be %d (not a third version)", current, to1)
+	}
+}
+
+// TestRotate_ConcurrentStartsAgreeOnOneRotation is a real regression test
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A8): Start's own Status
+// check, CreateNextVersion call, and final key_rotations upsert used to
+// run with no lock tying them together, so two overlapping Start calls
+// for a scope with no existing rotation could each compute a different
+// from/to pair and race to overwrite key_rotations' single row with
+// whichever wrote last — potentially clobbering a rotation another
+// process already started migrating, leaving real rows on a key version
+// neither the surviving row's from_version nor to_version names.
+//
+// Many goroutines call Start simultaneously (released off one barrier
+// channel to maximize overlap) for the same freshly-seeded scope; every
+// one of them must agree on exactly the same (from, to) pair, exactly
+// one key_rotations row must exist afterward, and the scope's current
+// key version must be exactly that rotation's to_version — not a
+// further, orphaned version from a second, uncoordinated Start winning
+// a race.
+func TestRotate_ConcurrentStartsAgreeOnOneRotation(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-rotate-concurrent-start"}
+	t.Cleanup(func() { cleanup(t, db, scope) })
+
+	seed(t, ctx, db, keys, scope, 1, "concurrent-start")
+	r := New(db, keys)
+
+	const n = 20
+	type result struct {
+		from, to int
+		err      error
+	}
+	results := make(chan result, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func() {
+			<-start
+			from, to, err := r.Start(ctx, scope, "test")
+			results <- result{from, to, err}
+		}()
+	}
+	close(start) // release every goroutine at once, maximizing real overlap
+
+	var first result
+	for i := 0; i < n; i++ {
+		res := <-results
+		if res.err != nil {
+			t.Fatalf("Start() call %d: %v", i, res.err)
+		}
+		if i == 0 {
+			first = res
+			continue
+		}
+		if res.from != first.from || res.to != first.to {
+			t.Errorf("Start() call %d = %d->%d, want every concurrent caller to agree on the same rotation %d->%d", i, res.from, res.to, first.from, first.to)
+		}
+	}
+
+	var rowCount int
+	if err := db.QueryRowContext(ctx, `select count(*) from key_rotations where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&rowCount); err != nil {
+		t.Fatalf("count key_rotations rows: %v", err)
+	}
+	if rowCount != 1 {
+		t.Errorf("key_rotations rows = %d, want exactly 1", rowCount)
+	}
+
+	current, err := keys.CurrentVersion(ctx, scope)
+	if err != nil {
+		t.Fatalf("CurrentVersion: %v", err)
+	}
+	if current != first.to {
+		t.Errorf("current version = %d, want exactly %d (the one agreed rotation's to_version) — a higher value means an uncoordinated second Start created an orphaned extra version", current, first.to)
 	}
 }

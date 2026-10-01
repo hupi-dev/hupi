@@ -193,13 +193,27 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		return err
 	}
 
-	// Phase D item 4 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): only a
-	// genuine re-consolidation (not a day's first-ever summary) can leave
-	// an already-existing rollup stale — nothing existed to be stale
-	// before this day had a summary at all.
-	if existingCurrentID != "" {
-		r.refreshRollupsCovering(ctx, scope, "daily", period)
-	}
+	// Phase D item 4 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): always
+	// called, not just on a genuine re-consolidation — a real, confirmed
+	// gap this used to have (docs/CODEBASE_SURVEY_AND_REVIEW.md finding
+	// A7): gating this on existingCurrentID != "" assumed a day's
+	// first-ever summary could never leave an existing rollup stale,
+	// since "nothing existed to be stale before this day had a summary at
+	// all." That reasoning misses a day backfilled out of order (a late
+	// import, a manual `-date` re-run, episodes captured late) *after*
+	// its week's rollup already ran once with this day as a real gap —
+	// weeklyRollup (cmd/hupi-consolidate/rollup.go) always writes the
+	// full 7-day calendar template into source_summary_periods
+	// regardless of which days had a summary at the time, so this day's
+	// period is already listed on that existing rollup even though it
+	// contributed nothing to it yet. refreshRollupsCovering's own query
+	// finds exactly that row via source_summary_periods, and
+	// rollupIsStale correctly flags it stale (this summary's created_at
+	// postdates the rollup's) — the only thing stopping that from ever
+	// running was this guard. refreshRollupsCovering is cheap to call
+	// unconditionally: its own query finds zero rows, and does nothing
+	// further, whenever no rollup actually covers this period yet.
+	r.refreshRollupsCovering(ctx, scope, "daily", period)
 
 	// Phase C sub-problem 2 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
 	// best-effort, after the day's own summary is durably stored — see
@@ -226,9 +240,19 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 	// Runs after the summary is durably stored, not before: a failure
 	// here shouldn't block the summary itself, since summaries are the
 	// primary retrieval surface and this is a supplementary one (see
-	// docs/DESIGN_VS_BUILT.md #3).
+	// docs/DESIGN_VS_BUILT.md #3). This doc comment described the
+	// intended behavior correctly but the code didn't deliver it — a
+	// real, confirmed bug (docs/CODEBASE_SURVEY_AND_REVIEW.md finding
+	// A6): returning the error here propagated all the way to
+	// cmd/hupi-consolidate's scope loop, registering a transient
+	// embedding-provider hiccup as a failed consolidation run even
+	// though the summary, its key facts, and every entity were already
+	// committed, and — because RunDaily returned immediately — silently
+	// skipped the entity-embedding backfill below for that scope/day
+	// too. Logging and continuing, the same pattern this package already
+	// uses for checkCrossPeriodContradictions just above, fixes both.
 	if err := r.embedHighImportanceEpisodes(ctx, scope, date); err != nil {
-		return fmt.Errorf("consolidation: embed high-importance episodes for %s: %w", period, err)
+		slog.Warn("consolidation: embed high-importance episodes failed", "period", period, "error", err)
 	}
 
 	// One-time backfill target for entities that existed before
@@ -238,13 +262,16 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 	// way embedHighImportanceEpisodes does, rather than needing its own
 	// schedule — an entity that's genuinely never touched again stays
 	// substring-matchable only, which is the same as today, not a
-	// regression.
+	// regression. Same best-effort fix as above: finding or embedding the
+	// backfill set is supplementary, not something a transient failure
+	// should register as a failed consolidation run over.
 	missingIDs, err := r.entitiesMissingEmbeddings(ctx, scope)
 	if err != nil {
-		return fmt.Errorf("consolidation: find entities missing embeddings for %s: %w", period, err)
+		slog.Warn("consolidation: find entities missing embeddings failed", "period", period, "error", err)
+		return nil
 	}
 	if err := r.embedEntities(ctx, scope, missingIDs); err != nil {
-		return fmt.Errorf("consolidation: backfill entity embeddings for %s: %w", period, err)
+		slog.Warn("consolidation: backfill entity embeddings failed", "period", period, "error", err)
 	}
 	return nil
 }

@@ -113,6 +113,19 @@ func (r FeedbackRating) valid() bool {
 	}
 }
 
+// ErrFeedbackEpisodeNotFound is returned by Capturer.Capture for a
+// feedback episode (review finding B17) whose RefersTo doesn't name a
+// real episode in the caller's own scope — the feedback endpoint used
+// to build and persist a feedback row pointing at any client-supplied
+// episode id with no verification it belonged to the caller at all,
+// a real (if low-exploitability — ids are high-entropy and unguessable,
+// and nothing reads content back through this path) unvalidated
+// cross-scope reference. handleFeedbackScoped checks for this specific
+// sentinel to answer with 400, not the generic 500 every other Capture
+// failure gets — a bad episode_id is the client's mistake, not an
+// infrastructure failure.
+var ErrFeedbackEpisodeNotFound = errors.New("gateway: episode_id does not refer to an episode in this scope")
+
 // Episode is what gets written to the `episodes` table
 // (schema/0001_init.sql) once a turn completes. Type "feedback" rows use
 // only ID, TS, Type, RefersTo, Rating, and Note — the rest are zero-valued,
@@ -238,6 +251,12 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 		http.Error(w, "messages must not be empty", http.StatusBadRequest)
 		return
 	}
+	for _, m := range req.Messages {
+		if !provider.Role(m.Role).Valid() {
+			http.Error(w, fmt.Sprintf("invalid message role %q: must be one of %s, %s, %s", m.Role, provider.RoleSystem, provider.RoleUser, provider.RoleAssistant), http.StatusBadRequest)
+			return
+		}
+	}
 
 	ctx := r.Context()
 	messages := toProviderMessages(req.Messages)
@@ -245,7 +264,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// Request lifecycle step 2: retrieval, unless the client opted out
 	// (ARCHITECTURE.md § Retrieval Engine, "Per-request opt-out").
 	result := RetrievalResult{Gate: GateSkipped}
-	if r.Header.Get("X-Hupi-Memory") != "off" {
+	if !strings.EqualFold(r.Header.Get("X-Hupi-Memory"), "off") {
 		var err error
 		result, err = h.Retriever.Retrieve(ctx, actingUser, workspace, messages, h.now())
 		if err != nil {
@@ -266,7 +285,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// every debounced typing pause (vscode-extension's
 	// inlineCompletionProvider.ts) — since capture previously ran
 	// unconditionally regardless of how trivial the turn was.
-	skipCapture := r.Header.Get("X-Hupi-Capture") == "off"
+	skipCapture := strings.EqualFold(r.Header.Get("X-Hupi-Capture"), "off")
 
 	// Opt-in citations (docs/ANSWER_CITATIONS_PLAN.md): retrieval already
 	// computes Citations unconditionally (cheap — no extra LLM call, see
@@ -422,6 +441,10 @@ func (h *Handler) handleFeedbackScoped(w http.ResponseWriter, r *http.Request, s
 	// submission *is* the entire point of this request: if it doesn't
 	// persist, the caller needs to know, not get a silent 200.
 	if err := h.Capturer.Capture(r.Context(), scope, ep); err != nil {
+		if errors.Is(err, ErrFeedbackEpisodeNotFound) {
+			http.Error(w, "episode_id does not refer to an episode in this scope", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, fmt.Sprintf("failed to record feedback: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -581,6 +604,7 @@ drain:
 				break drain
 			}
 			if chunk.Err != nil {
+				metrics.ProviderCallErrorsTotal.WithLabelValues(target.Name(), target.Vendor()).Inc()
 				h.log().Error("stream error from provider", "error", chunk.Err)
 				truncated = true
 				break drain

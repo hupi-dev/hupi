@@ -75,9 +75,14 @@ function fakeRequest(prompt: string): vscode.ChatRequest {
 
 function fakeStream() {
   const chunks: string[] = [];
+  const references: unknown[] = [];
   return {
-    stream: { markdown: (text: string) => chunks.push(text) } as unknown as vscode.ChatResponseStream,
+    stream: {
+      markdown: (text: string) => chunks.push(text),
+      reference: (value: unknown) => references.push(value),
+    } as unknown as vscode.ChatResponseStream,
     chunks,
+    references,
   };
 }
 
@@ -225,7 +230,33 @@ describe('registerChatParticipant', () => {
     expect(chunks).toEqual([]);
   });
 
-  it('prefixes the prompt with file context when there is an active editor', async () => {
+  it('prefixes the prompt with file context and shows a reference when there is an active editor', async () => {
+    const fakeUri = { path: 'src/index.ts' };
+    __setActiveTextEditor({
+      document: {
+        getText: () => 'const x = 1;',
+        languageId: 'typescript',
+        uri: fakeUri,
+      },
+      selection: { isEmpty: true },
+    });
+    mockStreamChat(async () => 'reply');
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream, references } = fakeStream();
+
+    await handler(fakeRequest('what does this do?'), { history: [] }, stream, token);
+
+    const content = lastMessages()[0].content;
+    expect(content).toContain('Context — visible file from');
+    expect(content).toContain('const x = 1;');
+    expect(content.endsWith('what does this do?')).toBe(true);
+    // review finding A13 — a visible reference chip, VS Code's own
+    // built-in way of showing "this file informed the answer."
+    expect(references).toEqual([fakeUri]);
+  });
+
+  it('sends no file context and no reference when hupi.fileContext.enabled is false (review finding A13)', async () => {
     __setActiveTextEditor({
       document: {
         getText: () => 'const x = 1;',
@@ -234,17 +265,16 @@ describe('registerChatParticipant', () => {
       },
       selection: { isEmpty: true },
     });
+    __setConfig({ 'fileContext.enabled': false });
     mockStreamChat(async () => 'reply');
     const handler = registerAndGetHandler();
     const { token } = fakeCancellationToken();
-    const { stream } = fakeStream();
+    const { stream, references } = fakeStream();
 
     await handler(fakeRequest('what does this do?'), { history: [] }, stream, token);
 
-    const content = lastMessages()[0].content;
-    expect(content).toContain('Context — visible file from');
-    expect(content).toContain('const x = 1;');
-    expect(content.endsWith('what does this do?')).toBe(true);
+    expect(lastMessages()[0].content).toBe('what does this do?');
+    expect(references).toEqual([]);
   });
 
   it('requests citations on by default (hupi.citations.enabled defaults to true)', async () => {

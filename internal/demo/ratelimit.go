@@ -5,8 +5,11 @@ import (
 	"time"
 )
 
-// IPRateLimiter is a simple in-memory fixed-window limiter on how many
-// demo sessions a single client IP may create per window. It is
+// IPRateLimiter is a simple in-memory sliding-window-log limiter on how
+// many demo sessions a single client IP may create per window — it keeps
+// each IP's individual recent timestamps and filters by a rolling cutoff
+// on every call (see Allow), not a counter that resets at discrete
+// interval boundaries the way a true fixed-window limiter would. It is
 // deliberately not the real cost guard — it resets on process restart
 // and does nothing against an attacker willing to rotate source IPs —
 // that job belongs to Store.CreateSession's database-backed daily cap,

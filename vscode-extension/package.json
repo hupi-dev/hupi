@@ -80,6 +80,11 @@
           "type": "boolean",
           "default": false,
           "description": "Also verify which cited sources the answer actually relied on (vs. merely had available), marking each Source as used or not. Off by default: this costs one extra real LLM call per answer. No effect unless hupi.citations.enabled is also on."
+        },
+        "hupi.fileContext.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Attach up to 8000 characters of your active file (or selection, if any) as context on every chat turn, so HUPI can see what you're looking at. The sidebar shows a 📎 note and the @hupi chat participant shows a file reference whenever this happens. Turn off if you'd rather HUPI only see what you type — e.g. while a sensitive file is open."
         }
       }
     },

@@ -78,11 +78,26 @@ export function createClient(cfg: HupiConfig): OpenAI {
   });
 }
 
+// docs/CODEBASE_SURVEY_AND_REVIEW.md finding B25: the four/five call
+// sites into this module each wire a `signal` for *manual* cancellation
+// (the user clicking Cancel, or a new request superseding an in-flight
+// one), but none of that fires on its own if the gateway accepts the
+// connection and then just hangs — the only ceiling was the openai SDK's
+// own hardcoded 10-minute default (`timeout: 600000` in its core.js).
+// This default gives every call site an app-chosen, scenario-appropriate
+// deadline instead, still overridable per call via `timeoutMs`. The SDK
+// itself races this against any caller-supplied `signal` (see its
+// `fetchWithTimeout`), so manual cancellation and this timeout compose,
+// they don't replace each other.
+export const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
 export interface StreamChatOptions {
   model: string;
   messages: ChatMessage[];
   onDelta: (text: string) => void;
   signal?: AbortSignal;
+  /** Overrides DEFAULT_REQUEST_TIMEOUT_MS for this call. */
+  timeoutMs?: number;
   /** "on" (free, retrieval-level "what was available") or "deep" (one
    *  extra real LLM call, generation-level "what was actually used" —
    *  see internal/gateway/attribution.go). Omit to get today's behavior
@@ -109,6 +124,7 @@ export async function streamChat(client: OpenAI, opts: StreamChatOptions): Promi
     },
     {
       signal: opts.signal,
+      timeout: opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       headers: opts.explain ? { 'X-Hupi-Explain': opts.explain } : undefined,
     },
   );
@@ -134,6 +150,9 @@ export interface ChatOptions {
   model: string;
   messages: ChatMessage[];
   signal?: AbortSignal;
+  /** Overrides DEFAULT_REQUEST_TIMEOUT_MS for this call — see that
+   *  constant's doc comment (finding B25). */
+  timeoutMs?: number;
   /** Caps response length — used by inline completions to keep ghost-text
    *  suggestions short and fast; omitted elsewhere (streamed chat/inline
    *  edit let the model finish naturally). */
@@ -158,7 +177,7 @@ export async function chat(client: OpenAI, opts: ChatOptions): Promise<string> {
       max_tokens: opts.maxTokens,
       temperature: opts.temperature,
     },
-    { signal: opts.signal, headers: opts.headers },
+    { signal: opts.signal, timeout: opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, headers: opts.headers },
   );
   return res.choices[0]?.message?.content ?? '';
 }

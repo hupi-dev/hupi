@@ -89,7 +89,30 @@ func maxClustersPerDay() int {
 // in.
 func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope, period string, sources []textSource, establishedRecord string, knownEntities []knownEntityContext) (ConsolidationOutput, error) {
 	if len(sources) <= clusterEpisodeThreshold {
+		// Below the threshold, clustering is never attempted at all — a
+		// genuinely different case from the three below, not a busy day
+		// the insurance pass exists to protect (review finding B15's own
+		// wording: "whenever the clustering embedding call fails or
+		// collapses to one cluster," not "whenever clustering never ran
+		// because the day was too small").
 		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
+	}
+
+	// singlePassWithInsurance is every one of this function's clustering-
+	// failed-or-collapsed fallbacks (review finding B15): these are
+	// exactly the busy days the insurance pass exists to protect — a day
+	// with enough sources to attempt clustering, where clustering itself
+	// then failed to separate topics into more than one group. Falling
+	// back to a bare single-pass summary with no insurance pass on top
+	// reintroduces the exact pre-clustering dilution behavior this whole
+	// mechanism exists to avoid, on precisely the days it matters most.
+	singlePassWithInsurance := func() (ConsolidationOutput, error) {
+		out, err := r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
+		if err != nil {
+			return ConsolidationOutput{}, err
+		}
+		out.KeyFacts = append(out.KeyFacts, r.extractPerEpisodeFacts(ctx, sources)...)
+		return out, nil
 	}
 
 	texts := make([]string, len(sources))
@@ -98,17 +121,17 @@ func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope,
 	}
 	embedResp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: texts})
 	if err != nil {
-		slog.Warn("consolidation: embed sources for clustering failed, falling back to single-pass summary", "period", period, "error", err)
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
+		slog.Warn("consolidation: embed sources for clustering failed, falling back to single-pass summary plus insurance", "period", period, "error", err)
+		return singlePassWithInsurance()
 	}
 	if len(embedResp.Vectors) != len(sources) {
-		slog.Warn("consolidation: embedder returned mismatched vector count, falling back to single-pass summary", "period", period, "want", len(sources), "got", len(embedResp.Vectors))
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
+		slog.Warn("consolidation: embedder returned mismatched vector count, falling back to single-pass summary plus insurance", "period", period, "want", len(sources), "got", len(embedResp.Vectors))
+		return singlePassWithInsurance()
 	}
 
 	clusters := clusterSources(sources, embedResp.Vectors)
 	if len(clusters) <= 1 {
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
+		return singlePassWithInsurance()
 	}
 
 	slog.Info("consolidation: clustering busy day into topic groups", "period", period, "sources", len(sources), "clusters", len(clusters))

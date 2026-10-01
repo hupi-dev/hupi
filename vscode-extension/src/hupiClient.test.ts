@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { chat, resolveBaseUrl, streamChat, type ChatMessage } from './hupiClient';
+import { DEFAULT_REQUEST_TIMEOUT_MS, chat, resolveBaseUrl, streamChat, type ChatMessage } from './hupiClient';
 
 describe('resolveBaseUrl', () => {
   it('resolves the private route when no teamId is set', () => {
@@ -104,6 +104,31 @@ describe('streamChat', () => {
     expect(create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ headers: undefined }));
   });
 
+  it('sends DEFAULT_REQUEST_TIMEOUT_MS when timeoutMs is omitted, or the override when set (finding B25)', async () => {
+    const create = vi.fn().mockResolvedValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { choices: [{ delta: { content: 'hi' } }] };
+      },
+    });
+    const client = { chat: { completions: { create } } };
+
+    await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+    });
+    expect(create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeout: DEFAULT_REQUEST_TIMEOUT_MS }));
+
+    create.mockClear();
+    await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+      timeoutMs: 15_000,
+    });
+    expect(create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeout: 15_000 }));
+  });
+
   it('calls onCitations once with the terminal chunk’s hupi_citations, and not for chunks without it', async () => {
     const create = vi.fn().mockResolvedValue({
       [Symbol.asyncIterator]: async function* () {
@@ -187,5 +212,17 @@ describe('chat', () => {
     const result = await chat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }] });
 
     expect(result).toBe('');
+  });
+
+  it('sends DEFAULT_REQUEST_TIMEOUT_MS when timeoutMs is omitted, or the override when set (finding B25)', async () => {
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: { content: 'hello' } }] });
+    const client = { chat: { completions: { create } } };
+
+    await chat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }] });
+    expect(create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeout: DEFAULT_REQUEST_TIMEOUT_MS }));
+
+    create.mockClear();
+    await chat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }], timeoutMs: 15_000 });
+    expect(create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeout: 15_000 }));
   });
 });

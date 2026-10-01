@@ -13,6 +13,11 @@ alter table entities  add column embedding_model text;
 -- Gap Closure-style dedicated audit_log event type, same reasoning as
 -- key_rotation getting one in schema/0011: "show me every re-embed ever
 -- run on this scope" is a real question, distinct from a generic write.
+--
+-- Wrapped in an explicit transaction — see schema/0009's comment on why
+-- (the drop and the add are otherwise two separately-autocommitted
+-- statements under psql's defaults).
+begin;
 alter table audit_log drop constraint audit_log_event_type_check;
 alter table audit_log add constraint audit_log_event_type_check
     check (event_type in (
@@ -22,3 +27,4 @@ alter table audit_log add constraint audit_log_event_type_check
         'key_rotation',
         'reembed'
     ));
+commit;

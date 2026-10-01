@@ -204,13 +204,20 @@ func bearerToken(r *http.Request) string {
 
 // clientIP trusts X-Forwarded-For — safe only because this binary is
 // meant to sit behind our own reverse proxy (see docs/INSTALL.md's demo
-// deployment note), never directly internet-facing. Falls back to the
-// raw connection's address when the header is absent, e.g. for local
-// testing without a proxy in front.
+// deployment note), never directly internet-facing, and only for
+// exactly one hop: a proxy appends its own observed address as the
+// rightmost entry rather than replacing whatever value arrived with the
+// request, so the rightmost entry is the only one this single-hop
+// deployment can actually trust (review finding B3) — the leftmost
+// entry is whatever the original client claimed, fully attacker-
+// controlled, and taking it let a client fabricate its own
+// X-Forwarded-For to bypass the per-IP limiter below entirely. Falls
+// back to the raw connection's address when the header is absent, e.g.
+// for local testing without a proxy in front.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			return strings.TrimSpace(xff[:i])
+		if i := strings.LastIndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[i+1:])
 		}
 		return strings.TrimSpace(xff)
 	}

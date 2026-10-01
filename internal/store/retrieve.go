@@ -12,12 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"hupi/internal/audit"
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
@@ -418,6 +420,16 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	queryVector := pgfmt.VectorLiteral(embedResp.Vectors[0])
 
 	queryTerms := tokenize(query)
+	if len(queryTerms) == 0 && keywordSearchEnabled() {
+		// Reaching here means stage 1 passed and the embedding call above
+		// already ran — a real, paid cost — but every keyword-search call
+		// site below gates on len(queryTerms) > 0 too, so none of them
+		// will run this turn. Counted once here, not at each of those
+		// call sites, so this metric reflects turns, not redundant
+		// per-mechanism skips of the same underlying cause (review
+		// finding B13).
+		metrics.KeywordSearchSkippedNoTermsTotal.Inc()
+	}
 
 	// docs/LONGMEMEVAL_ACCURACY_PLAN.md category 1: a recommendation-
 	// seeking question ("what should I bake for..." months after the
@@ -468,7 +480,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		}
 		refs = append(refs, summaryRefs...)
 
-		episodeRefs, err := s.vectorSearchEpisodes(ctx, tx, workspace, queryVector, &sb, &strongHit, &citations)
+		episodeRefs, err := s.vectorSearchEpisodes(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, query, now)
 		if err != nil {
 			return fmt.Errorf("vector search episodes: %w", err)
 		}
@@ -835,15 +847,26 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// Vector search: same overfetch + threshold vectorSearchSummaries
 	// used before this refactor — see summaryOverfetchFactor's own doc
 	// comment for why overfetching matters.
+	//
+	// embedding_model = $5 (or null, for rows predating that column —
+	// see currentEmbeddingModel's own doc comment) excludes vectors from
+	// a *different*, no-longer-active embedding model — docs/CODEBASE_SURVEY_AND_REVIEW.md
+	// finding A3: without this, a cosine distance between a query vector
+	// and a stored vector from a different model is closer to noise than
+	// a real similarity signal, and pgvector's fixed column length means
+	// nothing else catches the mismatch — a provider switch would
+	// silently degrade retrieval until a full hupi-reembed completes,
+	// with no error anywhere.
 	vecRows, err := q.QueryContext(ctx, `
 		select id, summary, key_version, period, (embedding <=> $1::vector) as distance
 		from summaries s
 		where embedding is not null
+		  and (embedding_model is null or embedding_model = $5)
 		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor)
+	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor, s.currentEmbeddingModel())
 	if err != nil {
 		return nil, err
 	}
@@ -952,7 +975,22 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				matches = append(matches, scored{id: doc.id, score: score})
 			}
 		}
-		sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+		// Tie-broken by id, not just score (review finding B10): the
+		// underlying SQL has no ORDER BY, so Postgres makes no guarantee
+		// about the row order docs itself arrives in across repeated runs
+		// — without a deterministic secondary key, which tied-score
+		// candidate survives kwCap below (and ultimately maxResults) could
+		// vary run-to-run with identical data, a real reproducibility risk
+		// for a project that leans heavily on exact before/after benchmark
+		// comparisons. Breaking ties by id makes the final order fully
+		// deterministic regardless of what order docs arrived in, without
+		// needing to also add an ORDER BY to the query itself.
+		sort.Slice(matches, func(i, j int) bool {
+			if matches[i].score != matches[j].score {
+				return matches[i].score > matches[j].score
+			}
+			return matches[i].id < matches[j].id
+		})
 		kwCap := maxResults * summaryOverfetchFactor
 		if len(matches) > kwCap {
 			matches = matches[:kwCap]
@@ -1124,12 +1162,25 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// charity-events LongMemEval case. Writing every picked summary's
 	// guarantee first, before any summary's depth, means a global
 	// truncateToBudget cut (still the final backstop) can only ever
-	// land on depth, never on a guarantee that hasn't been written yet.
+	// land on depth, never on a guarantee that hasn't been written yet
+	// — never land on one that's already been written, that is: see
+	// guaranteeBudgetPerSummary's own doc comment for a second, real
+	// regression this same "write every guarantee first" design still
+	// had, now also fixed — several picks' guarantee lines, with no
+	// per-summary cap, could together exhaust the budget before a
+	// lower-ranked pick's own guarantee was ever reached.
 	//
 	// Pass 2 doesn't repeat "related memory (summary %s...)" — just the
 	// depth content itself — so each summary's id still appears exactly
 	// once in the assembled context
 	// (TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms).
+	//
+	// perSummaryGuaranteeCap bounds each pick's own guarantee line to a
+	// fair share of the budget (guaranteeBudgetPerSummary's own doc
+	// comment has the real regression this fixes) — computed once per
+	// call from how many summaries were actually picked, not a flat
+	// constant, since "fair" depends on how many are competing for room.
+	perSummaryGuaranteeCap := guaranteeBudgetPerSummary(len(picks))
 	for _, p := range picks {
 		// dateLabel hands the answering model an already-computed
 		// relative date, not just a raw one (docs/CONSOLIDATION_COMPLETENESS_PLAN.md
@@ -1144,12 +1195,41 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				dateLabel = fmt.Sprintf(", dated %s (%s)", p.c.period, rel)
 			}
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s%s): %s", p.c.id, dateLabel, p.label, guaranteedFact(p.c.text, p.facts, queryTerms)))
+		// factCap reserves whatever the prefix actually costs for *this*
+		// summary (its own id/date-label/match-type length all vary) out
+		// of the shared per-summary line cap, then guarantees at least
+		// guaranteeMinFactChars for the fact itself regardless — see
+		// guaranteeBudgetPerSummary's own doc comment for why capping
+		// only the fact text, and ignoring real prefix cost, was the bug
+		// in this fix's first version. Uses hardTruncate, not
+		// truncateToBudget — a second real miscalculation found during
+		// re-verification: truncateToBudget's own "...[truncated to fit
+		// context budget]" marker (37 chars) was itself being added once
+		// per picked summary, and with 9 real picks that overhead alone
+		// was enough to still exceed the budget before the lowest-ranked
+		// one was reached, even after this cap. That marker earns its
+		// cost once, at the final whole-context cut, where it tells the
+		// model there was more it isn't seeing — repeating it on every
+		// individual guarantee line adds the same cost 9 times over for
+		// an expected, minor per-line shortening, not a meaningful signal.
+		prefix := fmt.Sprintf("\nrelated memory (summary %s%s%s): ", p.c.id, dateLabel, p.label)
+		factCap := perSummaryGuaranteeCap - len(prefix)
+		if factCap < guaranteeMinFactChars {
+			factCap = guaranteeMinFactChars
+		}
+		guarantee := hardTruncate(guaranteedFact(p.c.text, p.facts, queryTerms), factCap)
+		sb.WriteString(prefix + guarantee)
 	}
 
 	var refs []identity.Ref
 	for _, p := range picks {
-		sb.WriteString("\n" + depthText(p.c.text, p.facts, queryTerms))
+		// summaryDepthCap bounds the whole depth block's length, not its
+		// content — depthText itself still builds the complete picture
+		// (TestDepthTextIncludesProseAndAllFacts), capped here, at the
+		// write site, the same way pass 1 caps guaranteedFact's result
+		// rather than capping inside it. See summaryDepthCap's own doc
+		// comment for the real regression this exists to fix.
+		sb.WriteString("\n" + hardTruncate(depthText(p.c.text, p.facts, queryTerms), summaryDepthCap))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id},
@@ -1326,6 +1406,77 @@ func guaranteedFact(prose string, facts []string, queryTerms []string) string {
 // guarantee, not meant to substitute for real prose depth.
 const guaranteedProseFallbackChars = 300
 
+// guaranteeSectionFraction/guaranteeMinPerSummary bound how much of the
+// total context budget a single picked summary's guarantee line
+// (fusedSearchSummaries' pass 1, written before any pass-2 depth) is
+// allowed to cost — a real, confirmed production regression, not a
+// hypothetical. Pass 1's own doc comment explains why a guarantee is
+// written before any depth: so the final truncateToBudget backstop can
+// only ever land on depth, never on a guarantee. That protection has a
+// real blind spot once *several* summaries are picked for the same
+// question and nothing caps each one's share: with no per-summary cap,
+// the guarantee lines written first (highest relevance first) can,
+// together, consume the *entire* budget before a lower-ranked-but-still-
+// correctly-matched summary's own guarantee is ever reached — not cut
+// off mid-line by truncateToBudget, simply never written in time to
+// survive it.
+//
+// Real-verified against gpt4_e072b769 ("how many weeks ago did I start
+// using Ibotta") — a real regression introduced by guaranteedFact's own
+// fix (above): 9 summaries matched this generic query, the Ibotta
+// summary's fused score was the lowest of the 9, and its guarantee line
+// sat past the real production-default 2000-char budget. Confirmed via
+// a temporary budget override that the fact was present and correct the
+// whole time ("3 weeks ago") — just unreachable in write order, not
+// missing. guaranteedFact's fix (picking a real relevant fact on a tie
+// instead of an arbitrary one) made this worse without changing the
+// underlying architecture: a genuinely relevant fact is sometimes longer
+// text than the arbitrary facts[0] fallback it replaced, which shifted
+// how many characters several higher-ranked summaries' guarantee lines
+// cost, enough to push Ibotta's past the cutoff where it used to just
+// barely fit.
+//
+// The fix: cap each picked summary's whole guarantee *line* — not just
+// its fact text — to a fair share of the budget, computed from how many
+// summaries were actually picked. With few picks, the share is generous
+// — most real facts (short, atomic, per summarySystemPrompt's own
+// instruction) are well under it, so this changes nothing for the
+// common case. With many picks, each gets a smaller but *guaranteed*
+// slice instead of a first-come-first-served race for the whole budget.
+//
+// A first version of this fix capped only the fact text returned by
+// guaranteedFact, not the "related memory (summary <id>, dated ...,
+// ... match): " prefix wrapped around it in fusedSearchSummaries' own
+// write loop — and real re-verification showed it didn't actually fix
+// the Ibotta regression at all. Summary IDs in this real test data run
+// ~130-160 characters on their own; 9 picks' worth of *prefixes alone*
+// already exceeded the 2000-char default budget before any fact text
+// was even considered, so capping only the fact text left the real
+// bottleneck untouched. guaranteeMinPerSummary is sized to comfortably
+// cover a realistic prefix (measured against this real data) plus a
+// real short fact, not reverse-engineered to one specific ID format —
+// the write loop separately reserves guaranteeMinFactChars for the fact
+// itself regardless of how long a given summary's own prefix happens to
+// be, so an unusually long ID in some other deployment can't silently
+// crowd the fact out to zero the same way.
+const guaranteeSectionFraction = 0.5
+const guaranteeMinPerSummary = 220
+const guaranteeMinFactChars = 60
+
+// guaranteeBudgetPerSummary computes the per-summary *line* cap
+// described above (prefix + fact together). Pure arithmetic — see that
+// constant's doc comment for the real regression this exists to fix.
+func guaranteeBudgetPerSummary(numPicks int) int {
+	if numPicks <= 0 {
+		return 0
+	}
+	share := int(float64(contextCharBudget())*guaranteeSectionFraction) / numPicks
+	if share < guaranteeMinPerSummary {
+		return guaranteeMinPerSummary
+	}
+	return share
+}
+
 // proseDepthCap bounds only a summary's full PROSE contribution to its
 // depth section — key facts (writeKeyFacts) are deliberately NOT capped
 // here. Facts are already engineered to be short and atomic
@@ -1342,14 +1493,54 @@ const guaranteedProseFallbackChars = 300
 // that crowded it out.
 const proseDepthCap = 500
 
+// summaryDepthCap bounds the *whole* depth block (facts + prose
+// together) that fusedSearchSummaries' pass 2 writes per picked summary
+// — applied at the write site via hardTruncate, not inside depthText
+// itself (see that function's own doc comment for why).
+//
+// depthText's facts were previously left fully uncapped on purpose —
+// "20+ of them, each individually cheap" — and an earlier version of
+// this cap (capping facts and prose together, back when facts were
+// still written in raw insertion order) was tried and reverted for the
+// charity-events case: prose alone exhausted that combined cap before
+// ever reaching a fact, since nothing yet ranked facts by relevance.
+// That's no longer the shape of the problem. Real-verified against
+// `60bf93ed` ("how many days did my backpack take to arrive"): a single
+// picked summary legitimately had **120** key facts — a LongMemEval
+// `_abs` haystack artifact cramming many sessions' worth of unrelated
+// content onto one calendar day — and depthText's own uncapped output
+// for just that one summary ran to several thousand characters,
+// consuming the entire default 2000-char budget by itself. The fact the
+// question actually needed (the purchase date) was never extracted as
+// a summary key_fact at all and only survived in raw episode text,
+// appended to context *after* every summary — which never got a chance
+// to contribute anything, not because the fact was missing, but because
+// one summary's own depth section alone ate the whole budget. Confirmed
+// via a budget override: the episode text is there, and the question
+// answers correctly once nothing is truncated away first.
+//
+// Safe to reintroduce now, where it wasn't before: writeKeyFacts already
+// writes facts in descending-relevance order (rankFactsByRelevance), so
+// a tail cut here only ever drops the least-relevant facts, the same
+// "least valuable content, as late as possible" property proseDepthCap
+// already relies on — not an arbitrary cut into "whichever facts
+// happened to be first." A flat per-summary constant, not split fairly
+// across multiple picks the way guaranteeBudgetPerSummary is: depth is
+// deliberately secondary "insurance" content (guaranteedFact's own doc
+// comment), not the primary mechanism any already-fixed case depends
+// on, so a simple, uniform bound is enough here without that added
+// complexity.
+const summaryDepthCap = 700
+
 // depthText is every picked summary's "extra depth," written in pass 2
 // of fusedSearchSummaries' two-pass render (see that function's own doc
 // comment) — every key fact, uncapped, followed by a capped prose
-// snippet. The eventual global truncateToBudget call is still the final
-// backstop if the combined depth across every picked summary is too
-// large; this function's job is only to make sure that cut lands on the
-// least valuable content (verbose prose) as late as possible, not on a
-// fact several bullets into a busy day's summary.
+// snippet. summaryDepthCap (applied by the caller, not here — see its
+// own doc comment) is the real backstop against one summary's depth
+// consuming the whole context budget; the eventual global
+// truncateToBudget call is the final-final backstop if even multiple
+// capped depth sections, episodes, and everything else together still
+// exceed it.
 func depthText(prose string, facts []string, queryTerms []string) string {
 	var sb strings.Builder
 	writeKeyFacts(&sb, facts, queryTerms)
@@ -1468,11 +1659,12 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 		select id, name, attributes, key_version, last_updated, (embedding <=> $1::vector) as distance
 		from entities
 		where embedding is not null and kind != 'self_model'
+		  and (embedding_model is null or embedding_model = $6)
 		  and not (id = any($2::text[]))
 		  and scope_kind = $3 and scope_owner = $4
 		order by embedding <=> $1::vector
 		limit $5
-	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxResults)
+	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxResults, s.currentEmbeddingModel())
 	if err != nil {
 		return nil, err
 	}
@@ -1533,6 +1725,110 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 	return refs, rows.Err()
 }
 
+// episodeExchangeCap bounds each matched episode's raw USER/ASSISTANT
+// exchange, written fully uncapped before this fix — real-verified
+// necessary alongside summaryDepthCap, not a standalone guess: fixing
+// summaryDepthCap alone (so a busy summary's own depth section stops
+// consuming the whole budget) still wasn't enough for `60bf93ed`. A real
+// "episode" here turned out to be an entire multi-turn session, not a
+// single exchange — `hupi-trace` on the one episode this question
+// matched showed several back-and-forth turns about an unrelated
+// wireless mouse, with the actual needed detail (a backpack's purchase
+// date) mentioned in passing partway through a later turn, ~2000+
+// characters into that one episode's own text. A plain head-truncate
+// (this constant's first version) can never reach that — the cap would
+// have to be nearly as large as the whole episode to work at all,
+// defeating the point of capping. See centeredExcerpt below for the
+// real fix: center the kept window on a matched query term instead of
+// always keeping the start.
+const episodeExchangeCap = 400
+
+// centeredExcerpt returns a window of text around the densest cluster of
+// matched query terms, instead of always keeping the text's head the
+// way hardTruncate does — the real fix episodeExchangeCap's own doc
+// comment describes. Falls back to a plain head-truncate when no query
+// term is found in the text at all, which is still strictly better than
+// returning nothing.
+//
+// Centers on the densest cluster, not just the first occurrence of any
+// term — a real, measured correction found during re-verification
+// against the `60bf93ed` case. An earlier version centered on the
+// *first* matched term's position, which picked a passing, less
+// relevant "backpack" mention early in the text; the passage that
+// actually answers the question ("I bought it from Amazon on 1/15")
+// sits near a denser cluster of several query terms together (laptop,
+// backpack, *bought*) later on. Scoring every occurrence by how many
+// other occurrences fall within its own candidate window correctly
+// favors that denser, more relevant cluster.
+func centeredExcerpt(text string, queryTerms []string, maxChars int) string {
+	if len(text) <= maxChars {
+		return text
+	}
+	lower := strings.ToLower(text)
+	var positions []int
+	for _, t := range queryTerms {
+		if t == "" {
+			continue
+		}
+		for i := 0; i+len(t) <= len(lower); {
+			idx := strings.Index(lower[i:], t)
+			if idx < 0 {
+				break
+			}
+			positions = append(positions, i+idx)
+			i += idx + len(t)
+		}
+	}
+	if len(positions) == 0 {
+		return hardTruncate(text, maxChars)
+	}
+	// Center on whichever occurrence's own window (±half) covers the
+	// most other occurrences, not just the first one found — real-
+	// verified necessary against the backpack case: "backpack" alone
+	// appears earlier in a passing, less relevant remark, while the
+	// passage that actually answers the question ("I bought it from
+	// Amazon on 1/15") sits near a denser cluster of several query terms
+	// together (laptop, backpack, bought) — the first-occurrence version
+	// of this function centered on the earlier, sparser mention and
+	// still missed the detail needed.
+	half := maxChars / 2
+	best := positions[0]
+	bestCount := -1
+	for _, p := range positions {
+		count := 0
+		for _, q := range positions {
+			if q >= p-half && q <= p+half {
+				count++
+			}
+		}
+		if count > bestCount {
+			bestCount = count
+			best = p
+		}
+	}
+	pos := best
+	start := pos - maxChars/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxChars
+	if end > len(text) {
+		end = len(text)
+		start = end - maxChars
+		if start < 0 {
+			start = 0
+		}
+	}
+	excerpt := text[start:end]
+	if start > 0 {
+		excerpt = "...[excerpt] " + excerpt
+	}
+	if end < len(text) {
+		excerpt += " ...[truncated]"
+	}
+	return excerpt
+}
+
 // vectorSearchEpisodes is vectorSearchSummaries' sibling over `episodes`
 // instead of `summaries` — the "high-importance episodes" half of
 // ARCHITECTURE.md's retrieval engine, closing docs/DESIGN_VS_BUILT.md #3.
@@ -1544,27 +1840,34 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 // episodeVectorSimilarityThreshold, not vectorSimilarityThreshold — see
 // that constant's own doc comment for the real measurement showing they
 // need to differ.
-func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
+func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, query string, now time.Time) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, input_text, output_text, key_version, (embedding <=> $1::vector) as distance
+		select id, input_text, output_text, key_version, ts, (embedding <=> $1::vector) as distance
 		from episodes
 		where embedding is not null and type = 'interaction'
+		  and (embedding_model is null or embedding_model = $5)
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxVectorResults())
+	`, queryVector, scope.Kind, scope.Owner, maxVectorResults(), s.currentEmbeddingModel())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var refs []identity.Ref
+	type match struct {
+		id            string
+		input, output string
+		ts            time.Time
+	}
+	var matches []match
 	for rows.Next() {
 		var id string
 		var inputCT, outputCT []byte
 		var keyVersion int
+		var ts time.Time
 		var distance float64
-		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion, &distance); err != nil {
+		if err := rows.Scan(&id, &inputCT, &outputCT, &keyVersion, &ts, &distance); err != nil {
 			return nil, err
 		}
 		similarity := 1 - distance
@@ -1583,15 +1886,54 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 		if err != nil {
 			return nil, err
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s): USER: %s ASSISTANT: %s", id, input, output))
-		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: id})
+		matches = append(matches, match{id: id, input: input, output: output, ts: ts})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Same answer-time-reasoning hard filter keywordSearchEpisodes applies
+	// to this exact same table (docs/CONSOLIDATION_COMPLETENESS_PLAN.md,
+	// docs/CODEBASE_SURVEY_AND_REVIEW.md finding B7): a raw episode
+	// vector-matched directly (bypassing consolidation/summaries and
+	// keywordSearchEpisodes' own equivalent fix entirely — a semantic
+	// match needs no literal keyword hit) can surface a temporally-wrong
+	// exchange verbatim for a "last month"-shaped query, the one retrieval
+	// path into this table that had no such filter at all. Same backoff
+	// behavior as keywordSearchEpisodes/fusedSearchSummaries (not
+	// vectorSearchEntities' own deliberate no-backoff choice): excludes
+	// only matches with a confidently-resolved timeframe whose own exact
+	// ts clearly falls outside it, backing off to the unfiltered set if
+	// excluding would leave nothing.
+	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
+	if hasTimeframe {
+		kept := make([]match, 0, len(matches))
+		for _, m := range matches {
+			if m.ts.Before(tfStart) || !m.ts.Before(tfEnd) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		if len(kept) > 0 {
+			matches = kept
+		}
+	}
+
+	var refs []identity.Ref
+	for _, m := range matches {
+		dateLabel := ""
+		if rel := relativeDateLabel(m.ts, now); rel != "" {
+			dateLabel = fmt.Sprintf(", dated %s (%s)", m.ts.Format("2006-01-02"), rel)
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s%s): %s", m.id, dateLabel, centeredExcerpt(fmt.Sprintf("USER: %s ASSISTANT: %s", m.input, m.output), queryTerms, episodeExchangeCap)))
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m.id})
 		*citations = append(*citations, gateway.Citation{
-			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: id},
-			Snippet: fmt.Sprintf("USER: %s ASSISTANT: %s", input, output),
+			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m.id},
+			Snippet: fmt.Sprintf("USER: %s ASSISTANT: %s", m.input, m.output),
 		})
 		*strongHit = true
 	}
-	return refs, rows.Err()
+	return refs, nil
 }
 
 // keywordSearchEnabled is the installing admin's own escape hatch for
@@ -1630,16 +1972,23 @@ func keywordSearchEnabled() bool {
 	return os.Getenv("HUPI_ENABLE_KEYWORD_SEARCH") != "false"
 }
 
-// graphWalkEnabled is the same kind of admin escape hatch
-// keywordSearchEnabled is, for the same reason: docs/ENTITY_RELATIONSHIPS_PLAN.md
-// §6 calls for this to have "its own hop-limit and token budget," and an
-// off switch is the other half of that — defaults to enabled since
-// graphWalkMaxHops/graphWalkMaxResults already bound the cost tightly,
-// but a deployment with an unusually dense relationship graph is exactly
-// the kind of "informed minority" case keywordSearchEnabled's own
-// reasoning already covers.
+// graphWalkEnabled defaults to *disabled* (review finding B12) — the
+// inverse of keywordSearchEnabled's own opt-out posture, and
+// deliberately so: three independent measurements (docs/BENCHMARK_IMPROVEMENT_PLAN.md
+// step 2 — a stale v3 ablation, the EvalMem integration's 0/32
+// firing-rate finding, and a real LoCoMo category-1 on-vs-off re-check,
+// 106 questions, 35.3% vs. 35.4%, "a settled finding, not an open
+// question") all independently agree this mechanism contributes nothing
+// measurable on either public benchmark, while still spending real,
+// bounded-but-nonzero cost competing for the same fixed context budget
+// findings A4/A5 show is a real, recurring bottleneck — a cost with no
+// offsetting, demonstrated benefit is the wrong default. Opt in with
+// HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK=true for a deployment whose own
+// relationship graph is denser or more load-bearing than either
+// benchmark's — graphWalkMaxHops/graphWalkMaxResults already bound the
+// cost tightly for exactly that "informed minority" case.
 func graphWalkEnabled() bool {
-	return os.Getenv("HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK") != "false"
+	return os.Getenv("HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK") == "true"
 }
 
 // contextCharBudget is the same "crude character stand-in for a real
@@ -2038,7 +2387,7 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 		if rel := relativeDateLabel(ex.ts, now); rel != "" {
 			dateLabel = fmt.Sprintf(", dated %s (%s)", ex.ts.Format("2006-01-02"), rel)
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s%s, keyword match): USER: %s ASSISTANT: %s", m, dateLabel, ex.input, ex.output))
+		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s%s, keyword match): %s", m, dateLabel, centeredExcerpt(fmt.Sprintf("USER: %s ASSISTANT: %s", ex.input, ex.output), queryTerms, episodeExchangeCap)))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m},
@@ -2176,7 +2525,18 @@ func rankBM25(docs []bm25Document, queryTerms []string) []string {
 			matches = append(matches, scored{id: doc.id, score: score})
 		}
 	}
-	sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+	// Tie-broken by id, not just score (review finding B10) — see
+	// fusedSearchSummaries' own identical fix for the full reasoning:
+	// the underlying SQL has no ORDER BY, so without a deterministic
+	// secondary key here, which tied-score candidate survives the
+	// maxVectorResults cap below could vary run-to-run with identical
+	// data.
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		return matches[i].id < matches[j].id
+	})
 	if len(matches) > maxVectorResults() {
 		matches = matches[:maxVectorResults()]
 	}
@@ -2188,11 +2548,34 @@ func rankBM25(docs []bm25Document, queryTerms []string) []string {
 	return ids
 }
 
+// truncateToBudget and hardTruncate both count and cut by rune, not byte
+// (review finding B9): maxChars has always meant character count, by
+// name and by every caller's own intent, but raw byte-slicing (s[:n])
+// can land in the middle of a multi-byte UTF-8 sequence for any
+// non-ASCII content — an accented letter, CJK text, an emoji — producing
+// invalid UTF-8 at the cut point. Identical to the old byte-based
+// behavior for pure ASCII text (every rune is one byte there), the
+// common case this went uncaught in.
 func truncateToBudget(s string, maxChars int) string {
-	if len(s) <= maxChars {
+	if utf8.RuneCountInString(s) <= maxChars {
 		return s
 	}
-	return s[:maxChars] + "\n...[truncated to fit context budget]"
+	return string([]rune(s)[:maxChars]) + "\n...[truncated to fit context budget]"
+}
+
+// hardTruncate is truncateToBudget without the "...[truncated]" marker
+// — used by fusedSearchSummaries' per-summary guarantee-line cap
+// (guaranteeBudgetPerSummary's own doc comment), where the marker's own
+// 37 characters, repeated once per picked summary, was itself enough to
+// blow the fair per-summary budget this cap exists to enforce. The
+// marker is worth its cost exactly once, at the final whole-context
+// truncateToBudget call — telling the model there was more it isn't
+// seeing — not on every individual, already-expected minor shortening.
+func hardTruncate(s string, maxChars int) string {
+	if utf8.RuneCountInString(s) <= maxChars {
+		return s
+	}
+	return string([]rune(s)[:maxChars])
 }
 
 func lastUserMessage(msgs []provider.Message) string {

@@ -16,6 +16,21 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
+// Valid reports whether r is one of the roles above — used by
+// internal/gateway to reject a message with an unrecognized role at
+// request-parse time (docs/CODEBASE_SURVEY_AND_REVIEW.md's C-section:
+// previously an invalid role just got forwarded to the vendor API
+// unchanged, surfacing as an opaque upstream error later instead of a
+// clear 400 here).
+func (r Role) Valid() bool {
+	switch r {
+	case RoleSystem, RoleUser, RoleAssistant:
+		return true
+	default:
+		return false
+	}
+}
+
 type Message struct {
 	Role    Role   `json:"role"`
 	Content string `json:"content"`

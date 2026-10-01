@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,6 +29,13 @@ type ImportStats struct {
 	EpisodesImported, EpisodesSkipped   int
 	SummariesImported, SummariesSkipped int
 	EntitiesImported, EntitiesSkipped   int
+
+	// SummariesWithDanglingSupersedes counts imported summary versions
+	// whose `supersedes` pointed at a predecessor not present in the
+	// bundle (e.g. a partial/filtered export) — the row is still
+	// imported, but as an unlinked version rather than a correction, so
+	// this is the only record that lineage was lost (see importSummaries).
+	SummariesWithDanglingSupersedes int
 }
 
 // ImportScope loads one scope's exported directory (dir — an absolute
@@ -65,33 +73,67 @@ func ImportScope(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, dir str
 		}
 	}
 
-	if err := importEntities(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
-		return stats, err
-	}
-	if err := importSummaries(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
-		return stats, err
-	}
-	if err := importEpisodes(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
-		return stats, err
+	// Audits each phase immediately after it commits, not once at the
+	// very end — the same real, confirmed bug and fix shape as
+	// ExportScope just above (docs/CODEBASE_SURVEY_AND_REVIEW.md finding
+	// A10): entities/summaries/episodes each already commit in their own
+	// transaction, so a crash between phases used to leave real,
+	// already-committed imported data with zero audit trail, since the
+	// one combined entry only ever reflected the *end* state. Auditing
+	// per phase means whatever actually committed before a crash is
+	// exactly what gets audited — no more, no less.
+	logPhase := func(phase string, imported, skipped int, extra map[string]any) error {
+		detail := map[string]any{"phase": phase, "imported": imported, "skipped": skipped}
+		for k, v := range extra {
+			detail[k] = v
+		}
+		return dbscope.Run(ctx, db, targetScope, targetScope, func(tx *sql.Tx) error {
+			return audit.Write(ctx, tx, audit.Entry{
+				EventType:      audit.EventImport,
+				Actor:          actor,
+				ActingScope:    targetScope,
+				WorkspaceScope: targetScope,
+				Detail:         detail,
+			})
+		})
 	}
 
-	auditErr := dbscope.Run(ctx, db, targetScope, targetScope, func(tx *sql.Tx) error {
-		return audit.Write(ctx, tx, audit.Entry{
-			EventType:      audit.EventImport,
-			Actor:          actor,
-			ActingScope:    targetScope,
-			WorkspaceScope: targetScope,
-			Detail: map[string]any{
-				"episodes_imported": stats.EpisodesImported, "episodes_skipped": stats.EpisodesSkipped,
-				"summaries_imported": stats.SummariesImported, "summaries_skipped": stats.SummariesSkipped,
-				"entities_imported": stats.EntitiesImported, "entities_skipped": stats.EntitiesSkipped,
-			},
-		})
-	})
-	if auditErr != nil {
-		return stats, fmt.Errorf("hpmf: audit log write for import into %s:%s: %w", targetScope.Kind, targetScope.Owner, auditErr)
+	if err := importEntities(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
+		return stats, wrapPartialImportFailure(err, targetScope, merge)
+	}
+	if err := logPhase("entities", stats.EntitiesImported, stats.EntitiesSkipped, nil); err != nil {
+		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for entity import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
+	}
+	if err := importSummaries(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
+		return stats, wrapPartialImportFailure(err, targetScope, merge)
+	}
+	if err := logPhase("summaries", stats.SummariesImported, stats.SummariesSkipped, map[string]any{"dangling_supersedes": stats.SummariesWithDanglingSupersedes}); err != nil {
+		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for summary import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
+	}
+	if err := importEpisodes(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
+		return stats, wrapPartialImportFailure(err, targetScope, merge)
+	}
+	if err := logPhase("episodes", stats.EpisodesImported, stats.EpisodesSkipped, nil); err != nil {
+		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for episode import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
 	}
 	return stats, nil
+}
+
+// wrapPartialImportFailure appends a hint pointing at -merge to any error
+// ImportScope returns after its upfront scopeIsEmpty check has already
+// passed (review finding C6). Each phase (and, within importSummaries,
+// each period file) commits in its own transaction, so a failure at any
+// of these call sites can easily leave real, already-committed data in
+// targetScope even though the whole import ultimately failed — without
+// this, a non-merge retry would only discover it needs -merge after a
+// second round trip, hitting the "already has data" check above from
+// scratch. Only applies when merge is false: a merge import failing
+// doesn't change what flag a retry needs.
+func wrapPartialImportFailure(err error, targetScope identity.Scope, merge bool) error {
+	if err == nil || merge {
+		return err
+	}
+	return fmt.Errorf("%w (if an earlier phase already committed data to %s:%s, retry with -merge to continue)", err, targetScope.Kind, targetScope.Owner)
 }
 
 func scopeIsEmpty(ctx context.Context, db *sql.DB, scope identity.Scope) (bool, error) {
@@ -211,7 +253,21 @@ func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, key
 				}
 				supersedes := ""
 				if r.Supersedes != "" {
-					supersedes = idMap[r.Supersedes] // "" if not found — a dangling reference in the export, treated as none
+					var ok bool
+					supersedes, ok = idMap[r.Supersedes]
+					if !ok {
+						// A dangling reference: the predecessor this
+						// version's supersedes pointed at isn't present in
+						// the bundle (e.g. a partial/filtered export).
+						// Still imported — refusing the whole file over a
+						// lost lineage link would be worse — but as an
+						// unlinked version, indistinguishable from an
+						// original, non-corrected summary unless this is
+						// recorded somewhere.
+						slog.Warn("hpmf: summary version's supersedes reference not found in bundle, importing as unlinked",
+							"exported_id", r.ID, "missing_predecessor", r.Supersedes, "scope_kind", scope.Kind, "scope_owner", scope.Owner)
+						stats.SummariesWithDanglingSupersedes++
+					}
 				}
 				summaryCT, err := enc.Encrypt(r.Summary)
 				if err != nil {
@@ -239,9 +295,9 @@ func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, key
 						return fmt.Errorf("hpmf: encrypt key fact for %s: %w", newID, err)
 					}
 					_, err = tx.ExecContext(ctx, `
-						insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version)
-						values ($1, $2, $3::text[], $4, $5)
-					`, newID, factCT, pgfmt.TextArray(kf.SourceEpisodeIDs), kf.Grounded, keyVersion)
+						insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner)
+						values ($1, $2, $3::text[], $4, $5, $6, $7)
+					`, newID, factCT, pgfmt.TextArray(kf.SourceEpisodeIDs), kf.Grounded, keyVersion, scope.Kind, scope.Owner)
 					if err != nil {
 						return fmt.Errorf("hpmf: insert key fact for %s: %w", newID, err)
 					}

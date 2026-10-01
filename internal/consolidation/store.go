@@ -142,6 +142,25 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			return fmt.Errorf("insert summary %s: %w", id, err)
 		}
 
+		// validSourceEpisodeID backstops kf.SourceEpisodeIDs against
+		// review finding B16: unlike upsertRelationships' own
+		// entityExists check for subject_id/object_id, a key fact's
+		// source_episode_ids was never validated at all before this fix
+		// — a hallucinated id (the consolidation LLM citing something it
+		// never actually saw) or a stale/typo'd one would be stored
+		// permanently unchecked, since a text[] column can't carry a real
+		// foreign key the way a scalar column can. in.sourceEpisodeIDs is
+		// the exact, known-real set of episodes this call's own sources
+		// came from (already loaded from the DB earlier in RunDaily/
+		// Correct) — stricter than a bare existence check, since it also
+		// catches a citation that names a real episode id that just
+		// wasn't actually one of this summary's own sources, not only
+		// ones that don't exist at all.
+		validSourceEpisodeID := make(map[string]bool, len(in.sourceEpisodeIDs))
+		for _, epID := range in.sourceEpisodeIDs {
+			validSourceEpisodeID[epID] = true
+		}
+
 		for i, kf := range in.output.KeyFacts {
 			factCT, err := enc.Encrypt(kf.Fact)
 			if err != nil {
@@ -153,12 +172,19 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			// MEMORY_FORMAT.md § Summary record).
 			var citeIDs []string
 			if in.level == "daily" {
-				citeIDs = kf.SourceEpisodeIDs
+				for _, epID := range kf.SourceEpisodeIDs {
+					if validSourceEpisodeID[epID] {
+						citeIDs = append(citeIDs, epID)
+						continue
+					}
+					slog.Warn("consolidation: dropping key fact citation that isn't one of this summary's real source episodes",
+						"episode_id", epID, "fact", kf.Fact, "scope_kind", in.scope.Kind, "scope_owner", in.scope.Owner)
+				}
 			}
 			_, err = tx.ExecContext(ctx, `
-				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version)
-				values ($1, $2, $3::text[], $4, $5)
-			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion)
+				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner)
+				values ($1, $2, $3::text[], $4, $5, $6, $7)
+			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner)
 			if err != nil {
 				return fmt.Errorf("insert key fact %d for summary %s: %w", i, id, err)
 			}
@@ -214,15 +240,27 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 		return err
 	}
 
-	// Embedding runs after commit, best-effort: a failed embed means this
-	// summary won't surface via vector search until the next reindex, not
-	// that consolidation itself failed — the summary row is already
-	// durably stored.
+	// Embedding runs after commit, genuinely best-effort — a real,
+	// confirmed bug this used to get wrong (docs/CODEBASE_SURVEY_AND_REVIEW.md
+	// finding A6): a failed embed means this summary/these entities won't
+	// surface via vector search until the next reindex, not that
+	// consolidation itself failed — the summary row, its key facts, and
+	// every touched entity are already durably stored. Returning an error
+	// here used to propagate all the way to cmd/hupi-consolidate's scope
+	// loop, making a transient embedding-provider hiccup register as a
+	// failed consolidation run (a false alarm — everything that actually
+	// matters already committed) *and*, because RunDaily returned
+	// immediately on this error, silently skip the cross-period
+	// contradiction check and the embedding backfills that would
+	// otherwise have run next for this scope/day — real functional work
+	// lost, not just a misleading metric. Logging and continuing (the
+	// same pattern this package already uses for every other genuinely
+	// best-effort step, e.g. checkCrossPeriodContradictions) fixes both.
 	if err := r.embedSummary(ctx, in.scope, id, in.output.Summary); err != nil {
-		return fmt.Errorf("embed summary %s (row committed, embedding not): %w", id, err)
+		slog.Warn("consolidation: embed summary failed, row committed without it", "summary", id, "error", err)
 	}
 	if err := r.embedEntities(ctx, in.scope, entityIDs); err != nil {
-		return fmt.Errorf("embed entities touched by summary %s (rows committed, embeddings not): %w", id, err)
+		slog.Warn("consolidation: embed entities failed, rows committed without it", "summary", id, "error", err)
 	}
 	return nil
 }
@@ -243,6 +281,23 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 // two different scopes' first daily summary on the same date would
 // generate the identical id and collide.
 func (r *Runner) nextSummaryID(ctx context.Context, q dbscope.Querier, scope identity.Scope, level, period string) (string, error) {
+	// Two concurrent transactions computing a version for the same
+	// scope+level+period under READ COMMITTED could both read the same
+	// maxVersion before either commits and both attempt to insert the
+	// identical id — summaries.id's primary key catches that deterministically
+	// (a clean unique-violation error, not silent corruption), but it's still
+	// a real, avoidable failure for whichever transaction loses the race
+	// (review finding C5). pg_advisory_xact_lock, not the manual-unlock
+	// session-held lock internal/rotate/demo use elsewhere: this call always
+	// runs inside the one transaction that calls it (q is the tx from
+	// storeSummary's own dbscope.Run), so a lock that releases automatically
+	// on that transaction's commit/rollback is the exact right lifetime —
+	// no separate connection or defer-unlock needed.
+	lockKey := scope.Kind + ":" + scope.Owner + ":" + level + ":" + period
+	if _, err := q.ExecContext(ctx, `select pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return "", fmt.Errorf("acquire next-version lock for %s %s: %w", level, period, err)
+	}
+
 	var maxVersion int
 	err := q.QueryRowContext(ctx, `
 		select coalesce(max(cast(substring(id from 'v([0-9]+)$') as int)), 0)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -248,7 +249,16 @@ func TestCreateSession_DailyCapEnforced(t *testing.T) {
 	}
 }
 
-func TestSweep_DeletesExpiredGuestAndItsData(t *testing.T) {
+// TestSweep_DeletesGuestDataButKeepsSessionRowForCapWindow is a real
+// regression test (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A11): this
+// used to assert the *opposite* — that Sweep removed the demo_sessions
+// row too, which was exactly the bug. Deleting the guest's users row now
+// leaves the session row behind (schema/0016's "on delete set null"),
+// specifically so it keeps counting toward CreateSession's daily cap
+// until the row is old enough for phase 2 to remove it (see
+// TestSweep_RemovesOldSessionRowsEvenWithoutAGuest below) — real,
+// sensitive data (the user, their episode) is still gone promptly.
+func TestSweep_DeletesGuestDataButKeepsSessionRowForCapWindow(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	s := newTestStore(t, db, &stubRunner{}, testLimits())
@@ -257,8 +267,10 @@ func TestSweep_DeletesExpiredGuestAndItsData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	// No trackGuest here on purpose: Sweep itself is expected to remove
-	// everything, and the assertions below confirm that directly.
+	// Not trackGuest: the whole point under test is that Sweep's phase 1
+	// does NOT remove the demo_sessions row, so this test cleans that row
+	// up itself rather than relying on either path.
+	t.Cleanup(func() { db.Exec(`delete from demo_sessions where token_hash = $1`, hashToken(sess.Token)) })
 
 	// episodes has row-level security (schema/0005) and the test DB
 	// connects as hupi_app (a non-owner role, per this repo's CI/test
@@ -289,15 +301,159 @@ func TestSweep_DeletesExpiredGuestAndItsData(t *testing.T) {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if swept < 1 {
-		t.Fatalf("Sweep swept %d sessions, want at least 1", swept)
+		t.Fatalf("Sweep swept %d guests' data, want at least 1", swept)
 	}
 
-	var userExists, episodeExists, sessionExists bool
+	var userExists, episodeExists bool
+	var sessionGuestID sql.NullString
 	db.QueryRowContext(ctx, `select exists(select 1 from users where id = $1)`, sess.GuestUserID).Scan(&userExists)
 	db.QueryRowContext(ctx, `select exists(select 1 from episodes where scope_owner = $1)`, sess.GuestUserID).Scan(&episodeExists)
-	db.QueryRowContext(ctx, `select exists(select 1 from demo_sessions where token_hash = $1)`, hashToken(sess.Token)).Scan(&sessionExists)
+	err = db.QueryRowContext(ctx, `select guest_user_id from demo_sessions where token_hash = $1`, hashToken(sess.Token)).Scan(&sessionGuestID)
+	if err != nil {
+		t.Fatalf("expected the demo_sessions row to still exist after Sweep (it must survive until capWindow, not just the TTL): %v", err)
+	}
 
-	if userExists || episodeExists || sessionExists {
-		t.Fatalf("Sweep left data behind: user=%v episode=%v session=%v", userExists, episodeExists, sessionExists)
+	if userExists || episodeExists {
+		t.Fatalf("Sweep left real guest data behind: user=%v episode=%v", userExists, episodeExists)
+	}
+	if sessionGuestID.Valid {
+		t.Errorf("demo_sessions.guest_user_id = %q, want null — the FK's \"on delete set null\" should have cleared it when the users row was deleted", sessionGuestID.String)
+	}
+}
+
+// TestSweep_RemovesOldSessionRowsEvenWithoutAGuest is phase 2's own
+// regression test: a demo_sessions row old enough to no longer matter
+// for CreateSession's daily cap must eventually be deleted too, even
+// though phase 1 never touches rows whose guest_user_id is already null.
+func TestSweep_RemovesOldSessionRowsEvenWithoutAGuest(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := newTestStore(t, db, &stubRunner{}, testLimits())
+
+	tokenHash := hashToken("hupi_demo_test-phase-2-row")
+	if _, err := db.ExecContext(ctx, `
+		insert into demo_sessions (token_hash, guest_user_id, created_at, expires_at)
+		values ($1, null, now() - interval '25 hours', now() - interval '22 hours')
+	`, tokenHash); err != nil {
+		t.Fatalf("seed an old, guest-less demo_sessions row: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`delete from demo_sessions where token_hash = $1`, tokenHash) })
+
+	if _, err := s.Sweep(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	var exists bool
+	db.QueryRowContext(ctx, `select exists(select 1 from demo_sessions where token_hash = $1)`, tokenHash).Scan(&exists)
+	if exists {
+		t.Error("expected Sweep's phase 2 to have deleted a demo_sessions row older than capWindow, even with no guest attached to it")
+	}
+}
+
+// TestCreateSession_CapStillCountsASweptSession is the real, end-to-end
+// proof of the fix: a session whose guest data Sweep already cleaned up
+// (phase 1) must still count toward CreateSession's daily cap until
+// capWindow has actually passed — this is the exact mechanism finding
+// A11 reports as broken before the fix (the real achievable session
+// volume running to roughly capWindow/SessionTTL times the configured
+// limit).
+func TestCreateSession_CapStillCountsASweptSession(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	var existing int
+	if err := db.QueryRowContext(ctx, `select count(*) from demo_sessions where created_at > now() - interval '1 day'`).Scan(&existing); err != nil {
+		t.Fatalf("count existing sessions: %v", err)
+	}
+
+	limits := testLimits()
+	limits.MaxSessionsPerDay = existing + 1
+	s := newTestStore(t, db, &stubRunner{}, limits)
+
+	sess, err := s.CreateSession(ctx)
+	if err != nil {
+		t.Fatalf("CreateSession (should still be under the cap): %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`delete from demo_sessions where token_hash = $1`, hashToken(sess.Token)) })
+
+	if _, err := db.ExecContext(ctx,
+		`update demo_sessions set expires_at = now() - interval '1 minute' where token_hash = $1`,
+		hashToken(sess.Token),
+	); err != nil {
+		t.Fatalf("force-expire session: %v", err)
+	}
+	if _, err := s.Sweep(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	// The whole point: even though Sweep already ran and the session is
+	// long expired and its guest data gone, a new session must still be
+	// refused — the swept session's row is still within capWindow (it was
+	// created seconds ago), so it must still count.
+	if _, err := s.CreateSession(ctx); !errors.Is(err, ErrDailySessionCapReached) {
+		t.Errorf("CreateSession() after sweeping an expired-but-recent session = %v, want %v — a swept session must still count toward the cap until capWindow has passed", err, ErrDailySessionCapReached)
+	}
+}
+
+// TestCreateSession_ConcurrentCallsNeverOvershootTheDailyCap is the real
+// regression test for review finding B21 — a separate race from A11
+// above: even with A11's counting fixed, CreateSession's own
+// count-check-then-insert was two independent statements with nothing
+// tying them together, so concurrent callers arriving while the count
+// was one under the cap could all read the same pre-increment count and
+// all succeed, overshooting the configured cap.
+func TestCreateSession_ConcurrentCallsNeverOvershootTheDailyCap(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	var existing int
+	if err := db.QueryRowContext(ctx,
+		`select count(*) from demo_sessions where created_at > now() - interval '1 day'`,
+	).Scan(&existing); err != nil {
+		t.Fatalf("count existing sessions: %v", err)
+	}
+
+	const allowMore = 5
+	const concurrency = 20
+	limits := testLimits()
+	limits.MaxSessionsPerDay = existing + allowMore
+	s := newTestStore(t, db, &stubRunner{}, limits)
+
+	var wg sync.WaitGroup
+	results := make(chan struct {
+		guestID string
+		err     error
+	}, concurrency)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sess, err := s.CreateSession(ctx)
+			results <- struct {
+				guestID string
+				err     error
+			}{sess.GuestUserID, err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	succeeded, overCap := 0, 0
+	for r := range results {
+		switch {
+		case r.err == nil:
+			succeeded++
+			trackGuest(t, db, r.guestID)
+		case errors.Is(r.err, ErrDailySessionCapReached):
+			overCap++
+		default:
+			t.Fatalf("CreateSession: unexpected error: %v", r.err)
+		}
+	}
+	if succeeded != allowMore {
+		t.Errorf("succeeded = %d, want exactly %d — the daily cap must hold exactly under concurrency, not overshoot it", succeeded, allowMore)
+	}
+	if overCap != concurrency-allowMore {
+		t.Errorf("rejected-for-cap count = %d, want %d", overCap, concurrency-allowMore)
 	}
 }

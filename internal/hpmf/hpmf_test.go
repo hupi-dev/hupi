@@ -79,9 +79,9 @@ func seedScope(t *testing.T, ctx context.Context, db *sql.DB, keys *crypto.KeySt
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded)
-			values ($1, $2, $3, true)
-		`, "sum_"+tag+"_v1", v1CT, "{ep_"+tag+"}"); err != nil {
+			insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, scope_kind, scope_owner)
+			values ($1, $2, $3, true, $4, $5)
+		`, "sum_"+tag+"_v1", v1CT, "{ep_"+tag+"}", scope.Kind, scope.Owner); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `
@@ -192,6 +192,59 @@ func TestExportImportRoundTrip_SameScope(t *testing.T) {
 	}
 	if got := decryptedSummaryText(t, ctx, db, keys, dst, dstV2ID); got != "summary v2 roundtrip" {
 		t.Errorf("decrypted summary text = %q, want %q", got, "summary v2 roundtrip")
+	}
+}
+
+// TestExportImportAuditEveryPhaseSeparately is a real regression test
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A10): ExportScope/
+// ImportScope used to write one combined audit_log entry only after all
+// three phases (episodes/summaries/entities) finished — a crash partway
+// through left real, already-written/already-committed data with zero
+// audit trail. Each now logs one entry per phase, immediately after that
+// phase completes. Confirms 3 export entries and 3 import entries exist,
+// not 1 combined one of each — using a high-water-mark query rather than
+// relying on cleanup, since audit_log is genuinely append-only (the
+// hupi_app role has no DELETE grant on it at all).
+func TestExportImportAuditEveryPhaseSeparately(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+
+	src := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-hpmf-audit-src"}
+	dst := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-hpmf-audit-dst"}
+	t.Cleanup(func() { cleanupScope(t, db, src); cleanupScope(t, db, dst) })
+
+	seedScope(t, ctx, db, keys, src, "audit-phase")
+
+	var beforeID int64
+	if err := db.QueryRowContext(ctx, `select coalesce(max(id), 0) from audit_log`).Scan(&beforeID); err != nil {
+		t.Fatalf("capture audit_log high-water mark: %v", err)
+	}
+
+	dir := t.TempDir()
+	if _, err := ExportScope(ctx, db, keys, src, dir, "test"); err != nil {
+		t.Fatalf("ExportScope: %v", err)
+	}
+	if _, err := ImportScope(ctx, db, keys, dir, dst, false, "test"); err != nil {
+		t.Fatalf("ImportScope: %v", err)
+	}
+
+	countPhases := func(scope identity.Scope, eventType string) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(ctx, `
+			select count(*) from audit_log
+			where workspace_scope_kind = $1 and workspace_scope_owner = $2 and event_type = $3 and id > $4
+		`, scope.Kind, scope.Owner, eventType, beforeID).Scan(&n); err != nil {
+			t.Fatalf("count %s audit entries: %v", eventType, err)
+		}
+		return n
+	}
+
+	if got := countPhases(src, "export"); got != 3 {
+		t.Errorf("got %d export audit_log entries, want 3 (one per phase: episodes, summaries, entities) — not 1 combined entry", got)
+	}
+	if got := countPhases(dst, "import"); got != 3 {
+		t.Errorf("got %d import audit_log entries, want 3 (one per phase: entities, summaries, episodes) — not 1 combined entry", got)
 	}
 }
 

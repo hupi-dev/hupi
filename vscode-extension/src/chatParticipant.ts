@@ -73,10 +73,19 @@ async function handleChatRequest(
     return;
   }
 
-  const fileContext = currentFileContext();
-  const userContent = fileContext ? `${fileContext}\n\n${trimmed}` : trimmed;
+  const settings = vscode.workspace.getConfiguration('hupi');
+  const fileContextEnabled = settings.get<boolean>('fileContext.enabled', true);
+  const fileContext = fileContextEnabled ? currentFileContext() : undefined;
+  const userContent = fileContext ? `${fileContext.text}\n\n${trimmed}` : trimmed;
   const messages = historyToMessages(chatContext);
   messages.push({ role: 'user', content: userContent });
+  if (fileContext) {
+    // VS Code's own chat UI renders this as a visible reference chip on
+    // the response, the native way to show "this file informed the
+    // answer" (review finding A13 — this used to be sent with no UI
+    // indication at all).
+    stream.reference(fileContext.uri);
+  }
 
   let cfg;
   try {
@@ -94,7 +103,6 @@ async function handleChatRequest(
   const controller = new AbortController();
   token.onCancellationRequested(() => controller.abort());
 
-  const settings = vscode.workspace.getConfiguration('hupi');
   const citationsEnabled = settings.get<boolean>('citations.enabled', true);
   const deepCitations = settings.get<boolean>('citations.deep', false);
 

@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/provider"
 )
 
@@ -36,9 +39,13 @@ func (f *fakeRetriever) Retrieve(ctx context.Context, actingUser, workspace iden
 // the new X-Hupi-Capture opt-out must prevent from ever being called.
 type fakeCapturer struct {
 	episodes []Episode
+	err      error // returned by every Capture call when non-nil, instead of recording
 }
 
 func (f *fakeCapturer) Capture(ctx context.Context, scope identity.Scope, ep Episode) error {
+	if f.err != nil {
+		return f.err
+	}
 	f.episodes = append(f.episodes, ep)
 	return nil
 }
@@ -166,6 +173,36 @@ func TestHandleChatCompletions_BothOptOutsTogether(t *testing.T) {
 	}
 	if len(capturer.episodes) != 0 {
 		t.Errorf("len(capturer.episodes) = %d, want 0", len(capturer.episodes))
+	}
+}
+
+// TestHandleChatCompletions_OptOutHeadersAreCaseInsensitive is the real
+// regression test for review finding C2: both opt-out headers used to be
+// exact-match comparisons against the literal string "off" — a client
+// sending "Off" or "OFF" (e.g. a proxy/library that normalizes header
+// casing) silently got the opposite of what it asked for, with retrieval
+// or capture running unexpectedly. Fails toward the safe default (memory
+// stays on), which is why this was filed as minor rather than a real
+// bug, but it's still a real behavior mismatch worth closing.
+func TestHandleChatCompletions_OptOutHeadersAreCaseInsensitive(t *testing.T) {
+	for _, variant := range []string{"Off", "OFF", "oFF"} {
+		t.Run(variant, func(t *testing.T) {
+			retriever := &fakeRetriever{}
+			capturer := &fakeCapturer{}
+			h := newTestHandler(t, retriever, capturer)
+
+			w := postChatCompletion(t, h, map[string]string{"X-Hupi-Memory": variant, "X-Hupi-Capture": variant})
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			if retriever.calls != 0 {
+				t.Errorf("X-Hupi-Memory: %q: retriever.calls = %d, want 0", variant, retriever.calls)
+			}
+			if len(capturer.episodes) != 0 {
+				t.Errorf("X-Hupi-Capture: %q: len(capturer.episodes) = %d, want 0", variant, len(capturer.episodes))
+			}
+		})
 	}
 }
 
@@ -342,6 +379,69 @@ func TestHandleChatCompletions_DeepExplainRunsAttributionCheck(t *testing.T) {
 	}
 }
 
+// TestHandleChatCompletions_DeepExplainLeavesUsedNilOnMalformedJudgeResponse
+// is a real regression test (docs/CODEBASE_SURVEY_AND_REVIEW.md finding
+// A2), end to end through the real HTTP response: a malformed attribution
+// judge response used to populate every Citation.Used with false (via
+// attributionCheck's old silent-default behavior) rather than leaving it
+// nil/omitted — indistinguishable, to a real API caller, from a genuine
+// "checked and confirmed unused" verdict.
+func TestHandleChatCompletions_DeepExplainLeavesUsedNilOnMalformedJudgeResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		msgs, _ := body["messages"].([]any)
+		isAttribution := false
+		for _, m := range msgs {
+			msg, _ := m.(map[string]any)
+			if content, _ := msg["content"].(string); strings.Contains(content, "Candidate memory snippets") {
+				isAttribution = true
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		content := "hello from upstream"
+		if isAttribution {
+			content = "I'm not sure how to answer that." // malformed: not the requested JSON shape
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "fake-model",
+			"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": content}}},
+			"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	defer upstream.Close()
+
+	reg, err := provider.NewRegistry(provider.Config{
+		ActiveChatProvider:          "test",
+		ActiveConsolidationProvider: "test",
+		ActiveEmbeddingProvider:     "test",
+		Providers: map[string]provider.ProfileConfig{
+			"test": {Kind: provider.KindOpenAICompat, Vendor: "test", BaseURL: upstream.URL, Model: "fake-model"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("provider.NewRegistry: %v", err)
+	}
+
+	citation := Citation{Ref: identity.Ref{Kind: identity.RefKindSummary, ID: "sum_test"}, Snippet: "the source text"}
+	retriever := &fakeRetriever{result: RetrievalResult{Gate: GateFull, Citations: []Citation{citation}}}
+	h := &Handler{Registry: reg, Retriever: retriever, Capturer: &fakeCapturer{}}
+
+	w := postChatCompletion(t, h, map[string]string{"X-Hupi-Explain": "deep"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var resp chatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Citations) != 1 || resp.Citations[0].Used != nil {
+		t.Fatalf("Citations = %+v, want one citation with Used = nil (not checked), not false (checked and confirmed unused)", resp.Citations)
+	}
+}
+
 // TestHandleChatCompletions_PlainExplainDoesNotRunAttributionCheck
 // confirms "on" (Phase 1 only) never triggers the extra LLM call "deep"
 // does — the cost-control distinction docs/ANSWER_CITATIONS_PLAN.md's
@@ -469,5 +569,97 @@ func TestHandleChatCompletions_StreamDeepExplainIncludesCitationsOnTerminalChunk
 	}
 	if !sawTerminalCitation {
 		t.Fatalf("no SSE chunk carried citations; full body:\n%s", w.Body.String())
+	}
+}
+
+// TestHandleChatCompletions_StreamMidStreamErrorIncrementsProviderCallErrorsTotal
+// is a real regression test for review finding B1
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md): handleStream's drain loop only
+// logged a chunk.Err arriving mid-stream (e.g. the upstream connection
+// dropping or sending a malformed event partway through) — unlike the
+// initial-connect failure path a few lines above it, which does
+// increment metrics.ProviderCallErrorsTotal. A failure that happens to
+// land after streaming has already started was invisible to the same
+// alert/dashboard the initial-connect path feeds.
+func TestHandleChatCompletions_StreamMidStreamErrorIncrementsProviderCallErrorsTotal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"hello"}}]}`+"\n\n")
+		// A malformed mid-stream event — internal/provider/openai_compat.go's
+		// StreamChatCompletion sends StreamChunk{Err: ...} and stops when a
+		// "data:" line fails to decode, simulating a real provider dropping
+		// the connection or sending garbage partway through.
+		fmt.Fprint(w, "data: {not valid json\n\n")
+	}))
+	defer upstream.Close()
+
+	reg, err := provider.NewRegistry(provider.Config{
+		ActiveChatProvider:          "stream-error-test",
+		ActiveConsolidationProvider: "stream-error-test",
+		ActiveEmbeddingProvider:     "stream-error-test",
+		Providers: map[string]provider.ProfileConfig{
+			"stream-error-test": {Kind: provider.KindOpenAICompat, Vendor: "stream-error-test-vendor", BaseURL: upstream.URL, Model: "fake-model"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("provider.NewRegistry: %v", err)
+	}
+
+	h := &Handler{Registry: reg, Retriever: &fakeRetriever{}, Capturer: &fakeCapturer{}}
+
+	body := strings.NewReader(`{"model":"stream-error-test","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	h.HandleChatCompletions(w, req)
+
+	got := testutil.ToFloat64(metrics.ProviderCallErrorsTotal.WithLabelValues("stream-error-test", "stream-error-test-vendor"))
+	if got != 1 {
+		t.Errorf("hupi_provider_call_errors_total{provider=%q,vendor=%q} = %v, want 1", "stream-error-test", "stream-error-test-vendor", got)
+	}
+}
+
+// TestHandleChatCompletions_RejectsInvalidMessageRole is the real
+// regression test for review finding C1: a message's role used to be
+// forwarded to the vendor API completely unvalidated — an invalid role
+// would surface as an opaque upstream error instead of a clear 400 at
+// HUPI's own gateway.
+func TestHandleChatCompletions_RejectsInvalidMessageRole(t *testing.T) {
+	retriever := &fakeRetriever{}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+
+	body := strings.NewReader(`{"model":"test","messages":[{"role":"nonsense","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	h.HandleChatCompletions(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	respBody, _ := io.ReadAll(w.Body)
+	if !strings.Contains(string(respBody), `invalid message role "nonsense"`) {
+		t.Errorf("response body = %q, want it to name the invalid role", string(respBody))
+	}
+	if retriever.calls != 0 {
+		t.Error("an invalid role must be rejected before retrieval ever runs")
+	}
+}
+
+// TestHandleChatCompletions_AcceptsEveryValidRole confirms the new check
+// isn't overly strict — system/user/assistant must all still work,
+// including system, which no existing test in this file exercises.
+func TestHandleChatCompletions_AcceptsEveryValidRole(t *testing.T) {
+	for _, role := range []string{"system", "user", "assistant"} {
+		t.Run(role, func(t *testing.T) {
+			h := newTestHandler(t, &fakeRetriever{}, &fakeCapturer{})
+			body := strings.NewReader(fmt.Sprintf(`{"model":"test","messages":[{"role":%q,"content":"hi"}]}`, role))
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+			w := httptest.NewRecorder()
+			h.HandleChatCompletions(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("role %q: status = %d, body = %q, want 200", role, w.Code, w.Body.String())
+			}
+		})
 	}
 }

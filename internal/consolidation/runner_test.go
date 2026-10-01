@@ -156,11 +156,14 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 		t.Errorf("summary text = %q, want the seeded consolidation output", text)
 	}
 
-	// summary_key_facts has no scope columns of its own and isn't
-	// RLS-protected (see schema/0005's doc comment) — a plain query is
-	// correct here, not an oversight.
+	// summary_key_facts gained its own scope columns and RLS in
+	// schema/0018 (docs/CODEBASE_SURVEY_AND_REVIEW.md B18) — a scoped
+	// query is required now, not optional.
 	var grounded bool
-	if err := db.QueryRowContext(ctx, `select grounded from summary_key_facts where summary_id = $1`, summaryID).Scan(&grounded); err != nil {
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select grounded from summary_key_facts where summary_id = $1`, summaryID).Scan(&grounded)
+	})
+	if err != nil {
 		t.Fatalf("expected a key_facts row: %v", err)
 	}
 	if !grounded {
@@ -190,6 +193,103 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 	}
 	if embeddingCount != 1 {
 		t.Error("expected the summary to have been embedded")
+	}
+}
+
+// failingEmbedder wraps fakeConsolidationProvider but always fails Embed
+// — used by TestRunDaily_SucceedsDespiteEmbeddingFailure to simulate a
+// transient embedding-provider outage while consolidation and grounding
+// still succeed normally.
+type failingEmbedder struct {
+	fakeConsolidationProvider
+}
+
+func (failingEmbedder) Embed(context.Context, provider.EmbedRequest) (provider.EmbedResponse, error) {
+	return provider.EmbedResponse{}, errors.New("simulated embedding provider outage")
+}
+
+// TestRunDaily_SucceedsDespiteEmbeddingFailure is a real regression test
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A6): embedSummary,
+// embedEntities, embedHighImportanceEpisodes, and the entity-embedding
+// backfill are all documented as best-effort — a failure shouldn't fail
+// consolidation itself, since the summary/key-facts/entities are already
+// durably stored by the time any of them run. The code used to return
+// these errors anyway, making a transient embedding outage register as a
+// failed RunDaily (a false alarm) and, because RunDaily returned
+// immediately, silently skip real downstream work (the entity-embedding
+// backfill, reachable only after embedHighImportanceEpisodes). This test
+// uses an embedder that fails on every call and confirms RunDaily still
+// returns nil — if any of the now-fixed call sites still propagated its
+// error, this would fail.
+func TestRunDaily_SucceedsDespiteEmbeddingFailure(t *testing.T) {
+	consolidationJSON := `{
+		"summary": "Discussed the HUPI project.",
+		"key_facts": [{"fact": "Decided to use pgvector", "source_episode_ids": ["ep_test_embed_fail"]}],
+		"entities_touched": [{"id": "project:hupi-embed-fail", "kind": "project", "name": "HUPI", "attributes": {"vector_index": "pgvector"}}]
+	}`
+	groundingJSON := `{"grounded": [true]}`
+
+	dsn := os.Getenv("HUPI_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("HUPI_TEST_DATABASE_URL not set; skipping integration test")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	keys := crypto.NewKeyStore(db, make([]byte, 32))
+
+	consolidationProvider := fakeConsolidationProvider{response: consolidationJSON}
+	groundingProvider := fakeConsolidationProvider{response: groundingJSON}
+	runner := New(db, keys, consolidationProvider, groundingProvider, failingEmbedder{})
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-run-daily-embed-fail"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	inputCT, _ := enc.Encrypt("what should we use for the vector index?")
+	outputCT, _ := enc.Encrypt("let's use pgvector")
+	date := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+			values ('ep_test_embed_fail', $1, 'interaction', $2, $3, 'sha256:test', 0.9, $4, $5)
+		`, date, inputCT, outputCT, scope.Kind, scope.Owner)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
+
+	if err := runner.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("RunDaily: %v, want nil — a failed embed must not fail consolidation (finding A6)", err)
+	}
+
+	// The summary itself must still be durably stored despite every
+	// embed call failing.
+	var summaryCount int
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries where level = 'daily' and period = '2026-09-09' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&summaryCount)
+	})
+	if err != nil {
+		t.Fatalf("check summary: %v", err)
+	}
+	if summaryCount != 1 {
+		t.Error("expected the daily summary to be durably stored even though embedding failed")
 	}
 }
 
@@ -473,6 +573,101 @@ func TestRunRollup_RegeneratesWhenSourceChangesAfterward(t *testing.T) {
 	}
 	if current != 1 {
 		t.Errorf("got %d current weekly summaries for 2026-W37, want exactly 1 (the regenerated one superseding the original)", current)
+	}
+}
+
+// TestRunDaily_FirstSummaryForGapDayRefreshesExistingRollup is a real
+// regression test (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A7):
+// RunDaily used to only call refreshRollupsCovering when
+// existingCurrentID != "" — reasoning that a day's first-ever summary
+// couldn't leave an existing rollup stale, since nothing existed to be
+// stale before. That misses exactly the scenario here: a week's rollup
+// already ran with "2026-09-08" as a genuine gap day (no episodes, no
+// daily summary yet) — weeklyRollup's own fixed 7-day calendar template
+// means the rollup's source_summary_periods already lists 2026-09-08
+// even though it contributed nothing. When that day's episodes are
+// later captured (an out-of-order import, a manual re-run, a late
+// sync) and RunDaily gives it its first-ever summary, the existing
+// rollup is now provably stale (its sources changed) but the old guard
+// never even tried to check.
+func TestRunDaily_FirstSummaryForGapDayRefreshesExistingRollup(t *testing.T) {
+	consolidationJSON := `{"summary": "Rolled up the week.", "key_facts": [], "entities_touched": []}`
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-gap-day-refresh"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+
+	// Only 2026-09-07 has a daily summary when the week first rolls up —
+	// 2026-09-08 is a genuine gap day (no episodes at all yet).
+	dailyCT, _ := enc.Encrypt("daily summary text")
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into summaries (id, period, level, summary, scope_kind, scope_owner)
+			values ($1, $2, 'daily', $3, $4, $5)
+		`, "sum_gap_test_2026-09-07", "2026-09-07", dailyCT, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed the one real daily summary: %v", err)
+	}
+
+	sourcePeriods := []string{"2026-09-07", "2026-09-08"} // weeklyRollup's own fixed 7-day template, truncated here to the two days this test cares about
+	if err := runner.RunRollup(ctx, scope, "weekly", "daily", "2026-W37", sourcePeriods); err != nil {
+		t.Fatalf("seed weekly rollup over the gap week: %v", err)
+	}
+
+	// Now the gap day's episodes arrive (out-of-order capture, backfill,
+	// whatever the real cause) and RunDaily gives it its first-ever
+	// summary — existingCurrentID is "" going into this call.
+	inputCT, _ := enc.Encrypt("what happened on the gap day?")
+	outputCT, _ := enc.Encrypt("here's what happened")
+	gapDate := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+			values ('ep_test_gap_day', $1, 'interaction', $2, $3, 'sha256:test', 0.5, $4, $5)
+		`, gapDate, inputCT, outputCT, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed gap day episode: %v", err)
+	}
+	if err := runner.RunDaily(ctx, scope, gapDate); err != nil {
+		t.Fatalf("RunDaily for the gap day: %v", err)
+	}
+
+	// The existing weekly rollup must have been regenerated: two total
+	// rows (original + regenerated), exactly one current.
+	var total, current int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `
+			select count(*) from summaries where level = 'weekly' and period = '2026-W37' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&total); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries s where level = 'weekly' and period = '2026-W37' and scope_kind = $1 and scope_owner = $2
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		`, scope.Kind, scope.Owner).Scan(&current)
+	}); err != nil {
+		t.Fatalf("count weekly summaries: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("got %d total weekly summaries for 2026-W37, want 2 (original + regenerated after the gap day's first summary) — the rollup was never refreshed", total)
+	}
+	if current != 1 {
+		t.Errorf("got %d current weekly summaries for 2026-W37, want exactly 1", current)
 	}
 }
 

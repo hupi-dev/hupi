@@ -33,6 +33,26 @@ func New(db *sql.DB, keys *crypto.KeyStore, embedder provider.Provider) *Store {
 	return &Store{db: db, keys: keys, embedder: embedder}
 }
 
+// currentEmbeddingModel identifies the active embedding provider the same
+// way internal/consolidation.EmbedderIdentity does ("<vendor>:<model>",
+// schema/0013_embedding_model_tracking.sql) — duplicated here rather than
+// imported, since store and consolidation are deliberately sibling
+// packages with no dependency between them (see this package's own doc
+// comment), and this is a one-line, dependency-free computation, the same
+// "small tools duplicate rather than force an awkward cross-package
+// dependency" convention already used elsewhere in this repo (e.g.
+// internal/gateway/attribution.go's extractJSON).
+//
+// Used at retrieval time (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A3)
+// to exclude vectors recorded under a *different*, no-longer-active
+// embedding model from vector search — without this, a provider switch
+// silently mixed cosine-incomparable embedding spaces in the same ranked
+// result set until a full hupi-reembed backfill completed, with no error
+// anywhere.
+func (s *Store) currentEmbeddingModel() string {
+	return s.embedder.Vendor() + ":" + s.embedder.Model()
+}
+
 var (
 	_ gateway.Capturer  = (*Store)(nil)
 	_ gateway.Retriever = (*Store)(nil)

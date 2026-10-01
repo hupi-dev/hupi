@@ -27,7 +27,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"hupi/internal/audit"
 	"hupi/internal/consolidation"
@@ -140,6 +142,85 @@ func (r *Runner) Continue(ctx context.Context, scope identity.Scope, batchSize i
 	return 0, "", true, nil
 }
 
+// decryptWithRetry resolves id's key_version and decrypts every
+// ciphertext in ciphertexts (ciphertextCols names the column each one
+// came from, same order — episodes pass both input_text and output_text
+// together here, since they always share one row's key_version and must
+// be refreshed together if either turns out stale, not independently).
+//
+// keyVersion/ciphertexts are whatever this row's batch SELECT originally
+// read, which can go stale: internal/rotate may migrate the row to a new
+// version — re-encrypting its ciphertext and bumping key_version together
+// in one transaction — and an operator may prune the old version, any
+// time between that SELECT and this call
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md B19). When that happens,
+// KeyStore.GetVersion fails with ErrKeyVersionNotFound even though the
+// row is perfectly readable — just under a newer version.
+//
+// Critically, a stale key_version means the ciphertext this batch already
+// has in memory is stale too: rotate's migration re-encrypts a row's
+// ciphertext and bumps its key_version together, in the same transaction,
+// so the two can never drift apart from each other independently — only
+// together, from the perspective of a reader whose own SELECT predates
+// both. A first version of this fix re-read only the key_version on
+// retry, still decrypting against the original stale ciphertext — which
+// reliably fails (a real AES-GCM auth-tag mismatch, not silent
+// corruption, but still a failure, not the recovery this is meant to
+// provide). So retrying re-reads the ciphertext columns alongside the
+// current key_version, together, and decrypts that fresh pair — never a
+// version from one moment paired with ciphertext from an earlier one.
+func (r *Runner) decryptWithRetry(ctx context.Context, scope identity.Scope, table, id string, keyVersion int, ciphertextCols []string, ciphertexts [][]byte) ([]string, error) {
+	enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
+	if err == nil {
+		return decryptEach(enc, ciphertexts)
+	}
+	if !errors.Is(err, crypto.ErrKeyVersionNotFound) {
+		return nil, err
+	}
+
+	fresh := make([][]byte, len(ciphertexts))
+	dest := make([]any, len(fresh))
+	for i := range fresh {
+		dest[i] = &fresh[i]
+	}
+	current, rerr := r.refetchRow(ctx, scope, table, id, ciphertextCols, dest...)
+	if rerr != nil || current == keyVersion {
+		return nil, err
+	}
+	freshEnc, ferr := r.keys.GetVersion(ctx, scope, current)
+	if ferr != nil {
+		return nil, err
+	}
+	return decryptEach(freshEnc, fresh)
+}
+
+func decryptEach(enc *crypto.Encryptor, ciphertexts [][]byte) ([]string, error) {
+	texts := make([]string, len(ciphertexts))
+	for i, ct := range ciphertexts {
+		text, err := enc.Decrypt(ct)
+		if err != nil {
+			return nil, err
+		}
+		texts[i] = text
+	}
+	return texts, nil
+}
+
+// refetchRow re-reads id's current key_version plus whatever ciphertext
+// columns the caller names (scanning them into dest, same order), inside
+// a single query — so the version and the ciphertext it decrypts come
+// from the same, current row state, never a version from one moment and
+// ciphertext from an earlier one.
+func (r *Runner) refetchRow(ctx context.Context, scope identity.Scope, table, id string, ciphertextCols []string, dest ...any) (int, error) {
+	var version int
+	cols := strings.Join(ciphertextCols, ", ") + ", key_version"
+	scanDest := append(append([]any{}, dest...), &version)
+	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, fmt.Sprintf(`select %s from %s where id = $1`, cols, table), id).Scan(scanDest...)
+	})
+	return version, err
+}
+
 // LogRun writes one audit_log entry summarizing a completed re-embed
 // pass — call this once, after a Continue loop has returned done=true,
 // with the sum of every processed count from that loop (skip the call
@@ -193,14 +274,11 @@ func (r *Runner) reembedSummaryBatch(ctx context.Context, scope identity.Scope, 
 	}
 
 	for _, rr := range rows {
-		enc, err := r.keys.GetVersion(ctx, scope, rr.keyVersion)
-		if err != nil {
-			return 0, fmt.Errorf("resolve encryption key for summary %s: %w", rr.id, err)
-		}
-		text, err := enc.Decrypt(rr.summaryCT)
+		texts, err := r.decryptWithRetry(ctx, scope, "summaries", rr.id, rr.keyVersion, []string{"summary"}, [][]byte{rr.summaryCT})
 		if err != nil {
 			return 0, fmt.Errorf("decrypt summary %s: %w", rr.id, err)
 		}
+		text := texts[0]
 		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{text}})
 		if err != nil {
 			return 0, fmt.Errorf("embed summary %s: %w", rr.id, err)
@@ -255,18 +333,11 @@ func (r *Runner) reembedEpisodeBatch(ctx context.Context, scope identity.Scope, 
 	}
 
 	for _, rr := range rows {
-		enc, err := r.keys.GetVersion(ctx, scope, rr.keyVersion)
+		texts, err := r.decryptWithRetry(ctx, scope, "episodes", rr.id, rr.keyVersion, []string{"input_text", "output_text"}, [][]byte{rr.inputCT, rr.outputCT})
 		if err != nil {
-			return 0, fmt.Errorf("resolve encryption key for episode %s: %w", rr.id, err)
+			return 0, fmt.Errorf("decrypt episode %s: %w", rr.id, err)
 		}
-		input, err := enc.Decrypt(rr.inputCT)
-		if err != nil {
-			return 0, fmt.Errorf("decrypt episode %s input_text: %w", rr.id, err)
-		}
-		output, err := enc.Decrypt(rr.outputCT)
-		if err != nil {
-			return 0, fmt.Errorf("decrypt episode %s output_text: %w", rr.id, err)
-		}
+		input, output := texts[0], texts[1]
 		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{consolidation.EpisodeEmbedText(input, output)}})
 		if err != nil {
 			return 0, fmt.Errorf("embed episode %s: %w", rr.id, err)
@@ -321,14 +392,11 @@ func (r *Runner) reembedEntityBatch(ctx context.Context, scope identity.Scope, m
 	}
 
 	for _, rr := range rows {
-		enc, err := r.keys.GetVersion(ctx, scope, rr.keyVersion)
-		if err != nil {
-			return 0, fmt.Errorf("resolve encryption key for entity %s: %w", rr.id, err)
-		}
-		attrsJSON, err := enc.Decrypt(rr.attrsCT)
+		texts, err := r.decryptWithRetry(ctx, scope, "entities", rr.id, rr.keyVersion, []string{"attributes"}, [][]byte{rr.attrsCT})
 		if err != nil {
 			return 0, fmt.Errorf("decrypt entity %s attributes: %w", rr.id, err)
 		}
+		attrsJSON := texts[0]
 		var attrs map[string]string
 		if attrsJSON != "" {
 			if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {

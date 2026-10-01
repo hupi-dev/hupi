@@ -129,6 +129,10 @@ describe('HupiInlineCompletionProvider', () => {
     // per-request opt-outs; this is the fix for a real bug where every
     // completion was flooding memory with a durable row).
     expect(call.headers).toEqual({ 'X-Hupi-Memory': 'off', 'X-Hupi-Capture': 'off' });
+    // Much shorter than hupiClient's own default (finding B25) — a
+    // suggestion that hasn't come back in a few seconds is already
+    // useless by the time it would arrive.
+    expect(call.timeoutMs).toBe(15_000);
   });
 
   it('reuses hupi.model when no completion-specific model is configured', async () => {
