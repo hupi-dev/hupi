@@ -581,6 +581,7 @@ drain:
 				break drain
 			}
 			if chunk.Err != nil {
+				metrics.ProviderCallErrorsTotal.WithLabelValues(target.Name(), target.Vendor()).Inc()
 				h.log().Error("stream error from provider", "error", chunk.Err)
 				truncated = true
 				break drain

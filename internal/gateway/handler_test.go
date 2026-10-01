@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/provider"
 )
 
@@ -532,5 +535,51 @@ func TestHandleChatCompletions_StreamDeepExplainIncludesCitationsOnTerminalChunk
 	}
 	if !sawTerminalCitation {
 		t.Fatalf("no SSE chunk carried citations; full body:\n%s", w.Body.String())
+	}
+}
+
+// TestHandleChatCompletions_StreamMidStreamErrorIncrementsProviderCallErrorsTotal
+// is a real regression test for review finding B1
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md): handleStream's drain loop only
+// logged a chunk.Err arriving mid-stream (e.g. the upstream connection
+// dropping or sending a malformed event partway through) — unlike the
+// initial-connect failure path a few lines above it, which does
+// increment metrics.ProviderCallErrorsTotal. A failure that happens to
+// land after streaming has already started was invisible to the same
+// alert/dashboard the initial-connect path feeds.
+func TestHandleChatCompletions_StreamMidStreamErrorIncrementsProviderCallErrorsTotal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"hello"}}]}`+"\n\n")
+		// A malformed mid-stream event — internal/provider/openai_compat.go's
+		// StreamChatCompletion sends StreamChunk{Err: ...} and stops when a
+		// "data:" line fails to decode, simulating a real provider dropping
+		// the connection or sending garbage partway through.
+		fmt.Fprint(w, "data: {not valid json\n\n")
+	}))
+	defer upstream.Close()
+
+	reg, err := provider.NewRegistry(provider.Config{
+		ActiveChatProvider:          "stream-error-test",
+		ActiveConsolidationProvider: "stream-error-test",
+		ActiveEmbeddingProvider:     "stream-error-test",
+		Providers: map[string]provider.ProfileConfig{
+			"stream-error-test": {Kind: provider.KindOpenAICompat, Vendor: "stream-error-test-vendor", BaseURL: upstream.URL, Model: "fake-model"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("provider.NewRegistry: %v", err)
+	}
+
+	h := &Handler{Registry: reg, Retriever: &fakeRetriever{}, Capturer: &fakeCapturer{}}
+
+	body := strings.NewReader(`{"model":"stream-error-test","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	h.HandleChatCompletions(w, req)
+
+	got := testutil.ToFloat64(metrics.ProviderCallErrorsTotal.WithLabelValues("stream-error-test", "stream-error-test-vendor"))
+	if got != 1 {
+		t.Errorf("hupi_provider_call_errors_total{provider=%q,vendor=%q} = %v, want 1", "stream-error-test", "stream-error-test-vendor", got)
 	}
 }
