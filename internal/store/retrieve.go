@@ -1749,26 +1749,42 @@ func summaryCitationSnippet(prose string, facts []keyFact, queryTerms []string) 
 	return prose
 }
 
-// factScores computes a per-fact query-relevance score — how many
-// distinct query terms the fact shares — the one shared metric behind
-// both mostRelevantFactIndex (pick the single fact that clearly stands
-// out) and rankFactsByRelevance (order all of them). A single scoring
-// definition, not two, so the two can never silently disagree about
-// what "relevant" means.
-func factScores(facts []string, queryTerms []string) []int {
-	querySet := make(map[string]bool, len(queryTerms))
-	for _, t := range queryTerms {
-		querySet[t] = true
+// factScores computes a per-fact query-relevance score — the one shared
+// metric behind both mostRelevantFactIndex (pick the single fact that
+// clearly stands out) and rankFactsByRelevance (order all of them). A
+// single scoring definition, not two, so the two can never silently
+// disagree about what "relevant" means.
+//
+// Uses BM25 (bm25Score, already relied on for summaries/episodes/
+// entities elsewhere in this file) over this one summary's own facts as
+// the corpus, rather than a flat distinct-term-overlap count. Real,
+// measured fix (5809eb10, "what year did the construction of the house
+// begin," a 62-fact summary about one legal case): the flat count gave a
+// fact merely repeating the case's own generic identifying words
+// ("Bajimaya", "Reward Homes Pty Ltd", "case" — shared by ~15 of the 62
+// facts) a higher score (7) than the one fact actually naming the
+// answer, "The construction of the house began in 2014" (score 3, since
+// it doesn't repeat those same generic words) — common terms and rare,
+// genuinely distinguishing ones counted identically. Direct measurement
+// (live gpt-4.1 embeddings, real decrypted facts) confirmed BM25's IDF
+// weighting — a term shared by many of a corpus's documents counts for
+// less — fixes exactly this: the answer fact ranked outside the top 10
+// under the flat count, #1 under BM25, moving it from missing the
+// guaranteed/top-5 context entirely to comfortably inside it once fused
+// with the semantic (embedding) signal rankKeyFacts already combines
+// this with.
+func factScores(facts []string, queryTerms []string) []float64 {
+	docs := make([]bm25Document, len(facts))
+	for i, f := range facts {
+		docs[i] = newBM25Document("", f)
 	}
-	scores := make([]int, len(facts))
-	for i, fact := range facts {
-		score := 0
-		for t := range tokenSet(fact) {
-			if querySet[t] {
-				score++
-			}
-		}
-		scores[i] = score
+	docFreq := bm25DocFrequency(docs)
+	scores := make([]float64, len(facts))
+	for i, doc := range docs {
+		// bm25ScoreNoLengthNorm, not bm25Score — see its own doc comment
+		// for why key-fact ranking specifically needs length
+		// normalization disabled.
+		scores[i] = bm25ScoreNoLengthNorm(doc, queryTerms, docFreq, len(docs))
 	}
 	return scores
 }
@@ -1782,7 +1798,7 @@ func mostRelevantFactIndex(facts []string, queryTerms []string) int {
 		return -1
 	}
 	scores := factScores(facts, queryTerms)
-	best, bestScore, tied := -1, 0, false
+	best, bestScore, tied := -1, 0.0, false
 	for i, score := range scores {
 		switch {
 		case score > bestScore:
