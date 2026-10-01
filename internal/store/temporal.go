@@ -23,7 +23,15 @@ import (
 // sweep the way this file's other thresholds were — a reasoned
 // starting point, flagged for calibration once verified against more
 // real cases.
-const temporalRelevanceBoost = 1.0
+//
+// Computed, not hardcoded (review finding B8): this used to be a
+// literal `1.0`, numerically double reciprocalRank(0) (= 1/(rrfK+1) =
+// 0.5 given rrfK's own real value) — the exact "full reciprocal-rank-0
+// contribution" this comment has always claimed, but never actually
+// was. Deriving it from reciprocalRank(0) directly means it can never
+// drift from its own stated definition again, including if rrfK itself
+// ever changes.
+var temporalRelevanceBoost = reciprocalRank(0)
 
 // timeframeKeywords backs resolveQueryTimeframe — a small, deliberately
 // narrow set of common relative-time phrases, same cheap substring-match
