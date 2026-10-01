@@ -39,7 +39,7 @@ func run() error {
 	scopeOwner := flag.String("scope-owner", "", "user id or team id (required)")
 	status := flag.Bool("status", false, "print rotation status and exit, without doing any work")
 	prune := flag.Bool("prune-old-versions", false, "delete key material older than the completed rotation's target version, then exit")
-	batchSize := flag.Int("batch-size", 500, "rows to migrate per batch/transaction")
+	batchSize := flag.Int("batch-size", 500, fmt.Sprintf("rows to migrate per batch/transaction (capped at %d — see internal/rotate.MaxBatchSize)", rotate.MaxBatchSize))
 	actor := flag.String("actor", defaultActor(), "who's running this (audit log)")
 	flag.Parse()
 

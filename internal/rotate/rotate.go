@@ -46,6 +46,35 @@ const (
 // then entities.
 var tableOrder = []string{"episodes", "summaries", "entities"}
 
+// MaxBatchSize is the hard ceiling Continue enforces on batchSize,
+// regardless of what a caller requests. Each batch runs real
+// decrypt-then-re-encrypt work per row inside one transaction (see
+// migrateEpisodeBatch/migrateSummaryBatch/migrateEntityBatch), so an
+// unbounded batch size holds that transaction's row locks open for real
+// wall-clock time, not just a cheap bulk UPDATE — directly in tension
+// with this package's own "online, no downtime" design (review finding
+// C7). An operator setting -batch-size has no way to know where that
+// threshold actually is, so Continue enforces it rather than trusting
+// every caller to pick a safe value.
+const MaxBatchSize = 5000
+
+// clampBatchSize keeps batchSize within (0, MaxBatchSize] — a value
+// requested too large is capped rather than rejected outright (the
+// rotation still proceeds, just in smaller batches over more Continue
+// calls); a non-positive value is just as much a misconfiguration as an
+// oversized one (it would otherwise silently migrate zero rows per batch
+// and still mark the rotation "completed"), so it's coerced up to 1
+// rather than passed through.
+func clampBatchSize(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	if n > MaxBatchSize {
+		return MaxBatchSize
+	}
+	return n
+}
+
 func nextTable(current string) string {
 	for i, t := range tableOrder {
 		if t == current {
@@ -206,7 +235,14 @@ func (r *Runner) Status(ctx context.Context, scope identity.Scope) (RotationStat
 // call again after a crash, resuming from wherever the database actually
 // is (see package doc comment for why that doesn't depend on the
 // persisted cursor for correctness).
+//
+// batchSize is clamped to (0, MaxBatchSize] regardless of what's
+// requested (review finding C7) — the caller doesn't need to know the
+// safe ceiling itself, and Continue's own loop already calls through
+// transparently until done either way.
 func (r *Runner) Continue(ctx context.Context, scope identity.Scope, batchSize int, actor string) (processed int, done bool, err error) {
+	batchSize = clampBatchSize(batchSize)
+
 	st, ok, err := r.Status(ctx, scope)
 	if err != nil {
 		return 0, false, err

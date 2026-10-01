@@ -121,6 +121,60 @@ func runToCompletion(t *testing.T, ctx context.Context, r *Runner, scope identit
 	return total
 }
 
+// TestClampBatchSize is the real regression test for review finding C7:
+// Continue used to trust whatever batchSize a caller requested verbatim,
+// with no ceiling — a large value holds a transaction's real
+// decrypt-then-re-encrypt row locks open for real wall-clock time,
+// directly in tension with this package's own "online, no downtime"
+// design.
+func TestClampBatchSize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"negative", -5, 1},
+		{"zero", 0, 1},
+		{"one", 1, 1},
+		{"typical default", 500, 500},
+		{"exactly the max", MaxBatchSize, MaxBatchSize},
+		{"one over the max", MaxBatchSize + 1, MaxBatchSize},
+		{"wildly oversized", 10_000_000, MaxBatchSize},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := clampBatchSize(c.in); got != c.want {
+				t.Errorf("clampBatchSize(%d) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRotate_ContinueCoercesNonPositiveBatchSizeInsteadOfStalling confirms
+// Continue itself applies the clamp, not just the helper in isolation:
+// without it, batchSize=0 would make every migrate*Batch query's LIMIT 0
+// — zero rows migrated per call, forever, while the cursor still walks
+// episodes->summaries->entities->done and the rotation gets marked
+// "completed" having silently migrated nothing at all.
+func TestRotate_ContinueCoercesNonPositiveBatchSizeInsteadOfStalling(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-rotate-batch-zero"}
+	t.Cleanup(func() { cleanup(t, db, scope) })
+
+	seed(t, ctx, db, keys, scope, 1, "batch-zero")
+
+	r := New(db, keys)
+	if _, _, err := r.Start(ctx, scope, "test"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	total := runToCompletion(t, ctx, r, scope, 0)
+	if total != 3 { // 1 episode + 1 summary + 1 entity
+		t.Errorf("migrated %d rows with batchSize=0, want 3 (coerced to 1 per call, not silently skipped)", total)
+	}
+}
+
 func TestRotate_FullLifecycle(t *testing.T) {
 	db, keys := testDB(t)
 	ctx := context.Background()
