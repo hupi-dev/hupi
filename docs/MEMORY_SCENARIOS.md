@@ -161,25 +161,58 @@ wrong across every run.
   lines, including Ibotta's, now fit. `internal/store/keyfacts_test.go`
   has unit tests pinning down the few-picks (unaffected) and many-picks
   (floor-respecting) cases.
-- **A related, separate, still-open issue found while re-verifying**:
-  `60bf93ed` ("how many days did my backpack take to arrive") was *also*
-  wrong in every run since PR #15 merged — but this is a **different**
-  mechanism, not caused or fixed by the guarantee-line cap above, and was
-  already present in the very first post-merge rerun before this fix
-  existed. Only one summary is picked for this question (no cross-summary
-  competition at all), but the fact the question needs — "I bought it
-  from Amazon on 1/15" — lives in *raw episode text*, appended to context
-  **after** all summary content, at position ~18,300 in an
-  unbudgeted dump — nowhere near the default 2,000-char cutoff.
-  Confirmed via the same large-budget-override technique: answers
-  correctly ("5 days") once nothing is truncated. This is the same
-  "naive tail-truncation, not actually budget-aware across every section
-  of context" gap already flagged in `CONSOLIDATION_COMPLETENESS_PLAN.md`
-  (Phase B's own follow-up item 1) — this fix narrowed it for summaries'
-  own guarantee lines specifically; episodes, entities, and graph content
-  still compete for the same fixed tail budget with no per-section
-  fairness at all. Not fixed in this pass — tracked as the next, larger
-  piece of the same architectural gap.
+- **A related, separate issue found while re-verifying — ✅ also now
+  fixed, three further layers deep.** `60bf93ed` ("how many days did my
+  backpack take to arrive") was *also* wrong in every run since PR #15
+  merged, confirmed present before the guarantee-line fix existed — a
+  different mechanism, same architectural gap class ("naive
+  tail-truncation, not actually budget-aware across every section of
+  context"). Three real sub-causes found and fixed in sequence, each
+  only visible once the previous one was addressed:
+  1. **One summary's own depth section, uncapped, consumed almost the
+     whole budget by itself.** This single picked summary legitimately
+     had **120 key facts** — a LongMemEval `_abs` haystack artifact
+     cramming many sessions' worth of unrelated content onto one
+     calendar day — and `depthText`'s facts were deliberately uncapped
+     ("20+ of them, each individually cheap," true at 20, false at 120).
+     Fixed: `summaryDepthCap` bounds the whole depth block (facts +
+     prose together) at the write site — safe to reintroduce now (an
+     earlier, similar cap was tried and reverted for a different reason
+     back when facts weren't yet relevance-ranked) since `writeKeyFacts`
+     already orders facts by relevance, so a tail cut only drops the
+     least-useful ones.
+  2. **Freeing that budget just let the next-biggest uncapped thing fill
+     it instead.** Episode-level "related exchange" entries
+     (`vectorSearchEpisodes`/`keywordSearchEpisodes`) write each
+     matched episode's full USER/ASSISTANT text with no cap at all; the
+     first-ranked one consumed the newly-freed room before any other
+     episode got a chance. Fixed: `episodeExchangeCap` bounds each
+     episode entry too.
+  3. **A plain head-truncate on each episode still wasn't enough** — a
+     real "episode" here turned out to be an entire multi-turn session,
+     not a single exchange, with the actual needed detail ("I bought it
+     from Amazon on 1/15") mentioned partway through a later turn,
+     thousands of characters into that one episode's own text — far
+     beyond what any reasonable head-truncate could reach. Fixed:
+     `centeredExcerpt` keeps a window centered on the *densest cluster*
+     of matched query terms instead of always keeping the text's start.
+     A first version centered on the *first* matched term and still
+     missed the detail — it landed on an earlier, sparser, less relevant
+     mention of "backpack"; scoring every candidate position by how many
+     other query-term occurrences cluster near it correctly favored the
+     denser, actually-relevant passage instead (which also contained the
+     distinguishing term "bought").
+
+  **Real re-verification**: 5/5 correct, stable across 4 full re-runs of
+  the whole 8-conversation sample, with every other previously-fixed
+  case (`gpt4_45189cb4`, `gpt4_e072b769`, and `b46e15ed`, now also
+  reliably correct) unaffected.
+
+  Episodes, entities, and graph content *still* have no fully unified,
+  cross-section budget fairness — this fixed the two concrete mechanisms
+  a real case exposed (one summary's depth, one episode's exchange text),
+  not a general rewrite of context assembly. Tracked as a smaller
+  residual than before, not closed as a category.
 
 ## E. Cross-day aggregation ("two events in a row", "since my last X and Y")
 
@@ -380,13 +413,13 @@ this information," and the model correctly says nothing is available.
 
 ## Open items, in priority order
 
-1. ⚠️ **Scenario D's follow-up — context assembly still isn't
-   budget-aware outside summaries' own guarantee lines.** The
-   guarantee-line starvation itself is fixed; episode text, entities, and
-   graph content still compete for the same fixed tail budget with no
-   per-section fairness, confirmed causing a separate real miss
-   (`60bf93ed`) that predates and is independent of the guarantee-line
-   fix.
+1. ⚠️ **Scenario D's residual — entities and graph content still have no
+   per-section budget fairness.** Summary depth and episode exchanges are
+   now both capped (`summaryDepthCap`, `episodeExchangeCap` +
+   `centeredExcerpt`); a hypothetical case where an entity's attributes
+   or graph-walk content alone consumed the budget hasn't been observed
+   in a real failure yet, but the same class of fix would apply if one
+   ever is.
 2. ⚠️ **Scenario B's residual case** — per-episode fact extraction for
    days whose topic diversity exceeds even a raised `maxClustersPerDay`.
 3. ⚠️ **Scenario I's remaining gap** — ranking among multiple true

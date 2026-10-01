@@ -394,3 +394,44 @@ func TestGuaranteeBudgetPerSummary_ZeroPicksReturnsZero(t *testing.T) {
 		t.Errorf("guaranteeBudgetPerSummary(0) = %d, want 0", got)
 	}
 }
+
+// TestCenteredExcerptShortTextReturnedUnchanged confirms the common
+// case — text already under the cap — is a no-op, same as hardTruncate.
+func TestCenteredExcerptShortTextReturnedUnchanged(t *testing.T) {
+	text := "short text"
+	if got := centeredExcerpt(text, []string{"short"}, 100); got != text {
+		t.Errorf("centeredExcerpt() = %q, want unchanged %q", got, text)
+	}
+}
+
+// TestCenteredExcerptFallsBackToHeadTruncateWithoutAMatch confirms the
+// no-query-term-found case degrades to the old hardTruncate behavior
+// rather than returning nothing.
+func TestCenteredExcerptFallsBackToHeadTruncateWithoutAMatch(t *testing.T) {
+	text := strings.Repeat("x", 500)
+	got := centeredExcerpt(text, []string{"nomatch"}, 50)
+	want := hardTruncate(text, 50)
+	if got != want {
+		t.Errorf("centeredExcerpt() = %q, want the same as hardTruncate() = %q", got, want)
+	}
+}
+
+// TestCenteredExcerptPrefersDenserClusterOverFirstOccurrence is a real
+// regression test (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): the real
+// `60bf93ed` case had one query term ("backpack") appear early in a
+// passing, less relevant remark, while the passage that actually
+// answered the question sat near a denser cluster of several query
+// terms together, later in the text. An earlier version of this
+// function centered on the *first* occurrence of any term and missed
+// the detail entirely — real-verified that scoring by cluster density
+// instead fixes it.
+func TestCenteredExcerptPrefersDenserClusterOverFirstOccurrence(t *testing.T) {
+	text := "the backpack is nice. " +
+		strings.Repeat("filler words with no query terms at all. ", 10) +
+		"the laptop backpack was bought in january for the trip."
+	queryTerms := []string{"laptop", "backpack", "bought"}
+	got := centeredExcerpt(text, queryTerms, 60)
+	if !strings.Contains(got, "bought") {
+		t.Errorf("centeredExcerpt() = %q, want it centered on the denser cluster containing %q", got, "bought")
+	}
+}

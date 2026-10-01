@@ -468,7 +468,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		}
 		refs = append(refs, summaryRefs...)
 
-		episodeRefs, err := s.vectorSearchEpisodes(ctx, tx, workspace, queryVector, &sb, &strongHit, &citations)
+		episodeRefs, err := s.vectorSearchEpisodes(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations)
 		if err != nil {
 			return fmt.Errorf("vector search episodes: %w", err)
 		}
@@ -1185,7 +1185,13 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 
 	var refs []identity.Ref
 	for _, p := range picks {
-		sb.WriteString("\n" + depthText(p.c.text, p.facts, queryTerms))
+		// summaryDepthCap bounds the whole depth block's length, not its
+		// content — depthText itself still builds the complete picture
+		// (TestDepthTextIncludesProseAndAllFacts), capped here, at the
+		// write site, the same way pass 1 caps guaranteedFact's result
+		// rather than capping inside it. See summaryDepthCap's own doc
+		// comment for the real regression this exists to fix.
+		sb.WriteString("\n" + hardTruncate(depthText(p.c.text, p.facts, queryTerms), summaryDepthCap))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id},
@@ -1449,14 +1455,54 @@ func guaranteeBudgetPerSummary(numPicks int) int {
 // that crowded it out.
 const proseDepthCap = 500
 
+// summaryDepthCap bounds the *whole* depth block (facts + prose
+// together) that fusedSearchSummaries' pass 2 writes per picked summary
+// — applied at the write site via hardTruncate, not inside depthText
+// itself (see that function's own doc comment for why).
+//
+// depthText's facts were previously left fully uncapped on purpose —
+// "20+ of them, each individually cheap" — and an earlier version of
+// this cap (capping facts and prose together, back when facts were
+// still written in raw insertion order) was tried and reverted for the
+// charity-events case: prose alone exhausted that combined cap before
+// ever reaching a fact, since nothing yet ranked facts by relevance.
+// That's no longer the shape of the problem. Real-verified against
+// `60bf93ed` ("how many days did my backpack take to arrive"): a single
+// picked summary legitimately had **120** key facts — a LongMemEval
+// `_abs` haystack artifact cramming many sessions' worth of unrelated
+// content onto one calendar day — and depthText's own uncapped output
+// for just that one summary ran to several thousand characters,
+// consuming the entire default 2000-char budget by itself. The fact the
+// question actually needed (the purchase date) was never extracted as
+// a summary key_fact at all and only survived in raw episode text,
+// appended to context *after* every summary — which never got a chance
+// to contribute anything, not because the fact was missing, but because
+// one summary's own depth section alone ate the whole budget. Confirmed
+// via a budget override: the episode text is there, and the question
+// answers correctly once nothing is truncated away first.
+//
+// Safe to reintroduce now, where it wasn't before: writeKeyFacts already
+// writes facts in descending-relevance order (rankFactsByRelevance), so
+// a tail cut here only ever drops the least-relevant facts, the same
+// "least valuable content, as late as possible" property proseDepthCap
+// already relies on — not an arbitrary cut into "whichever facts
+// happened to be first." A flat per-summary constant, not split fairly
+// across multiple picks the way guaranteeBudgetPerSummary is: depth is
+// deliberately secondary "insurance" content (guaranteedFact's own doc
+// comment), not the primary mechanism any already-fixed case depends
+// on, so a simple, uniform bound is enough here without that added
+// complexity.
+const summaryDepthCap = 700
+
 // depthText is every picked summary's "extra depth," written in pass 2
 // of fusedSearchSummaries' two-pass render (see that function's own doc
 // comment) — every key fact, uncapped, followed by a capped prose
-// snippet. The eventual global truncateToBudget call is still the final
-// backstop if the combined depth across every picked summary is too
-// large; this function's job is only to make sure that cut lands on the
-// least valuable content (verbose prose) as late as possible, not on a
-// fact several bullets into a busy day's summary.
+// snippet. summaryDepthCap (applied by the caller, not here — see its
+// own doc comment) is the real backstop against one summary's depth
+// consuming the whole context budget; the eventual global
+// truncateToBudget call is the final-final backstop if even multiple
+// capped depth sections, episodes, and everything else together still
+// exceed it.
 func depthText(prose string, facts []string, queryTerms []string) string {
 	var sb strings.Builder
 	writeKeyFacts(&sb, facts, queryTerms)
@@ -1640,6 +1686,110 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 	return refs, rows.Err()
 }
 
+// episodeExchangeCap bounds each matched episode's raw USER/ASSISTANT
+// exchange, written fully uncapped before this fix — real-verified
+// necessary alongside summaryDepthCap, not a standalone guess: fixing
+// summaryDepthCap alone (so a busy summary's own depth section stops
+// consuming the whole budget) still wasn't enough for `60bf93ed`. A real
+// "episode" here turned out to be an entire multi-turn session, not a
+// single exchange — `hupi-trace` on the one episode this question
+// matched showed several back-and-forth turns about an unrelated
+// wireless mouse, with the actual needed detail (a backpack's purchase
+// date) mentioned in passing partway through a later turn, ~2000+
+// characters into that one episode's own text. A plain head-truncate
+// (this constant's first version) can never reach that — the cap would
+// have to be nearly as large as the whole episode to work at all,
+// defeating the point of capping. See centeredExcerpt below for the
+// real fix: center the kept window on a matched query term instead of
+// always keeping the start.
+const episodeExchangeCap = 400
+
+// centeredExcerpt returns a window of text around the densest cluster of
+// matched query terms, instead of always keeping the text's head the
+// way hardTruncate does — the real fix episodeExchangeCap's own doc
+// comment describes. Falls back to a plain head-truncate when no query
+// term is found in the text at all, which is still strictly better than
+// returning nothing.
+//
+// Centers on the densest cluster, not just the first occurrence of any
+// term — a real, measured correction found during re-verification
+// against the `60bf93ed` case. An earlier version centered on the
+// *first* matched term's position, which picked a passing, less
+// relevant "backpack" mention early in the text; the passage that
+// actually answers the question ("I bought it from Amazon on 1/15")
+// sits near a denser cluster of several query terms together (laptop,
+// backpack, *bought*) later on. Scoring every occurrence by how many
+// other occurrences fall within its own candidate window correctly
+// favors that denser, more relevant cluster.
+func centeredExcerpt(text string, queryTerms []string, maxChars int) string {
+	if len(text) <= maxChars {
+		return text
+	}
+	lower := strings.ToLower(text)
+	var positions []int
+	for _, t := range queryTerms {
+		if t == "" {
+			continue
+		}
+		for i := 0; i+len(t) <= len(lower); {
+			idx := strings.Index(lower[i:], t)
+			if idx < 0 {
+				break
+			}
+			positions = append(positions, i+idx)
+			i += idx + len(t)
+		}
+	}
+	if len(positions) == 0 {
+		return hardTruncate(text, maxChars)
+	}
+	// Center on whichever occurrence's own window (±half) covers the
+	// most other occurrences, not just the first one found — real-
+	// verified necessary against the backpack case: "backpack" alone
+	// appears earlier in a passing, less relevant remark, while the
+	// passage that actually answers the question ("I bought it from
+	// Amazon on 1/15") sits near a denser cluster of several query terms
+	// together (laptop, backpack, bought) — the first-occurrence version
+	// of this function centered on the earlier, sparser mention and
+	// still missed the detail needed.
+	half := maxChars / 2
+	best := positions[0]
+	bestCount := -1
+	for _, p := range positions {
+		count := 0
+		for _, q := range positions {
+			if q >= p-half && q <= p+half {
+				count++
+			}
+		}
+		if count > bestCount {
+			bestCount = count
+			best = p
+		}
+	}
+	pos := best
+	start := pos - maxChars/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxChars
+	if end > len(text) {
+		end = len(text)
+		start = end - maxChars
+		if start < 0 {
+			start = 0
+		}
+	}
+	excerpt := text[start:end]
+	if start > 0 {
+		excerpt = "...[excerpt] " + excerpt
+	}
+	if end < len(text) {
+		excerpt += " ...[truncated]"
+	}
+	return excerpt
+}
+
 // vectorSearchEpisodes is vectorSearchSummaries' sibling over `episodes`
 // instead of `summaries` — the "high-importance episodes" half of
 // ARCHITECTURE.md's retrieval engine, closing docs/DESIGN_VS_BUILT.md #3.
@@ -1651,7 +1801,7 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 // episodeVectorSimilarityThreshold, not vectorSimilarityThreshold — see
 // that constant's own doc comment for the real measurement showing they
 // need to differ.
-func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
+func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, input_text, output_text, key_version, (embedding <=> $1::vector) as distance
 		from episodes
@@ -1690,7 +1840,7 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 		if err != nil {
 			return nil, err
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s): USER: %s ASSISTANT: %s", id, input, output))
+		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s): %s", id, centeredExcerpt(fmt.Sprintf("USER: %s ASSISTANT: %s", input, output), queryTerms, episodeExchangeCap)))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: id})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: id},
@@ -2145,7 +2295,7 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 		if rel := relativeDateLabel(ex.ts, now); rel != "" {
 			dateLabel = fmt.Sprintf(", dated %s (%s)", ex.ts.Format("2006-01-02"), rel)
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s%s, keyword match): USER: %s ASSISTANT: %s", m, dateLabel, ex.input, ex.output))
+		sb.WriteString(fmt.Sprintf("\nrelated exchange (episode %s%s, keyword match): %s", m, dateLabel, centeredExcerpt(fmt.Sprintf("USER: %s ASSISTANT: %s", ex.input, ex.output), queryTerms, episodeExchangeCap)))
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m})
 		*citations = append(*citations, gateway.Citation{
 			Ref:     identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: m},

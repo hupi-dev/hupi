@@ -1344,23 +1344,67 @@ better-understood.
   `internal/store/keyfacts_test.go` cover the few-picks (unaffected) and
   many-picks (floor-respecting) cases.
 
-  **A second, separate, still-open issue found during this
-  re-verification, not fixed here**: `60bf93ed` ("how many days did my
-  backpack take to arrive") has also been consistently wrong since PR
-  #15 merged — confirmed present in the very first post-merge rerun,
-  before this fix existed, so it's independent of the guarantee-line
-  starvation above, not something this fix should have touched. Only one
-  summary is picked for this question (no cross-summary competition),
-  but the fact needed — "I bought it from Amazon on 1/15" — lives in raw
-  episode text appended after all summary content, at position ~18,300
-  in an unbudgeted dump, nowhere near the default 2,000-char cutoff.
-  Confirmed via the same budget-override technique: correct ("5 days")
-  once nothing is truncated. This is the same "context assembly is
+  **A second, separate issue found during this re-verification — ✅ also
+  now fixed, three layers deep, each only visible once the previous one
+  was addressed**: `60bf93ed` ("how many days did my backpack take to
+  arrive") had also been consistently wrong since PR #15 merged —
+  confirmed present in the very first post-merge rerun, independent of
+  the guarantee-line starvation fix above. The same "context assembly is
   naive tail-truncation, not actually budget-aware" gap Phase B's own
-  follow-up item 1 already named — this fix narrowed it for summaries'
-  guarantee lines specifically; episodes, entities, and graph content
-  still have no per-section budget fairness at all. Tracked as the next
-  piece of the same gap, not fixed in this pass.
+  follow-up item 1 already named, recurring at two further layers:
+
+  1. **One summary's own depth section, uncapped, consumed almost the
+     whole 2000-char budget by itself.** This picked summary legitimately
+     had **120 key facts** (another LongMemEval `_abs` haystack artifact,
+     cramming many sessions onto one calendar day) — `depthText`'s facts
+     were deliberately uncapped ("20+ of them, each individually cheap"),
+     true at 20, false at 120. Fixed: `summaryDepthCap`
+     (`internal/store/retrieve.go`) bounds the whole depth block (facts +
+     prose together) at the write site, not inside `depthText` itself
+     (keeping that function's own "build the complete picture" contract
+     and existing unit test intact). Safe to reintroduce now, where an
+     earlier, similarly-shaped cap was tried and reverted for the
+     charity-events case: that reversion predated `writeKeyFacts`'
+     relevance ranking, so a combined cap back then cut into facts in
+     raw, arbitrary order; now a tail cut only ever drops the
+     least-relevant ones.
+  2. **Freeing that budget just let the next-biggest uncapped thing fill
+     it instead.** `vectorSearchEpisodes`/`keywordSearchEpisodes` write
+     each matched episode's full USER/ASSISTANT exchange with no cap at
+     all — the first-ranked episode's own full text consumed the
+     newly-freed room before a different, lower-ranked episode (or, as
+     it turned out, a later part of the *same* episode) ever got a
+     chance. Fixed: `episodeExchangeCap` bounds each episode entry too.
+  3. **A plain head-truncate per episode still wasn't enough.**
+     `hupi-trace` on the one real episode this question matched showed
+     it was an entire multi-turn session, not a single exchange — the
+     actual needed detail ("I bought it from Amazon on 1/15") sat
+     partway through a *later* turn, thousands of characters into that
+     one episode's own text, far beyond what any reasonable head-
+     truncate could reach without defeating the point of capping at
+     all. Fixed: `centeredExcerpt` keeps a window centered on the
+     *densest cluster* of matched query terms instead of always keeping
+     the text's start. A first version centered on the first matched
+     term's position alone and still missed the detail — it landed on
+     an earlier, sparser, less-relevant "backpack" mention; scoring
+     every candidate position by how many other query-term occurrences
+     fall near it correctly favored the denser, actually-relevant
+     passage instead (which also uniquely contained "bought," a real
+     distinguishing query term the sparser mention lacked).
+
+  **Real re-verification**: 5/5 correct, stable across 4 full re-runs of
+  the whole 8-conversation sample. `gpt4_45189cb4`, `gpt4_e072b769`, and
+  `b46e15ed` (itself newly, consistently correct across these same runs)
+  all unaffected. `go build`/`go vet`/`go test ./... -count=1` clean;
+  3 new unit tests for `centeredExcerpt` in
+  `internal/store/keyfacts_test.go` cover the short-text no-op,
+  no-match fallback, and the real dense-cluster-vs-first-occurrence
+  regression.
+
+  Episodes, entities, and graph content still have no fully unified
+  cross-section budget fairness — this fixed the two concrete mechanisms
+  a real case exposed, not a general rewrite of context assembly — but
+  the residual is now smaller and more specifically scoped than before.
 
   **Two other apparent "regressions" checked and ruled out as real model
   variance, not bugs**: `852ce960` (Wells Fargo) and `89527b6b`
