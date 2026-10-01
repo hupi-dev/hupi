@@ -142,6 +142,25 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			return fmt.Errorf("insert summary %s: %w", id, err)
 		}
 
+		// validSourceEpisodeID backstops kf.SourceEpisodeIDs against
+		// review finding B16: unlike upsertRelationships' own
+		// entityExists check for subject_id/object_id, a key fact's
+		// source_episode_ids was never validated at all before this fix
+		// — a hallucinated id (the consolidation LLM citing something it
+		// never actually saw) or a stale/typo'd one would be stored
+		// permanently unchecked, since a text[] column can't carry a real
+		// foreign key the way a scalar column can. in.sourceEpisodeIDs is
+		// the exact, known-real set of episodes this call's own sources
+		// came from (already loaded from the DB earlier in RunDaily/
+		// Correct) — stricter than a bare existence check, since it also
+		// catches a citation that names a real episode id that just
+		// wasn't actually one of this summary's own sources, not only
+		// ones that don't exist at all.
+		validSourceEpisodeID := make(map[string]bool, len(in.sourceEpisodeIDs))
+		for _, epID := range in.sourceEpisodeIDs {
+			validSourceEpisodeID[epID] = true
+		}
+
 		for i, kf := range in.output.KeyFacts {
 			factCT, err := enc.Encrypt(kf.Fact)
 			if err != nil {
@@ -153,7 +172,14 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			// MEMORY_FORMAT.md § Summary record).
 			var citeIDs []string
 			if in.level == "daily" {
-				citeIDs = kf.SourceEpisodeIDs
+				for _, epID := range kf.SourceEpisodeIDs {
+					if validSourceEpisodeID[epID] {
+						citeIDs = append(citeIDs, epID)
+						continue
+					}
+					slog.Warn("consolidation: dropping key fact citation that isn't one of this summary's real source episodes",
+						"episode_id", epID, "fact", kf.Fact, "scope_kind", in.scope.Kind, "scope_owner", in.scope.Owner)
+				}
 			}
 			_, err = tx.ExecContext(ctx, `
 				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version)
