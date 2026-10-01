@@ -371,7 +371,7 @@ loss (it refuses to delete a version still referenced), but the scope is
 left with a permanent extra, undeletable key version and an inaccurate
 progress row.
 
-**A9. `hupi-reembed`'s audit entry can be permanently lost for work that genuinely happened.**
+**A9. ✅ FIXED ([PR #24](https://github.com/hupi-dev/hupi/pull/24)) — `hupi-reembed`'s audit entry can be permanently lost for work that genuinely happened.**
 `cmd/hupi-reembed/main.go`. `LogRun` is gated on *this invocation's*
 processed count, not on whether unaudited work exists anywhere. If the
 process is killed after real embedding writes but before its own `LogRun`
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 8 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23; 5 remaining) |
+| Likely real bugs | 13 (✅ 9 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24; 4 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
