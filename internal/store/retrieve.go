@@ -835,15 +835,26 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// Vector search: same overfetch + threshold vectorSearchSummaries
 	// used before this refactor — see summaryOverfetchFactor's own doc
 	// comment for why overfetching matters.
+	//
+	// embedding_model = $5 (or null, for rows predating that column —
+	// see currentEmbeddingModel's own doc comment) excludes vectors from
+	// a *different*, no-longer-active embedding model — docs/CODEBASE_SURVEY_AND_REVIEW.md
+	// finding A3: without this, a cosine distance between a query vector
+	// and a stored vector from a different model is closer to noise than
+	// a real similarity signal, and pgvector's fixed column length means
+	// nothing else catches the mismatch — a provider switch would
+	// silently degrade retrieval until a full hupi-reembed completes,
+	// with no error anywhere.
 	vecRows, err := q.QueryContext(ctx, `
 		select id, summary, key_version, period, (embedding <=> $1::vector) as distance
 		from summaries s
 		where embedding is not null
+		  and (embedding_model is null or embedding_model = $5)
 		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor)
+	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor, s.currentEmbeddingModel())
 	if err != nil {
 		return nil, err
 	}
@@ -1621,11 +1632,12 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 		select id, name, attributes, key_version, last_updated, (embedding <=> $1::vector) as distance
 		from entities
 		where embedding is not null and kind != 'self_model'
+		  and (embedding_model is null or embedding_model = $6)
 		  and not (id = any($2::text[]))
 		  and scope_kind = $3 and scope_owner = $4
 		order by embedding <=> $1::vector
 		limit $5
-	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxResults)
+	`, queryVector, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner, maxResults, s.currentEmbeddingModel())
 	if err != nil {
 		return nil, err
 	}
@@ -1806,10 +1818,11 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 		select id, input_text, output_text, key_version, (embedding <=> $1::vector) as distance
 		from episodes
 		where embedding is not null and type = 'interaction'
+		  and (embedding_model is null or embedding_model = $5)
 		  and scope_kind = $2 and scope_owner = $3
 		order by embedding <=> $1::vector
 		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxVectorResults())
+	`, queryVector, scope.Kind, scope.Owner, maxVectorResults(), s.currentEmbeddingModel())
 	if err != nil {
 		return nil, err
 	}
