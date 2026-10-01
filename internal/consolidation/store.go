@@ -281,6 +281,23 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 // two different scopes' first daily summary on the same date would
 // generate the identical id and collide.
 func (r *Runner) nextSummaryID(ctx context.Context, q dbscope.Querier, scope identity.Scope, level, period string) (string, error) {
+	// Two concurrent transactions computing a version for the same
+	// scope+level+period under READ COMMITTED could both read the same
+	// maxVersion before either commits and both attempt to insert the
+	// identical id — summaries.id's primary key catches that deterministically
+	// (a clean unique-violation error, not silent corruption), but it's still
+	// a real, avoidable failure for whichever transaction loses the race
+	// (review finding C5). pg_advisory_xact_lock, not the manual-unlock
+	// session-held lock internal/rotate/demo use elsewhere: this call always
+	// runs inside the one transaction that calls it (q is the tx from
+	// storeSummary's own dbscope.Run), so a lock that releases automatically
+	// on that transaction's commit/rollback is the exact right lifetime —
+	// no separate connection or defer-unlock needed.
+	lockKey := scope.Kind + ":" + scope.Owner + ":" + level + ":" + period
+	if _, err := q.ExecContext(ctx, `select pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return "", fmt.Errorf("acquire next-version lock for %s %s: %w", level, period, err)
+	}
+
 	var maxVersion int
 	err := q.QueryRowContext(ctx, `
 		select coalesce(max(cast(substring(id from 'v([0-9]+)$') as int)), 0)
