@@ -1961,16 +1961,23 @@ func keywordSearchEnabled() bool {
 	return os.Getenv("HUPI_ENABLE_KEYWORD_SEARCH") != "false"
 }
 
-// graphWalkEnabled is the same kind of admin escape hatch
-// keywordSearchEnabled is, for the same reason: docs/ENTITY_RELATIONSHIPS_PLAN.md
-// §6 calls for this to have "its own hop-limit and token budget," and an
-// off switch is the other half of that — defaults to enabled since
-// graphWalkMaxHops/graphWalkMaxResults already bound the cost tightly,
-// but a deployment with an unusually dense relationship graph is exactly
-// the kind of "informed minority" case keywordSearchEnabled's own
-// reasoning already covers.
+// graphWalkEnabled defaults to *disabled* (review finding B12) — the
+// inverse of keywordSearchEnabled's own opt-out posture, and
+// deliberately so: three independent measurements (docs/BENCHMARK_IMPROVEMENT_PLAN.md
+// step 2 — a stale v3 ablation, the EvalMem integration's 0/32
+// firing-rate finding, and a real LoCoMo category-1 on-vs-off re-check,
+// 106 questions, 35.3% vs. 35.4%, "a settled finding, not an open
+// question") all independently agree this mechanism contributes nothing
+// measurable on either public benchmark, while still spending real,
+// bounded-but-nonzero cost competing for the same fixed context budget
+// findings A4/A5 show is a real, recurring bottleneck — a cost with no
+// offsetting, demonstrated benefit is the wrong default. Opt in with
+// HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK=true for a deployment whose own
+// relationship graph is denser or more load-bearing than either
+// benchmark's — graphWalkMaxHops/graphWalkMaxResults already bound the
+// cost tightly for exactly that "informed minority" case.
 func graphWalkEnabled() bool {
-	return os.Getenv("HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK") != "false"
+	return os.Getenv("HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK") == "true"
 }
 
 // contextCharBudget is the same "crude character stand-in for a real

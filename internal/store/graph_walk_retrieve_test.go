@@ -38,8 +38,11 @@ func insertRelationship(t *testing.T, s *Store, scope identity.Scope, id, subjec
 // should still surface a second entity (Zara) connected to it by a
 // relationship edge — Zara's own name/attributes share nothing with the
 // query, and she has no embedding at all, so neither vector search nor
-// keyword search could find her; only the graph walk can.
+// keyword search could find her; only the graph walk can. Opts in
+// explicitly (review finding B12 made this off by default) — this test
+// is about the mechanism working when enabled, not about the default.
 func TestRetrieve_GraphWalkSurfacesConnectedEntityNeverNamedInQuery(t *testing.T) {
+	t.Setenv("HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK", "true")
 	s := testStore(t)
 	ctx := context.Background()
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-graph-walk"}
@@ -65,9 +68,10 @@ func TestRetrieve_GraphWalkSurfacesConnectedEntityNeverNamedInQuery(t *testing.T
 
 // TestRetrieve_GraphWalkDisabledByFlag mirrors
 // bm25_retrieve_test.go's TestRetrieve_KeywordSearchDisabledByFlag: the
-// exact same scenario as the test above, but with the admin escape
-// hatch off, proving the flag genuinely gates this feature rather than
-// just existing as an unused knob.
+// exact same scenario as the test above, but with the flag explicitly
+// set to false, proving it still works as an explicit off-switch (not
+// just redundant with the new default) for a deployment that had
+// previously opted in and wants back out.
 func TestRetrieve_GraphWalkDisabledByFlag(t *testing.T) {
 	t.Setenv("HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK", "false")
 	s := testStore(t)
@@ -87,5 +91,34 @@ func TestRetrieve_GraphWalkDisabledByFlag(t *testing.T) {
 
 	if strings.Contains(result.ContextMessage, "person:zara") {
 		t.Errorf("expected Zara NOT to be surfaced with HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK=false, got: %q", result.ContextMessage)
+	}
+}
+
+// TestRetrieve_GraphWalkDisabledByDefault is the real regression test
+// for review finding B12: three independent measurements
+// (docs/BENCHMARK_IMPROVEMENT_PLAN.md) found this mechanism contributes
+// nothing measurable on either public benchmark while still spending
+// real cost competing for a fixed context budget — the wrong default
+// given no offsetting benefit. Same scenario as the two tests above,
+// but with no env var set at all: Zara must not be surfaced unless a
+// deployment explicitly opts in.
+func TestRetrieve_GraphWalkDisabledByDefault(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-graph-walk-default-off"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	insertEntity(t, s, scope, "person:melanie", "person", "Melanie")
+	insertEntity(t, s, scope, "person:zara", "person", "Zara")
+	insertRelationship(t, s, scope, "rel:test3", "person:melanie", "friends_with", "person:zara")
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "Tell me about Melanie"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if strings.Contains(result.ContextMessage, "person:zara") {
+		t.Errorf("expected Zara NOT to be surfaced by default (HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK unset) — graph walk must now default to disabled, got: %q", result.ContextMessage)
 	}
 }
