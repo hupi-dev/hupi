@@ -79,6 +79,27 @@ package qaprompt
 // figures on related but distinct topics), and "past tense alone"
 // (852ce960's own question asks "what was the amount," past tense, but
 // still wants the updated value, not the original).
+//
+// The "only combine figures... about the exact same specific scenario"
+// paragraph is a distinct failure shape from the one above — not two
+// versions of one fact, but two different real figures from two
+// different scenarios wrongly combined into one computed answer.
+// Direct inspection of the real source sessions for 09ba9854_abs (a
+// LongMemEval multi-session question asking a bus fare from Narita
+// airport to a Shinjuku hotel) found the predicted answer "about ¥4,000
+// (bus ¥3,200 vs taxi ¥7,000)" paired a genuine, scenario-matched Narita
+// bus fare (¥3,200, from the session that specifies Narita+Shinjuku)
+// with a genuine but wrong-scenario Haneda (a different airport) taxi
+// estimate (¥6,000-10,000, from an earlier session discussing both
+// airports generically) and did clean arithmetic on the mismatched pair
+// — real figures, wrong pairing, not fabrication from nothing. The gold
+// answer is an abstention ("you did not mention how much the bus would
+// take"); teaching a broader "hedged/unconfirmed advice isn't a usable
+// fact" rule was deliberately NOT added here — this case's whole
+// conversation is pre-booking brainstorming, and that distinction is a
+// much bigger, less-verified change than the narrow conflation guard
+// below, recorded as a known residual in docs/LONGMEMEVAL_ACCURACY_PLAN.md
+// rather than risked here.
 const Concise = `Answer the following question directly, using a short phrase rather than a full sentence or explanation — but include every specific detail the question asks for (a complete name, date, or list), not just the first word or a truncated fragment.
 
 Always give dates as an absolute date (e.g. "7 May 2023"), never a relative term like "yesterday", "last year", or "this month".
@@ -88,5 +109,7 @@ Make your best specific attempt using anything relevant you've been told, even i
 Before answering, double-check WHO the retrieved information is actually about. A conversation between two people often has facts that apply to only one of them — if the question asks about person A but the fact you found belongs to person B, say so explicitly (e.g. "That's B's necklace, not A's — A's own necklace isn't mentioned") rather than answering as if it were A's.
 
 When two or more retrieved memories give different values for the same specific fact about the same person or thing — for example, one memory says a gym membership costs $40 a month and a later-dated one says $55 — treat the most recently dated memory's value as the current one and answer with it, briefly noting the earlier value in parentheses (e.g. "$55 a month (earlier: $40)"). This holds even when the later memory mentions the value only in passing or as a recollection, and regardless of which memory appears first, is repeated more often, or is marked "(most relevant)". Judge recency by the date on the memory that actually states the value; an entity's "last updated" date covers its whole record, not each value inside it. This is only for genuine updates of one fact: values that answer different questions are not a conflict, even on the same topic (a $40 membership fee and a $55 personal-training session are two separate prices), and hypothetical or example figures don't count. If the question explicitly asks for the original, first, or previous value, give that one instead — past tense alone ("what was...") doesn't mean that.
+
+When a question asks you to compute a value from two different figures together — a savings amount, a difference, "how much more/less" — only combine figures that were actually stated about the exact same specific scenario named in the question (the same airport, route, city, product, or person), ideally from the same statement or exchange. Do not pair a figure that answers the question with a different, only superficially-similar figure from a different scenario (a different airport, a different day's conversation, a different person's situation) just because it appeared nearby in what you were given — that produces a specific-looking number that doesn't correspond to anything either source actually said. If you can't find both figures stated about the same scenario, give the individual figures you do have, each labeled with which scenario it belongs to, rather than inventing a combined one.
 
 When the answer is a list of items or a yes/no question, give ONLY the items or the yes/no verdict itself — do not add supporting context, dates, or an explanation for each item, even when that detail is available in what you were given. Having more detail available doesn't mean including it is more correct; match the specificity level the question actually asked for, not everything you know that's related.`

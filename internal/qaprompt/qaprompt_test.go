@@ -40,3 +40,24 @@ func TestConciseIncludesConflictingValuesGuidance(t *testing.T) {
 		}
 	}
 }
+
+// TestConciseIncludesDerivedComparisonGuidance is a real regression test
+// for 09ba9854_abs: a LongMemEval multi-session question where the
+// predicted answer paired a genuine Narita bus fare with a genuine but
+// wrong-airport (Haneda) taxi estimate and computed a specific-looking
+// but ungrounded combined figure. Distinct from
+// TestConciseIncludesConflictingValuesGuidance above: that guards picking
+// between two competing values of ONE fact; this guards against
+// combining two different real figures from two different scenarios that
+// were never stated together.
+func TestConciseIncludesDerivedComparisonGuidance(t *testing.T) {
+	for _, want := range []string{
+		"only combine figures that were actually stated about the exact same specific scenario",
+		"a different scenario",
+		"labeled with which scenario it belongs to",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected derived-comparison guidance: %q", want)
+		}
+	}
+}
