@@ -399,7 +399,7 @@ against the 24-hour cap by hour ~3:15. With defaults (TTL 3h, cap
 150 — directly undermining the cap's one stated purpose (bounding
 aggregate real LLM spend on an unauthenticated public endpoint).
 
-**A12. Inline Edit and Multi-File Edit have no cancellation support at all, unlike every other call site in the same extension.**
+**A12. ✅ FIXED ([PR #27](https://github.com/hupi-dev/hupi/pull/27)) — Inline Edit and Multi-File Edit have no cancellation support at all, unlike every other call site in the same extension.**
 `vscode-extension/src/inlineEdit.ts`, `multiFileEdit.ts`. Both wrap their
 gateway call in a non-cancellable progress notification and pass no
 `AbortSignal` into `streamChat`/`chat` — contrast with the chat participant
@@ -444,7 +444,7 @@ behavior.
 - **`entity_relationships` has no `CHECK` that `valid_from <= valid_until`** — a buggy caller could insert a relationship that "ends before it starts" with nothing to stop it.
 - **`audit_log` has no index on `target_ref`** — a natural "every event about entity X" query is a full scan over an append-only, ever-growing table.
 - **Migration order/idempotency-probe logic is duplicated between `install.sh` and `schema/migrate.sh`** — they agree today, but nothing enforces that a future migration gets added to both, risking silent divergence between the bare-metal and containerized install paths.
-- **No request timeout is configured on the VS Code extension's chat/completion calls** — a hung gateway has no app-level safety net beyond the SDK's own default and manual cancellation (itself missing for two of four call sites, see A12).
+- **No request timeout is configured on the VS Code extension's chat/completion calls** — a hung gateway has no app-level safety net beyond the SDK's own default and manual cancellation (now present at all four call sites, [A12](https://github.com/hupi-dev/hupi/pull/27)).
 - **`multiFileEdit`'s block parser silently drops a file's proposed edit entirely if the model's response is truncated mid-file** — no user-visible warning distinguishes "nothing needed to change" from "the response got cut off."
 - **Reopening the VS Code sidebar doesn't replay prior conversation history into the webview** — the extension host still holds it (and will send it on the next turn), but the visible panel is blank, which could confuse a user about what context the next message actually carries.
 - **Inline completion's silent-failure-by-design means a persistent bad API key produces zero visible feedback anywhere** (no output channel, no log) — reasonable for ghost text specifically, but makes this failure mode hard to self-diagnose.
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 11 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25, A11 PR #26; 2 remaining) |
+| Likely real bugs | 13 (✅ 12 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25, A11 PR #26, A12 PR #27; 1 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
