@@ -298,7 +298,7 @@ error** — the handler's only nil-preserving branch is `attrErr != nil`, so
 this specific failure mode silently reports every citation as "confirmed
 unused" to any caller building UI on top of `hupi_citations`.
 
-**A3. ✅ FIXED (PR #20, open) — Switching the active embedding provider without re-embedding silently mixes incompatible vector spaces, with nothing catching it.**
+**A3. ✅ FIXED (merged, PR #20) — Switching the active embedding provider without re-embedding silently mixes incompatible vector spaces, with nothing catching it.**
 `bootstrap.VerifyEmbedding` only checks vector *length* compatibility, not
 model *identity*; the retrieval nearest-neighbor queries
 (`internal/store/retrieve.go`, vector search over summaries/episodes/
@@ -348,7 +348,7 @@ otherwise fully-correct consolidation day (summary, facts, entities, audit
 log all committed) produces a false "failed" alert and real, silently lost
 downstream work.
 
-**A7. A daily summary consolidated for the first time after its week's rollup already exists never triggers a refresh of that now-stale rollup.**
+**A7. ✅ FIXED ([PR #22](https://github.com/hupi-dev/hupi/pull/22)) — A daily summary consolidated for the first time after its week's rollup already exists never triggers a refresh of that now-stale rollup.**
 `internal/consolidation/runner.go`. `refreshRollupsCovering` is only called
 when `existingCurrentID != ""` — reasoning that nothing existed to be stale
 before. That doesn't hold for a day that had zero episodes when its week's
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 6 fixed — A1/A2 merged PR #18/#19, A3 PR #20, A4/A5 merged PR #17, A6 PR #21; 7 remaining) |
+| Likely real bugs | 13 (✅ 7 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22; 6 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
