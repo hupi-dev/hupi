@@ -55,6 +55,20 @@ export function parseFileBlocks(text: string): { path: string; content: string }
   return blocks;
 }
 
+/** True if `text` contains a `---FILE: ...---` opening marker with no
+ *  corresponding `---END---` — i.e. the response was cut off mid-file
+ *  (hit max_tokens, a dropped connection, anything) rather than the model
+ *  genuinely having nothing left to say (review finding B26). A format-
+ *  level check, not reliant on the API's own finish_reason: it catches a
+ *  dangling block regardless of whether the provider behind HUPI's
+ *  gateway reports truncation faithfully, and it's exactly the same
+ *  signal the parser above already almost has — counting how many
+ *  opening markers exist vs. how many blocks fully closed. */
+export function hasTruncatedBlock(text: string): boolean {
+  const openings = text.match(/---FILE: .+?---/g) ?? [];
+  return openings.length > parseFileBlocks(text).length;
+}
+
 export function registerMultiFileEdit(context: vscode.ExtensionContext): vscode.Disposable[] {
   const diffProvider = createVirtualDiffProvider(DIFF_SCHEME);
 
@@ -166,9 +180,25 @@ export function registerMultiFileEdit(context: vscode.ExtensionContext): vscode.
       proposals.push({ path, doc, original, proposed: content });
     }
 
+    // A truncated final block is silently invisible to the loop above —
+    // it never fully matched, so it's indistinguishable from "nothing to
+    // change" unless checked for separately (finding B26).
+    const truncated = hasTruncatedBlock(responseText);
+
     if (proposals.length === 0) {
-      vscode.window.showInformationMessage('HUPI: no changes proposed.');
+      if (truncated) {
+        vscode.window.showWarningMessage(
+          "HUPI: the model's response appears to have been cut off before any file edit finished — no changes could be parsed. Try again, or select fewer/smaller files.",
+        );
+      } else {
+        vscode.window.showInformationMessage('HUPI: no changes proposed.');
+      }
       return;
+    }
+    if (truncated) {
+      vscode.window.showWarningMessage(
+        `HUPI: the response was truncated — only ${proposals.length} file edit${proposals.length === 1 ? '' : 's'} could be parsed. Re-run if you expected more files to change.`,
+      );
     }
 
     showReviewPanel(context, proposals, diffProvider);
