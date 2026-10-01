@@ -964,7 +964,22 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				matches = append(matches, scored{id: doc.id, score: score})
 			}
 		}
-		sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+		// Tie-broken by id, not just score (review finding B10): the
+		// underlying SQL has no ORDER BY, so Postgres makes no guarantee
+		// about the row order docs itself arrives in across repeated runs
+		// — without a deterministic secondary key, which tied-score
+		// candidate survives kwCap below (and ultimately maxResults) could
+		// vary run-to-run with identical data, a real reproducibility risk
+		// for a project that leans heavily on exact before/after benchmark
+		// comparisons. Breaking ties by id makes the final order fully
+		// deterministic regardless of what order docs arrived in, without
+		// needing to also add an ORDER BY to the query itself.
+		sort.Slice(matches, func(i, j int) bool {
+			if matches[i].score != matches[j].score {
+				return matches[i].score > matches[j].score
+			}
+			return matches[i].id < matches[j].id
+		})
 		kwCap := maxResults * summaryOverfetchFactor
 		if len(matches) > kwCap {
 			matches = matches[:kwCap]
@@ -2492,7 +2507,18 @@ func rankBM25(docs []bm25Document, queryTerms []string) []string {
 			matches = append(matches, scored{id: doc.id, score: score})
 		}
 	}
-	sort.Slice(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+	// Tie-broken by id, not just score (review finding B10) — see
+	// fusedSearchSummaries' own identical fix for the full reasoning:
+	// the underlying SQL has no ORDER BY, so without a deterministic
+	// secondary key here, which tied-score candidate survives the
+	// maxVectorResults cap below could vary run-to-run with identical
+	// data.
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		return matches[i].id < matches[j].id
+	})
 	if len(matches) > maxVectorResults() {
 		matches = matches[:maxVectorResults()]
 	}
