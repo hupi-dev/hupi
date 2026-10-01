@@ -408,7 +408,7 @@ leaves the user with no way to cancel short of reloading the window, and
 re-triggering the command starts a second concurrent request with no
 supersede/abort of the first.
 
-**A13. The extension sends up to 8000 characters of the active file on every turn with no UI indication and no opt-out.**
+**A13. ✅ FIXED ([PR #28](https://github.com/hupi-dev/hupi/pull/28)) — The extension sends up to 8000 characters of the active file on every turn with no UI indication and no opt-out.**
 `vscode-extension/src/chatViewProvider.ts`/`chatParticipant.ts`. The
 echoed user message in the sidebar transcript shows only the user's typed
 text — the actual prepended file-context block sent to the gateway is never
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 12 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25, A11 PR #26, A12 PR #27; 1 remaining) |
+| Likely real bugs | 13 (✅ all 13 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25, A11 PR #26, A12 PR #27, A13 PR #28) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
