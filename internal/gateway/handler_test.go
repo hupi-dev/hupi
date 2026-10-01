@@ -587,3 +587,49 @@ func TestHandleChatCompletions_StreamMidStreamErrorIncrementsProviderCallErrorsT
 		t.Errorf("hupi_provider_call_errors_total{provider=%q,vendor=%q} = %v, want 1", "stream-error-test", "stream-error-test-vendor", got)
 	}
 }
+
+// TestHandleChatCompletions_RejectsInvalidMessageRole is the real
+// regression test for review finding C1: a message's role used to be
+// forwarded to the vendor API completely unvalidated — an invalid role
+// would surface as an opaque upstream error instead of a clear 400 at
+// HUPI's own gateway.
+func TestHandleChatCompletions_RejectsInvalidMessageRole(t *testing.T) {
+	retriever := &fakeRetriever{}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+
+	body := strings.NewReader(`{"model":"test","messages":[{"role":"nonsense","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+	w := httptest.NewRecorder()
+	h.HandleChatCompletions(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	respBody, _ := io.ReadAll(w.Body)
+	if !strings.Contains(string(respBody), `invalid message role "nonsense"`) {
+		t.Errorf("response body = %q, want it to name the invalid role", string(respBody))
+	}
+	if retriever.calls != 0 {
+		t.Error("an invalid role must be rejected before retrieval ever runs")
+	}
+}
+
+// TestHandleChatCompletions_AcceptsEveryValidRole confirms the new check
+// isn't overly strict — system/user/assistant must all still work,
+// including system, which no existing test in this file exercises.
+func TestHandleChatCompletions_AcceptsEveryValidRole(t *testing.T) {
+	for _, role := range []string{"system", "user", "assistant"} {
+		t.Run(role, func(t *testing.T) {
+			h := newTestHandler(t, &fakeRetriever{}, &fakeCapturer{})
+			body := strings.NewReader(fmt.Sprintf(`{"model":"test","messages":[{"role":%q,"content":"hi"}]}`, role))
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body)
+			w := httptest.NewRecorder()
+			h.HandleChatCompletions(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("role %q: status = %d, body = %q, want 200", role, w.Code, w.Body.String())
+			}
+		})
+	}
+}
