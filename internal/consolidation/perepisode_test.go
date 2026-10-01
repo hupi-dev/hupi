@@ -2,11 +2,18 @@ package consolidation
 
 import (
 	"context"
+	"database/sql"
+	"encoding/base64"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"hupi/internal/crypto"
+	"hupi/internal/identity"
 	"hupi/internal/provider"
 )
 
@@ -190,5 +197,104 @@ func TestExtractPerEpisodeFactsChunksLongEpisodesAndMergesResults(t *testing.T) 
 		if len(f.SourceEpisodeIDs) != 1 || f.SourceEpisodeIDs[0] != "ep_long" {
 			t.Errorf("fact %+v not attributed to ep_long", f)
 		}
+	}
+}
+
+// TestLivePerEpisodeFactPromptExtracts2014ConstructionMilestone is the
+// real-data verification for the 5809eb10 fix (multi-milestone timeline
+// extraction, see TestSummarySystemPromptAndPerEpisodeFactPromptCoverMultiMilestoneTimelines).
+// Direct decryption of the real stored memory for this scope/day showed
+// "construction began in 2014" was never extracted at all before this
+// fix, even though the source episode states it in the same paragraph as
+// the contract-signed (2015) and keys-received (2016) dates, both of
+// which WERE extracted. This replays the exact real episode text through
+// the real, updated perEpisodeFactPrompt against the real gpt-4.1
+// grounding/consolidation profile to confirm the fix actually works, not
+// just that the prompt contains the right words. Requires OPENAI_API_KEY,
+// HUPI_DATABASE_URL, and HUPI_KEK pointed at hupi_sample6_fresh.
+func TestLivePerEpisodeFactPromptExtracts2014ConstructionMilestone(t *testing.T) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	dbURL := os.Getenv("HUPI_DATABASE_URL")
+	kek := os.Getenv("HUPI_KEK")
+	if apiKey == "" || dbURL == "" || kek == "" {
+		t.Skip("OPENAI_API_KEY/HUPI_DATABASE_URL/HUPI_KEK not all set; skipping live real-data extraction verification")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	kekBytes, err := base64.StdEncoding.DecodeString(kek)
+	if err != nil {
+		t.Fatalf("decode HUPI_KEK: %v", err)
+	}
+	keys := crypto.NewKeyStore(db, kekBytes)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:bench-longmemeval-hupi-5809eb10"}
+	enc, _, err := keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("GetOrCreate key: %v", err)
+	}
+
+	rows, err := db.QueryContext(context.Background(), `
+		select id, input_text, output_text from episodes
+		where scope_kind = $1 and scope_owner = $2
+		  and type = 'interaction' and ts::date = '2023-05-30'
+		order by ts`, scope.Kind, scope.Owner)
+	if err != nil {
+		t.Fatalf("query episodes: %v", err)
+	}
+	defer rows.Close()
+
+	var bajimayaSource *textSource
+	for rows.Next() {
+		var id string
+		var inBlob, outBlob []byte
+		if err := rows.Scan(&id, &inBlob, &outBlob); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		in, err := enc.Decrypt(inBlob)
+		if err != nil {
+			t.Fatalf("decrypt input_text: %v", err)
+		}
+		out, err := enc.Decrypt(outBlob)
+		if err != nil {
+			t.Fatalf("decrypt output_text: %v", err)
+		}
+		if strings.Contains(in, "Bajimaya") || strings.Contains(out, "Bajimaya") {
+			src := textSource{id: id, text: "USER: " + in + "\nASSISTANT: " + out}
+			bajimayaSource = &src
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if bajimayaSource == nil {
+		t.Skip("no episode mentioning Bajimaya found for this scope/day — data may have changed")
+	}
+	t.Logf("found source episode %s, %d runes", bajimayaSource.id, len([]rune(bajimayaSource.text)))
+
+	real := provider.NewOpenAICompat(provider.OpenAICompatConfig{
+		Name:    "live-gpt41",
+		Vendor:  "openai",
+		Model:   "gpt-4.1",
+		BaseURL: "https://api.openai.com/v1",
+		APIKey:  apiKey,
+	})
+	runner := New(nil, nil, real, nil, nil)
+
+	facts := runner.extractPerEpisodeFacts(context.Background(), []textSource{*bajimayaSource})
+	t.Logf("extracted %d facts:", len(facts))
+	found2014 := false
+	for _, f := range facts {
+		t.Logf("  - %s", f.Fact)
+		if strings.Contains(f.Fact, "2014") {
+			found2014 = true
+		}
+	}
+	if !found2014 {
+		t.Errorf("no extracted fact mentions 2014 (construction-began year) — the multi-milestone fix did not recover it on this run")
 	}
 }
