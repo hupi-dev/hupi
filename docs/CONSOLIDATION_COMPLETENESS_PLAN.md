@@ -1543,6 +1543,64 @@ independently tested, but 852ce960 itself still doesn't reliably score
 correct end to end, since both layers' residual non-determinism compound.
 This is reported honestly rather than claimed as a full fix.
 
+## Post-completion follow-up (2026-10-01, round 2): the grounding residual flagged above was a real, reproducible bug
+
+A fresh, unbiased 6-conversation LongMemEval validation (1 instance per
+question type, deliberately excluding every instance used in prior
+diagnostic work — a clean sample, not a re-check of already-tuned cases)
+scored 2/6 against `main` at the time (which already included PR #68/#69
+above and PR #67/#70). Direct investigation of the real benchmark
+artifacts (not assumption) found the grounding non-determinism flagged as
+a residual just above — "grounding itself remains measurably
+non-deterministic... deserves its own dedicated investigation" — was
+itself a specific, reproducible bug, not unstructured model noise.
+
+`groundingCheckOne` sends up to `groundingCheckBatchSize` (20) facts to
+the grounding model expecting exactly one verdict per fact; on any count
+mismatch it defaulted **the entire batch** to ungrounded. Grepping the
+real 6-conversation run's log for this warning found **8 occurrences,
+every single one reading exactly `got=21 want=20`** — far too uniform to
+be random noise, a reliable failure tied to a full 20-item batch. Direct
+read-only queries against the real benchmark DB confirmed the damage: one
+scope's only summary version had 30 permanently-ungrounded facts out of
+424 (one full zeroed batch plus genuine negatives elsewhere); another
+scope's two relevant days were 37% and 100%-then-partially-regenerated
+ungrounded. Both of the two LongMemEval questions this directly broke
+(a BBQ-event date, a sneakers-storage knowledge-update) had their correct,
+specific answer sitting in a batch that got zeroed — invisible to
+retrieval and to Gap 3's cross-period contradiction mechanism, not merely
+hard to rank.
+
+Live reproduction against the real gpt-4.1 grounding profile confirmed
+this directly (not inferred): replaying the *exact* real, contiguous
+20-fact batch that was originally zeroed, with its real source text,
+reproduced the identical `21 verdicts for 20 facts` mismatch live (2 of 8
+trials across two scopes — intermittent, as expected, but real and
+repeatable).
+
+**Fix**, [PR #71](https://github.com/hupi-dev/hupi/pull/71): the
+grounding response contract is now index-tagged
+(`{"i":N,"ok":bool}` per fact instead of a bare positional boolean array),
+so a miscounted response can be realigned by index — every fact whose
+index resolves cleanly keeps its real verdict, only a genuinely-unindexed
+fact falls back to ungrounded, and one retry is attempted before salvage.
+A new `hupi_grounding_salvage_total` metric distinguishes this forced
+path from a genuine model "false" verdict going forward.
+
+**Real, measured result**: reconsolidating both affected real scopes/days
+with this fix and re-answering confirmed **both previously-unanswerable
+questions now answer correctly, 3/3 trials each** — "3 June 2023" (gold:
+"June 3rd") and "Shoe rack in your closet" (gold: "in a shoe rack in my
+closet"). This closes the grounding-reliability residual flagged in the
+section above for exactly the mechanism that was actually at fault — not
+irreducible model noise, a salvageable indexing problem.
+
+See `docs/LONGMEMEVAL_ACCURACY_PLAN.md`'s 2026-10-01 round-2 update for
+the two other real gaps this same validation run surfaced (a
+multi-milestone fact-extraction gap and an answer-time cross-scenario
+figure-conflation gap), which are independent of this one and fixed in
+separate PRs.
+
 ## Non-goals
 
 - A general-purpose "detect and resolve any factual contradiction"
