@@ -410,7 +410,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	// reason to pay for the same embedding call twice. Deliberately
 	// outside any transaction: this is a network call to the embedding
 	// provider.
-	embedResp, err := s.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{query}})
+	embedResp, err := s.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(query)}})
 	if err != nil {
 		return gateway.RetrievalResult{}, fmt.Errorf("store: embed query: %w", err)
 	}
@@ -1966,11 +1966,18 @@ const episodeExchangeCap = 400
 // other occurrences fall within its own candidate window correctly
 // favors that denser, more relevant cluster.
 func centeredExcerpt(text string, queryTerms []string, maxChars int) string {
-	if len(text) <= maxChars {
+	runes := []rune(text)
+	if len(runes) <= maxChars {
 		return text
 	}
+	// Term search stays byte-based (strings.Index is cheap and correct
+	// for finding occurrences), but every position found is converted to
+	// a rune index before any window/centering math or slicing runs —
+	// text[start:end] on raw byte offsets could land mid-character on
+	// multi-byte UTF-8 (smart quotes, accented names), the same class of
+	// bug already fixed in chunkText/truncateToBudget/hardTruncate.
 	lower := strings.ToLower(text)
-	var positions []int
+	var positions []int // rune positions, not byte offsets
 	for _, t := range queryTerms {
 		if t == "" {
 			continue
@@ -1980,8 +1987,9 @@ func centeredExcerpt(text string, queryTerms []string, maxChars int) string {
 			if idx < 0 {
 				break
 			}
-			positions = append(positions, i+idx)
-			i += idx + len(t)
+			bytePos := i + idx
+			positions = append(positions, utf8.RuneCountInString(text[:bytePos]))
+			i = bytePos + len(t)
 		}
 	}
 	if len(positions) == 0 {
@@ -2017,18 +2025,18 @@ func centeredExcerpt(text string, queryTerms []string, maxChars int) string {
 		start = 0
 	}
 	end := start + maxChars
-	if end > len(text) {
-		end = len(text)
+	if end > len(runes) {
+		end = len(runes)
 		start = end - maxChars
 		if start < 0 {
 			start = 0
 		}
 	}
-	excerpt := text[start:end]
+	excerpt := string(runes[start:end])
 	if start > 0 {
 		excerpt = "...[excerpt] " + excerpt
 	}
-	if end < len(text) {
+	if end < len(runes) {
 		excerpt += " ...[truncated]"
 	}
 	return excerpt

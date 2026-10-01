@@ -6,7 +6,10 @@
 // bounded adapter, not a change to callers.
 package provider
 
-import "context"
+import (
+	"context"
+	"log/slog"
+)
 
 type Role string
 
@@ -92,6 +95,35 @@ const EmbeddingDimensions = 1536
 type EmbedResponse struct {
 	Vectors [][]float32
 	Usage   Usage
+}
+
+// embedTruncateRuneBudget is a conservative hard cap well under real
+// embedding models' own input-token limits (OpenAI's text-embedding-3-*
+// family caps around 8191 tokens; ~4 characters/token is a reasonable
+// English-text estimate, but non-English/punctuation-heavy text can run
+// fewer characters per token, so this stays well under the naive
+// 8191*4 estimate rather than cutting it close).
+const embedTruncateRuneBudget = 20000
+
+// TruncateForEmbedding defensively hard-truncates text before it's sent
+// to an Embed call. No caller of Embed anywhere in this codebase chunks
+// or caps its input today (consolidation/store.go, cluster.go,
+// runner.go, reembed/reembed.go, store/retrieve.go) — fine for a chat
+// turn's worth of text, but file/image attachment ingestion makes it
+// realistic for a single episode's text to approach or exceed a real
+// embedding model's own input-token limit, which fails the whole
+// request rather than degrading gracefully. This is deliberately a flat
+// safety truncation, not multi-chunk-averaging — what "the embedding of
+// a whole long document" should even mean for similarity search is a
+// real retrieval-quality design question of its own, out of scope here.
+func TruncateForEmbedding(text string) string {
+	runes := []rune(text)
+	if len(runes) <= embedTruncateRuneBudget {
+		return text
+	}
+	slog.Warn("provider: truncating text before embedding, exceeds safety budget",
+		"original_runes", len(runes), "budget", embedTruncateRuneBudget)
+	return string(runes[:embedTruncateRuneBudget])
 }
 
 // Provider is implemented once per vendor wire format, not once per vendor:

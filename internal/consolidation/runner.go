@@ -587,7 +587,7 @@ func (r *Runner) embedHighImportanceEpisodes(ctx context.Context, scope identity
 	}
 
 	for _, s := range sources {
-		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{s.text}})
+		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(s.text)}})
 		if err != nil {
 			return fmt.Errorf("embed episode %s: %w", s.id, err)
 		}

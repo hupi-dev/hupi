@@ -719,7 +719,7 @@ func EmbedderIdentity(p provider.Provider) string {
 }
 
 func (r *Runner) embedSummary(ctx context.Context, scope identity.Scope, id, text string) error {
-	resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{text}})
+	resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(text)}})
 	if err != nil {
 		return err
 	}
@@ -794,7 +794,7 @@ func (r *Runner) embedEntities(ctx context.Context, scope identity.Scope, ids []
 			}
 		}
 
-		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{EntityEmbedText(kind, name, attrs)}})
+		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(EntityEmbedText(kind, name, attrs))}})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("entity %s: embed call: %w", id, err))
 			continue
@@ -862,11 +862,15 @@ func (r *Runner) embedKeyFacts(ctx context.Context, scope identity.Scope, facts 
 
 		texts := make([]string, len(chunk))
 		for i, f := range chunk {
-			text := f.text
-			if len(text) > keyFactEmbedMaxChars {
-				text = text[:keyFactEmbedMaxChars]
+			runes := []rune(f.text)
+			if len(runes) > keyFactEmbedMaxChars {
+				// Rune-safe, not a byte slice — a byte index can land
+				// mid-character on multi-byte UTF-8 (smart quotes,
+				// accented names), the same class of bug fixed in
+				// centeredExcerpt (internal/store/retrieve.go).
+				runes = runes[:keyFactEmbedMaxChars]
 			}
-			texts[i] = text
+			texts[i] = provider.TruncateForEmbedding(string(runes))
 		}
 
 		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: texts})

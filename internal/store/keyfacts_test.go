@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // lexicalFacts builds []keyFact fixtures with no similarity (Valid ==
@@ -669,5 +670,28 @@ func TestCenteredExcerptPrefersDenserClusterOverFirstOccurrence(t *testing.T) {
 	got := centeredExcerpt(text, queryTerms, 60)
 	if !strings.Contains(got, "bought") {
 		t.Errorf("centeredExcerpt() = %q, want it centered on the denser cluster containing %q", got, "bought")
+	}
+}
+
+// TestCenteredExcerptIsRuneSafeNotByteSafe is a regression test for a
+// latent bug in this function (fixed alongside the BM25 key-fact-ranking
+// work, since file/image attachment text makes multi-byte UTF-8 — smart
+// quotes, accented names, PDF bullet characters — meaningfully more
+// likely than typical chat text): it used to slice by raw byte offset
+// (text[start:end]), which can land in the middle of a multi-byte
+// character and produce invalid UTF-8 — the same class of bug already
+// fixed in chunkText/truncateToBudget/hardTruncate. This fixture
+// deliberately places multi-byte characters (é, ", ") right at the
+// window boundary the old byte-offset math would have cut through.
+func TestCenteredExcerptIsRuneSafeNotByteSafe(t *testing.T) {
+	text := strings.Repeat("café ", 10) + "the répondez bought “item” at the café " +
+		strings.Repeat("more café filler words here ", 10)
+	queryTerms := []string{"bought"}
+	got := centeredExcerpt(text, queryTerms, 40)
+	if !utf8.ValidString(got) {
+		t.Errorf("centeredExcerpt() = %q is not valid UTF-8 — byte-sliced mid-character", got)
+	}
+	if strings.ContainsRune(got, utf8.RuneError) {
+		t.Errorf("centeredExcerpt() = %q contains a replacement character, a multi-byte rune was likely cut in half", got)
 	}
 }
