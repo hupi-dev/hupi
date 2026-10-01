@@ -466,7 +466,13 @@ behavior.
 ## D. Confirmed clean — explicitly checked, nothing found
 
 Stated explicitly because thoroughness was the point of this review, not
-just to pad the findings list:
+just to pad the findings list.
+
+**Re-verified against current code** after every A/B/C finding above was
+fixed (the codebase had changed substantially by then — new tables, new
+RLS policies, new locking, new retry logic): all seven claims below still
+hold as stated. One of them (resumability) led to a real follow-up fix
+even though the claim itself wasn't violated — see its own note below.
 
 - **No cross-tenant query path was found anywhere** that touches a scoped
   table without going through `dbscope.Run`/`SetSession` first — the single
@@ -492,7 +498,14 @@ just to pad the findings list:
 - **Key rotation and re-embedding are both genuinely resumable** — verified
   by tracing actual transaction boundaries (not just trusting doc
   comments): a crash mid-batch loses at most the in-flight batch/row, never
-  double-processes, never skips.
+  double-processes, never skips. Still true as stated — a failed row stays
+  pending and the next run picks it up correctly. Re-verification found a
+  real, separate gap in *how reliably* a row recovers on that next
+  attempt, not in resumability itself: B19's own fix
+  (`internal/reembed`'s key-recovery retry) refreshed a stale row's
+  `key_version` but not its ciphertext, so recovery reliably failed with a
+  clean decrypt error instead of succeeding — fixed in
+  [PR #65](https://github.com/hupi-dev/hupi/pull/65).
 - **Row-Level Security fails closed when session variables are unset**,
   confirmed against the actual policy SQL (`NULL` comparisons never match)
   and a dedicated existing test.
