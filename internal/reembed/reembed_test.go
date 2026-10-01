@@ -189,6 +189,38 @@ func seedEntity(t *testing.T, ctx context.Context, db *sql.DB, keys *crypto.KeyS
 	}
 }
 
+func seedKeyFact(t *testing.T, ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scope identity.Scope, summaryID, fact string, grounded bool, embeddingModel string, withEmbedding bool) int64 {
+	t.Helper()
+	enc, keyVersion, err := keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve encryption key: %v", err)
+	}
+	factCT, err := enc.Encrypt(fact)
+	if err != nil {
+		t.Fatalf("encrypt key fact: %v", err)
+	}
+	var embeddingModelArg any
+	if embeddingModel != "" {
+		embeddingModelArg = embeddingModel
+	}
+	var embeddingArg any
+	if withEmbedding {
+		embeddingArg = dummyVector()
+	}
+	var id int64
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			insert into summary_key_facts (summary_id, fact, grounded, key_version, scope_kind, scope_owner, embedding, embedding_model)
+			values ($1, $2, $3, $4, $5, $6, $7, $8)
+			returning id
+		`, summaryID, factCT, grounded, keyVersion, scope.Kind, scope.Owner, embeddingArg, embeddingModelArg).Scan(&id)
+	})
+	if err != nil {
+		t.Fatalf("seed key fact for %s: %v", summaryID, err)
+	}
+	return id
+}
+
 func runToCompletion(t *testing.T, ctx context.Context, r *Runner, scope identity.Scope, batchSize int) int {
 	t.Helper()
 	total := 0
@@ -233,6 +265,30 @@ func TestReembed_StatusCountsNullAndMismatchedRows(t *testing.T) {
 	seedEntity(t, ctx, db, keys, scope, "project:status-stale", "project", "Stale Project", `{"k":"v"}`, "openai:text-embed-2", true)
 	seedEntity(t, ctx, db, keys, scope, "project:status-current", "project", "Current Project", `{"k":"v"}`, "openai:text-embed-3", true)
 
+	// Key facts: a current summary with a null-embedded grounded fact
+	// (pending), a stale-model grounded fact (pending), a current grounded
+	// fact (not pending), and an ungrounded fact (never retrieved, so
+	// never pending regardless of embedding state) — plus a *superseded*
+	// summary's own null-embedded grounded fact, which must also stay out
+	// of scope: a corrected-away row is never read by anything this
+	// package's own embeddings exist to serve.
+	seedSummary(t, ctx, db, keys, scope, "sum_status-kf-parent", "parent for key facts", "openai:text-embed-3", true)
+	seedKeyFact(t, ctx, db, keys, scope, "sum_status-kf-parent", "fact null", true, "", false)
+	seedKeyFact(t, ctx, db, keys, scope, "sum_status-kf-parent", "fact stale", true, "openai:text-embed-2", true)
+	seedKeyFact(t, ctx, db, keys, scope, "sum_status-kf-parent", "fact current", true, "openai:text-embed-3", true)
+	seedKeyFact(t, ctx, db, keys, scope, "sum_status-kf-parent", "fact ungrounded", false, "", false)
+
+	seedSummary(t, ctx, db, keys, scope, "sum_status-kf-superseded", "superseded parent", "openai:text-embed-3", true)
+	seedSummary(t, ctx, db, keys, scope, "sum_status-kf-superseded-v2", "the correction", "openai:text-embed-3", true)
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `update summaries set supersedes = $1 where id = $2`, "sum_status-kf-superseded", "sum_status-kf-superseded-v2")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("mark summary superseded: %v", err)
+	}
+	seedKeyFact(t, ctx, db, keys, scope, "sum_status-kf-superseded", "fact on a superseded summary", true, "", false)
+
 	r := New(db, keys, current)
 	st, err := r.Status(ctx, scope)
 	if err != nil {
@@ -249,6 +305,9 @@ func TestReembed_StatusCountsNullAndMismatchedRows(t *testing.T) {
 	}
 	if st.EntitiesPending != 1 {
 		t.Errorf("EntitiesPending = %d, want 1 (only the stale one)", st.EntitiesPending)
+	}
+	if st.KeyFactsPending != 2 {
+		t.Errorf("KeyFactsPending = %d, want 2 (the null + stale grounded facts on the current summary only — not the ungrounded fact, and not the superseded summary's fact)", st.KeyFactsPending)
 	}
 }
 
@@ -378,6 +437,74 @@ func TestReembed_LogRunWritesAuditEntry(t *testing.T) {
 	}
 	if got, ok := parsed["rows_reembedded"].(float64); !ok || got != 7 {
 		t.Errorf("detail[rows_reembedded] = %v, want 7", parsed["rows_reembedded"])
+	}
+}
+
+// TestReembed_KeyFactsBatchEmbedsGroundedFactsInOneCall confirms
+// reembedKeyFactBatch's real departure from the other three tables: one
+// batched Embed call per batch, not one per row, and that only grounded
+// facts of a current (non-superseded) summary are ever selected — the
+// exact predicate Status counts against.
+func TestReembed_KeyFactsBatchEmbedsGroundedFactsInOneCall(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-reembed-keyfacts"}
+	t.Cleanup(func() { cleanup(t, db, scope) })
+
+	current := newFakeEmbedder("openai", "text-embed-3")
+
+	seedSummary(t, ctx, db, keys, scope, "sum_kf-continue-parent", "parent", "openai:text-embed-3", true)
+	seedKeyFact(t, ctx, db, keys, scope, "sum_kf-continue-parent", "pending fact one", true, "", false)
+	seedKeyFact(t, ctx, db, keys, scope, "sum_kf-continue-parent", "pending fact two", true, "openai:text-embed-2", true)
+	seedKeyFact(t, ctx, db, keys, scope, "sum_kf-continue-parent", "already current fact", true, "openai:text-embed-3", true)
+	seedKeyFact(t, ctx, db, keys, scope, "sum_kf-continue-parent", "ungrounded fact, never pending", false, "", false)
+
+	r := New(db, keys, current)
+	processed, table, done, err := r.Continue(ctx, scope, 100)
+	if err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	if table != "summary_key_facts" {
+		t.Errorf("table = %q, want %q", table, "summary_key_facts")
+	}
+	if processed != 2 {
+		t.Errorf("processed = %d, want 2 (the two pending grounded facts)", processed)
+	}
+	if done {
+		t.Error("done = true after the first batch, want false (Status should now report everything embedded, but Continue itself doesn't re-check)")
+	}
+
+	// One batched call, not two — the real property that distinguishes
+	// this table from reembedSummaryBatch/reembedEpisodeBatch/
+	// reembedEntityBatch's one-call-per-row pattern.
+	if len(*current.calls) != 2 {
+		t.Errorf("embedder received %d total embed calls across this batch, want exactly 2 (one batched call carrying both pending facts' text)", len(*current.calls))
+	}
+	for _, want := range []string{"pending fact one", "pending fact two"} {
+		found := false
+		for _, got := range *current.calls {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("embedder never received %q — want it decrypted and embedded", want)
+		}
+	}
+	for _, unwanted := range []string{"already current fact", "ungrounded fact, never pending"} {
+		for _, got := range *current.calls {
+			if got == unwanted {
+				t.Errorf("embedder received %q, want it left alone (already current, or never grounded)", unwanted)
+			}
+		}
+	}
+
+	st, err := r.Status(ctx, scope)
+	if err != nil {
+		t.Fatalf("Status after Continue: %v", err)
+	}
+	if st.KeyFactsPending != 0 {
+		t.Errorf("KeyFactsPending after Continue = %d, want 0", st.KeyFactsPending)
 	}
 }
 

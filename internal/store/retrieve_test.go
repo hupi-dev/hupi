@@ -160,6 +160,179 @@ func TestRetrieve_SurfacesGroundedKeyFactsAlongsideSummary(t *testing.T) {
 	}
 }
 
+// insertKeyFactWithEmbedding seeds a summary_key_facts row with an
+// explicit embedding and embedding_model — insertKeyFact doesn't set
+// either, since none of its own callers needed semantic fact ranking.
+func insertKeyFactWithEmbedding(t *testing.T, s *Store, scope identity.Scope, summaryID, fact string, embeddingModel string, vec []float32) {
+	t.Helper()
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	factCT, err := enc.Encrypt(fact)
+	if err != nil {
+		t.Fatalf("encrypt test key fact: %v", err)
+	}
+	embeddingLiteral := pgfmt.VectorLiteral(vec)
+	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into summary_key_facts (summary_id, fact, grounded, key_version, scope_kind, scope_owner, embedding, embedding_model)
+			values ($1, $2, true, $3, $4, $5, $6::vector, $7)
+		`, summaryID, factCT, keyVersion, scope.Kind, scope.Owner, embeddingLiteral, embeddingModel)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test key fact with embedding for %s: %v", summaryID, err)
+	}
+}
+
+// TestRetrieve_SemanticFactRankingPromotesTheRealAnswerOverALexicalTie is
+// the DB-integration counterpart of
+// TestRankKeyFacts_SemanticSimilarityBreaksTheRealLexicalTie_gpt4_45189cb4
+// — proves the SQL cosine-similarity computation in loadKeyFacts works
+// end to end against a real Postgres/pgvector column, not just the pure
+// ranking function in isolation. Orthogonal hand-built vectors (query and
+// the NFL fact share axis 0; every other fact sits on its own separate
+// axis) make the expected ranking unambiguous: cosine(query, NFL) = 1.0,
+// cosine(query, anything else) = 0.0 — this is the SQL expression being
+// tested, not a claim about what a real embedding model would produce for
+// this text.
+func TestRetrieve_SemanticFactRankingPromotesTheRealAnswerOverALexicalTie(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-semantic-fact-rank"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	period := "2026-01-01"
+	summaryID := "sum_test-semantic-fact-rank_2026-01-01_daily_v1"
+	insertSummary(t, s, scope, summaryID, period, "A busy day covering several unrelated topics.", "")
+
+	model := s.currentEmbeddingModel()
+	axis := func(i int) []float32 {
+		v := make([]float32, 1536)
+		v[i] = 1
+		return v
+	}
+	// More than guaranteedFactMaxCount facts, so guaranteedFact takes the
+	// ranking branch rather than joining everything unconditionally.
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "The user noted rising concern about climate events.", model, axis(1))
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "The user watched the Kansas City Chiefs win an NFL playoff game.", model, axis(0))
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "The user mentioned an interest in gardening.", model, axis(2))
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "The user discussed a painting class.", model, axis(3))
+
+	// The fake test embedder (scope_isolation_test.go) returns the same
+	// content-independent vector for every input, which happens to be
+	// axis(0) (vec[0]=1) — matching the NFL fact's hand-built embedding
+	// exactly and every other fact's not at all, which is what makes this
+	// test deterministic without a real embedding model. The query shares
+	// "watched" with the NFL fact alone (a clean, unique lexical winner,
+	// not a tie) — rankKeyFacts fuses lexical and semantic rank via RRF
+	// rather than letting semantic override lexical outright (see its own
+	// doc comment for the real regression that caused that design change),
+	// so this fixture gives the NFL fact a real edge on *both* signals,
+	// which is what should make it win decisively enough to clear
+	// factMarkerFusedMargin. Asserting on the "(most relevant)" marker,
+	// not just the fact's presence (writeKeyFacts writes every fact
+	// regardless of rank at this small a scale), is what actually
+	// discriminates semantic ranking from the lexical fallback.
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "do you remember what I watched this month?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	want := "(most relevant) The user watched the Kansas City Chiefs win an NFL playoff game."
+	if !strings.Contains(result.ContextMessage, want) {
+		t.Errorf("context message = %q, want it to contain %q", result.ContextMessage, want)
+	}
+}
+
+// TestRetrieve_SemanticFactRankingKillSwitchFallsBackToNoMarker confirms
+// HUPI_ENABLE_SEMANTIC_FACT_RANKING=false reproduces the pre-embedding
+// behavior end to end: with no shared vocabulary between the query and
+// any fact, lexical scoring ties everything at 0 and
+// mostRelevantFactIndex refuses to fabricate a "most relevant" marker —
+// the same fixture as
+// TestRetrieve_SemanticFactRankingPromotesTheRealAnswerOverALexicalTie,
+// with the opposite expectation, proving the marker in that test is
+// really caused by semantic ranking and not some other incidental factor.
+func TestRetrieve_SemanticFactRankingKillSwitchFallsBackToNoMarker(t *testing.T) {
+	t.Setenv("HUPI_ENABLE_SEMANTIC_FACT_RANKING", "false")
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-semantic-fact-rank-killswitch"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	period := "2026-01-01"
+	summaryID := "sum_test-semantic-fact-rank-killswitch_2026-01-01_daily_v1"
+	insertSummary(t, s, scope, summaryID, period, "A busy day covering several unrelated topics.", "")
+
+	model := s.currentEmbeddingModel()
+	axis := func(i int) []float32 {
+		v := make([]float32, 1536)
+		v[i] = 1
+		return v
+	}
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "The user noted rising concern about climate events.", model, axis(1))
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "The user watched the Kansas City Chiefs win an NFL playoff game.", model, axis(0))
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "The user mentioned an interest in gardening.", model, axis(2))
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "The user discussed a painting class.", model, axis(3))
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "do you remember what I did this month?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if strings.Contains(result.ContextMessage, "(most relevant)") {
+		t.Errorf("context message = %q, want no fabricated \"(most relevant)\" marker with the kill switch off and no shared lexical vocabulary", result.ContextMessage)
+	}
+}
+
+// TestRetrieve_FactEmbeddedUnderDifferentModelFallsBackToLexical confirms
+// a fact embedded under a since-changed provider doesn't get ranked by a
+// meaningless cross-model cosine distance — loadKeyFacts' embedding_model
+// check should treat it the same as "not embedded at all."
+func TestRetrieve_FactEmbeddedUnderDifferentModelFallsBackToLexical(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-fact-stale-model"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	period := "2026-01-01"
+	summaryID := "sum_test-fact-stale-model_2026-01-01_daily_v1"
+	insertSummary(t, s, scope, summaryID, period, "A day with an entry from a retired embedding model.", "")
+
+	axis := func(i int) []float32 {
+		v := make([]float32, 1536)
+		v[i] = 1
+		return v
+	}
+	// Embedded under a model that is no longer active — even though this
+	// vector would otherwise win on similarity, it must not be trusted.
+	insertKeyFactWithEmbedding(t, s, scope, summaryID, "An irrelevant fact from a stale embedding model.", "retired-vendor:retired-model", axis(0))
+	insertKeyFact(t, s, scope, summaryID, "melanie went camping at the beach", true)
+	insertKeyFact(t, s, scope, summaryID, "melanie went camping in the mountains", true)
+	insertKeyFact(t, s, scope, summaryID, "melanie collects stamps", true)
+
+	enc, _, err := s.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	var facts []keyFact
+	err = dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
+		var err error
+		facts, err = loadKeyFacts(ctx, tx, summaryID, enc, pgfmt.VectorLiteral(axis(0)), s.currentEmbeddingModel())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("loadKeyFacts: %v", err)
+	}
+	for _, f := range facts {
+		if strings.Contains(f.text, "stale embedding model") && f.similarity.Valid {
+			t.Errorf("fact embedded under a non-active model has a valid similarity = %v, want invalid (NULL)", f.similarity)
+		}
+	}
+}
+
 // insertEntityWithEmbedding seeds an entity row with an embedding set —
 // scope_isolation_test.go's insertEntity doesn't, since none of its own
 // tests need vector search. Real encryption, like insertSummary.

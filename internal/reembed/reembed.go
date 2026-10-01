@@ -58,10 +58,11 @@ type ScopeStatus struct {
 	SummariesPending int
 	EpisodesPending  int
 	EntitiesPending  int
+	KeyFactsPending  int
 }
 
 func (s ScopeStatus) Total() int {
-	return s.SummariesPending + s.EpisodesPending + s.EntitiesPending
+	return s.SummariesPending + s.EpisodesPending + s.EntitiesPending + s.KeyFactsPending
 }
 
 // Status counts, per table, how many of scope's rows are either missing
@@ -95,6 +96,22 @@ func (r *Runner) Status(ctx context.Context, scope identity.Scope) (ScopeStatus,
 			  and scope_kind = $2 and scope_owner = $3
 		`, model, scope.Kind, scope.Owner).Scan(&st.EntitiesPending); err != nil {
 			return fmt.Errorf("count pending entities: %w", err)
+		}
+		// Only grounded facts of current (non-superseded) summaries are
+		// ever retrieved (internal/store's loadKeyFacts, internal/
+		// consolidation's checkCrossPeriodContradictions) — an ungrounded
+		// fact or one belonging to a summary a later correction replaced
+		// is out of scope for the same reason an episode below the
+		// importance threshold is out of scope for episode re-embedding:
+		// it's never pending, because it's never going to be read.
+		if err := tx.QueryRowContext(ctx, `
+			select count(*) from summary_key_facts f
+			where f.grounded
+			  and (f.embedding is null or f.embedding_model is distinct from $1)
+			  and f.scope_kind = $2 and f.scope_owner = $3
+			  and not exists (select 1 from summaries newer where newer.supersedes = f.summary_id)
+		`, model, scope.Kind, scope.Owner).Scan(&st.KeyFactsPending); err != nil {
+			return fmt.Errorf("count pending key facts: %w", err)
 		}
 		return nil
 	})
@@ -139,6 +156,14 @@ func (r *Runner) Continue(ctx context.Context, scope identity.Scope, batchSize i
 		return n, "entities", false, nil
 	}
 
+	n, err = r.reembedKeyFactBatch(ctx, scope, model, batchSize)
+	if err != nil {
+		return 0, "", false, fmt.Errorf("reembed: key facts for %s:%s: %w", scope.Kind, scope.Owner, err)
+	}
+	if n > 0 {
+		return n, "summary_key_facts", false, nil
+	}
+
 	return 0, "", true, nil
 }
 
@@ -169,7 +194,7 @@ func (r *Runner) Continue(ctx context.Context, scope identity.Scope, batchSize i
 // provide). So retrying re-reads the ciphertext columns alongside the
 // current key_version, together, and decrypts that fresh pair — never a
 // version from one moment paired with ciphertext from an earlier one.
-func (r *Runner) decryptWithRetry(ctx context.Context, scope identity.Scope, table, id string, keyVersion int, ciphertextCols []string, ciphertexts [][]byte) ([]string, error) {
+func (r *Runner) decryptWithRetry(ctx context.Context, scope identity.Scope, table string, id any, keyVersion int, ciphertextCols []string, ciphertexts [][]byte) ([]string, error) {
 	enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
 	if err == nil {
 		return decryptEach(enc, ciphertexts)
@@ -211,7 +236,7 @@ func decryptEach(enc *crypto.Encryptor, ciphertexts [][]byte) ([]string, error) 
 // a single query — so the version and the ciphertext it decrypts come
 // from the same, current row state, never a version from one moment and
 // ciphertext from an earlier one.
-func (r *Runner) refetchRow(ctx context.Context, scope identity.Scope, table, id string, ciphertextCols []string, dest ...any) (int, error) {
+func (r *Runner) refetchRow(ctx context.Context, scope identity.Scope, table string, id any, ciphertextCols []string, dest ...any) (int, error) {
 	var version int
 	cols := strings.Join(ciphertextCols, ", ") + ", key_version"
 	scanDest := append(append([]any{}, dest...), &version)
@@ -421,6 +446,85 @@ func (r *Runner) reembedEntityBatch(ctx context.Context, scope identity.Scope, m
 		if err != nil {
 			return 0, fmt.Errorf("write embedding for entity %s: %w", rr.id, err)
 		}
+	}
+	return len(rows), nil
+}
+
+// reembedKeyFactBatch is the one table in this package embedded in a
+// single batched Embed call per batch rather than once per row — facts
+// are short (summarySystemPrompt asks for "a single concrete, checkable
+// fact"), so even a full batchSize's worth comfortably fits one request,
+// the same reasoning internal/consolidation's own embedKeyFacts already
+// applies at write time. Unlike that best-effort write-time call, a
+// mismatched vector count here is a hard error, matching this package's
+// own established style (a single bad row already blocks its whole batch
+// on retry, same as every other table) rather than silently skipping the
+// batch.
+func (r *Runner) reembedKeyFactBatch(ctx context.Context, scope identity.Scope, model string, batchSize int) (int, error) {
+	type row struct {
+		id         int64
+		factCT     []byte
+		keyVersion int
+	}
+	var rows []row
+	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		dbRows, err := tx.QueryContext(ctx, `
+			select f.id, f.fact, f.key_version from summary_key_facts f
+			where f.grounded
+			  and (f.embedding is null or f.embedding_model is distinct from $1)
+			  and f.scope_kind = $2 and f.scope_owner = $3
+			  and not exists (select 1 from summaries newer where newer.supersedes = f.summary_id)
+			order by f.id limit $4
+		`, model, scope.Kind, scope.Owner, batchSize)
+		if err != nil {
+			return fmt.Errorf("query key facts: %w", err)
+		}
+		defer dbRows.Close()
+		for dbRows.Next() {
+			var rr row
+			if err := dbRows.Scan(&rr.id, &rr.factCT, &rr.keyVersion); err != nil {
+				return fmt.Errorf("scan key fact: %w", err)
+			}
+			rows = append(rows, rr)
+		}
+		return dbRows.Err()
+	})
+	if err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+
+	texts := make([]string, len(rows))
+	for i, rr := range rows {
+		decrypted, err := r.decryptWithRetry(ctx, scope, "summary_key_facts", rr.id, rr.keyVersion, []string{"fact"}, [][]byte{rr.factCT})
+		if err != nil {
+			return 0, fmt.Errorf("decrypt key fact %d: %w", rr.id, err)
+		}
+		texts[i] = decrypted[0]
+	}
+
+	resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: texts})
+	if err != nil {
+		return 0, fmt.Errorf("embed key facts batch: %w", err)
+	}
+	if len(resp.Vectors) != len(rows) {
+		return 0, fmt.Errorf("embed key facts batch: embedder returned %d vectors, want %d", len(resp.Vectors), len(rows))
+	}
+
+	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		for i, rr := range rows {
+			if _, err := tx.ExecContext(ctx, `
+				update summary_key_facts set embedding = $1::vector, embedding_model = $2 where id = $3
+			`, pgfmt.VectorLiteral(resp.Vectors[i]), model, rr.id); err != nil {
+				return fmt.Errorf("write embedding for key fact %d: %w", rr.id, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return len(rows), nil
 }

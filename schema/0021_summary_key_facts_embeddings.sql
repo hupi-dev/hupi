@@ -1,0 +1,27 @@
+-- docs/LONGMEMEVAL_ACCURACY_PLAN.md / direct benchmark diagnosis: a busy
+-- day's summary can accumulate 100+ key_facts (LongMemEval's haystack
+-- format crams many sessions onto single calendar days), and
+-- internal/store/retrieve.go's fact ranking was pure literal word-overlap
+-- (factScores/rankFactsByRelevance) with no semantic signal. A real,
+-- reproducible case: for "what is the order of the sports events I
+-- watched in January", the correct fact and an unrelated climate-change
+-- fact both scored one shared word ("watched" vs. "events") — a tie the
+-- stable sort broke in favor of whichever fact was extracted first,
+-- regardless of actual relevance. Widening the per-summary budget doesn't
+-- help when the wrong fact is confidently (if wrongly) ranked first.
+--
+-- This adds per-fact embeddings, same pattern as schema/0012 for entities
+-- and schema/0013 for model tracking: existing rows get NULL ("not yet
+-- embedded" / "needs reembedding"), internal/reembed backfills them, and
+-- internal/store/retrieve.go ranks by cosine similarity to the query
+-- embedding (already computed once per retrieval call) when every fact in
+-- a summary has a valid embedding under the active model, falling back to
+-- the existing lexical ranking otherwise.
+--
+-- Deliberately no ANN index, unlike entities_embedding_idx: retrieval
+-- never does a cross-summary nearest-neighbor search over facts, it only
+-- ranks the handful of facts belonging to a summary already selected by
+-- fusedSearchSummaries (found via summary_key_facts_summary_id_idx). An
+-- HNSW index here would add write cost and storage with no query to serve.
+alter table summary_key_facts add column embedding vector(1536);
+alter table summary_key_facts add column embedding_model text;
