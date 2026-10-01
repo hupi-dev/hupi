@@ -1,25 +1,42 @@
 # API Reference — Routes, Triggers, and Call Chains
 
-The gateway (`cmd/hupi`) exposes exactly four memory/chat routes, plus
-two Kubernetes probe endpoints that carry no application logic. This
-document covers each of the four in full: when it's triggered, what it
-expects and returns, every status code it can produce, and the complete
-function-by-function call chain from the HTTP layer down to Postgres and
-back — including every external network call (LLM/embedding providers)
-along the way.
+The gateway (`cmd/hupi`) exposes exactly two memory/chat routes in this
+OSS build, plus two Kubernetes probe endpoints that carry no application
+logic. This document covers each of the two in full: when it's
+triggered, what it expects and returns, every status code it can
+produce, and the complete function-by-function call chain from the HTTP
+layer down to Postgres and back — including every external network call
+(LLM/embedding providers) along the way.
 
-All four are registered in `cmd/hupi/main.go`:
+Both are registered in `cmd/hupi/main.go`:
 
 ```go
-mux.HandleFunc("POST /v1/chat/completions",              handler.HandleChatCompletions)
-mux.HandleFunc("POST /v1/feedback",                       handler.HandleFeedback)
-mux.HandleFunc("POST /v1/team/{team_id}/chat/completions", handler.HandleTeamChatCompletions)
-mux.HandleFunc("POST /v1/team/{team_id}/feedback",         handler.HandleTeamFeedback)
+mux.HandleFunc("POST /v1/chat/completions", handler.HandleChatCompletions)
+mux.HandleFunc("POST /v1/feedback",         handler.HandleFeedback)
 ```
 
-No other methods are accepted on any of these paths (`405 Method Not
-Allowed` otherwise), and there is no other *memory-bearing* route — the
-gateway is deliberately a narrow surface.
+No other methods are accepted on either path (`405 Method Not Allowed`
+otherwise), and there is no other *memory-bearing* route in this OSS
+build — the gateway is deliberately a narrow surface.
+
+**Team-scoped routes aren't part of this OSS build.** `cmd/hupi` also
+calls `gateway.MountTeamRoutes(mux, handler)` unconditionally right
+after mounting the two routes above (`internal/gateway/handler.go`'s own
+doc comment on that var) — a nil-by-default hook, only set by `team.go`'s
+`init()` when the closed-source Tier-3 extension is linked in. `nil`
+means "no team routes to mount," the correct and only state in this
+repo, not an error. The underlying scope/identity machinery a team route
+would use (`identity.ScopeKindShared`, `Identity.HasTeam`, `auth.Store`'s
+`team_members` query) does exist in this repo, but nothing in the two
+routes below ever exercises it: `resolveScope` (`handler.go`) always
+resolves both `actingUser` and `workspace` to the caller's own private
+scope here, team membership or not — only Tier-3's team routes would
+ever call the shared internals below with `actingUser != workspace`. The
+`POST /v1/team/{team_id}/...` HTTP handlers themselves
+(`HandleTeamChatCompletions`, `resolveTeamScope`, `HandleTeamFeedback`)
+live only in the Tier-3 extension, not in this repository, so this
+document doesn't cover them. See `docs/TIER3_PLAN.md` for what Tier 3
+adds.
 
 The only other two routes are Kubernetes health probes, added for
 containerized deployment (`docs/GAP_CLOSURE_PLAN.md` §5) — neither
@@ -132,36 +149,6 @@ OpenAI-shaped `data: {...}` chunks, terminated by `data: [DONE]`.
 
 ---
 
-## `POST /v1/team/{team_id}/chat/completions`
-
-Identical request/response shape and identical `handleChatCompletionsScoped`
-body to the route above — the only difference is how `actingUser` and
-`workspace` are resolved, and that it **requires** auth to do anything
-useful.
-
-**Auth**: required in practice. `h.Auth` must be configured — without it,
-there is no way to prove team membership, so this route always returns
-403 regardless of `HUPI_REQUIRE_AUTH`.
-
-**Status codes**: everything from the private route, plus:
-
-| Code | When |
-|---|---|
-| 400 | Missing `team_id` in the path (shouldn't happen via the registered pattern, but `resolveTeamScope` checks explicitly) |
-| 401 | Missing/invalid `Authorization` header |
-| 403 | Authenticated, but the caller is not a member of `team_id` |
-
-**Call chain difference**, everything else identical to the private route:
-
-1. `HandleTeamChatCompletions` (`handler.go:181`) calls `resolveTeamScope(r)` (`handler.go:278`) instead of `resolveScope`:
-   - `resolveIdentity(r)` — same as above (401 if it fails).
-   - `teamID := r.PathValue("team_id")` — Go 1.22+ `ServeMux` path wildcard.
-   - `id.HasTeam(teamID)` (`internal/identity/identity.go:21`) — a plain membership check over `Identity.TeamIDs` (populated by `auth.Store.Resolve`'s `team_members` query). If false: 403.
-   - Returns `actingUser = id.PrivateScope()`, `workspace = {Kind: "shared", Owner: teamID}`.
-2. `handleChatCompletionsScoped(w, r, actingUser, workspace)` — from here on, byte-for-byte the same code path as the private route, except `actingUser != workspace`: `buildAnchor` still resolves `self_model` from `actingUser` (personal voice, unchanged), while `stage1EntityMatches`, `vectorSearchSummaries`, `vectorSearchEpisodes`, `vectorSearchEntities`, and `Capture` all operate on the team's `workspace` scope.
-
----
-
 ## `POST /v1/feedback`
 
 Records a signal that a specific past episode's memory was right, wrong,
@@ -217,29 +204,15 @@ user from losing, unlike a chat turn.
 
 ---
 
-## `POST /v1/team/{team_id}/feedback`
-
-Same as `/v1/feedback`, scoped to a team workspace.
-
-**Auth/status codes**: identical additions to the team chat route (401 for
-bad/missing auth, 403 for authenticated-but-not-a-member).
-
-**Call chain difference**: `HandleTeamFeedback` (`handler.go:340`) calls
-`resolveTeamScope(r)` and uses only the returned `workspace` (the
-`actingUser` return value is discarded — feedback has no personal-voice
-concept, it's just data belonging to a scope) as the scope passed to
-`handleFeedbackScoped`.
-
----
-
 ## Summary table
 
 | Route | Auth | Success | Client errors | Server/upstream errors |
 |---|---|---|---|---|
 | `POST /v1/chat/completions` | optional | 200 | 400, 401 | 500, 502 |
-| `POST /v1/team/{team_id}/chat/completions` | required in practice | 200 | 400, 401, 403 | 500, 502 |
 | `POST /v1/feedback` | optional | 201 | 400, 401 | 500 |
-| `POST /v1/team/{team_id}/feedback` | required in practice | 201 | 400, 401, 403 | 500 |
+
+(Team-scoped routes aren't part of this OSS build — see the note at the
+top of this document.)
 
 ## External calls made per route
 
