@@ -27,6 +27,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"hupi/internal/audit"
@@ -140,6 +141,36 @@ func (r *Runner) Continue(ctx context.Context, scope identity.Scope, batchSize i
 	return 0, "", true, nil
 }
 
+// resolveKeyForRow resolves the Encryptor to use for decrypting id's
+// ciphertext, given the key_version its batch's initial SELECT read.
+// That read can go stale: internal/rotate may migrate the row to a new
+// version and an operator may immediately prune the old one between this
+// batch's SELECT and this call (docs/CODEBASE_SURVEY_AND_REVIEW.md B19).
+// When that happens, GetVersion fails with ErrKeyVersionNotFound even
+// though the row is perfectly readable — just under a newer version — so
+// re-read the row's *current* key_version and retry once before treating
+// this as the genuine, non-recoverable error it would be for any other
+// cause.
+func (r *Runner) resolveKeyForRow(ctx context.Context, scope identity.Scope, table, id string, keyVersion int) (*crypto.Encryptor, error) {
+	enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
+	if err == nil || !errors.Is(err, crypto.ErrKeyVersionNotFound) {
+		return enc, err
+	}
+	current, rerr := r.currentKeyVersion(ctx, scope, table, id)
+	if rerr != nil || current == keyVersion {
+		return nil, err
+	}
+	return r.keys.GetVersion(ctx, scope, current)
+}
+
+func (r *Runner) currentKeyVersion(ctx context.Context, scope identity.Scope, table, id string) (int, error) {
+	var version int
+	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, fmt.Sprintf(`select key_version from %s where id = $1`, table), id).Scan(&version)
+	})
+	return version, err
+}
+
 // LogRun writes one audit_log entry summarizing a completed re-embed
 // pass — call this once, after a Continue loop has returned done=true,
 // with the sum of every processed count from that loop (skip the call
@@ -193,7 +224,7 @@ func (r *Runner) reembedSummaryBatch(ctx context.Context, scope identity.Scope, 
 	}
 
 	for _, rr := range rows {
-		enc, err := r.keys.GetVersion(ctx, scope, rr.keyVersion)
+		enc, err := r.resolveKeyForRow(ctx, scope, "summaries", rr.id, rr.keyVersion)
 		if err != nil {
 			return 0, fmt.Errorf("resolve encryption key for summary %s: %w", rr.id, err)
 		}
@@ -255,7 +286,7 @@ func (r *Runner) reembedEpisodeBatch(ctx context.Context, scope identity.Scope, 
 	}
 
 	for _, rr := range rows {
-		enc, err := r.keys.GetVersion(ctx, scope, rr.keyVersion)
+		enc, err := r.resolveKeyForRow(ctx, scope, "episodes", rr.id, rr.keyVersion)
 		if err != nil {
 			return 0, fmt.Errorf("resolve encryption key for episode %s: %w", rr.id, err)
 		}
@@ -321,7 +352,7 @@ func (r *Runner) reembedEntityBatch(ctx context.Context, scope identity.Scope, m
 	}
 
 	for _, rr := range rows {
-		enc, err := r.keys.GetVersion(ctx, scope, rr.keyVersion)
+		enc, err := r.resolveKeyForRow(ctx, scope, "entities", rr.id, rr.keyVersion)
 		if err != nil {
 			return 0, fmt.Errorf("resolve encryption key for entity %s: %w", rr.id, err)
 		}

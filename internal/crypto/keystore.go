@@ -46,6 +46,17 @@ type scopeVersion struct {
 	version int
 }
 
+// ErrKeyVersionNotFound is returned by GetVersion when the requested
+// version doesn't exist — either a genuinely bad version number, or a
+// version that was legitimately pruned after every row referencing it
+// was migrated (internal/rotate's Prune). internal/reembed checks for
+// this specifically to recover from the narrow TOCTOU race where its own
+// batch read a row's key_version just before a concurrent rotation
+// migrated that row and pruned the old version out from under it
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md B19) — a row's *current*
+// key_version, re-read fresh, is always resolvable in that case.
+var ErrKeyVersionNotFound = errors.New("crypto: no key for that scope/version")
+
 func NewKeyStore(db *sql.DB, kek []byte) *KeyStore {
 	return &KeyStore{db: db, kek: kek, cache: make(map[scopeVersion]*Encryptor)}
 }
@@ -95,7 +106,7 @@ func (k *KeyStore) GetVersion(ctx context.Context, scope identity.Scope, version
 		scope.Kind, scope.Owner, version,
 	).Scan(&wrapped)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("crypto: no key for %s:%s version %d — versions are never deleted except by an explicit prune, this row's data may be unrecoverable", scope.Kind, scope.Owner, version)
+		return nil, fmt.Errorf("%w: %s:%s version %d — versions are never deleted except by an explicit prune, this row's data may be unrecoverable", ErrKeyVersionNotFound, scope.Kind, scope.Owner, version)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("crypto: load DEK for %s:%s version %d: %w", scope.Kind, scope.Owner, version, err)
