@@ -39,9 +39,13 @@ func (f *fakeRetriever) Retrieve(ctx context.Context, actingUser, workspace iden
 // the new X-Hupi-Capture opt-out must prevent from ever being called.
 type fakeCapturer struct {
 	episodes []Episode
+	err      error // returned by every Capture call when non-nil, instead of recording
 }
 
 func (f *fakeCapturer) Capture(ctx context.Context, scope identity.Scope, ep Episode) error {
+	if f.err != nil {
+		return f.err
+	}
 	f.episodes = append(f.episodes, ep)
 	return nil
 }

@@ -57,6 +57,26 @@ func (s *Store) Capture(ctx context.Context, scope identity.Scope, ep gateway.Ep
 	}
 
 	err = dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
+		// A feedback row's RefersTo was never checked at all (review
+		// finding B17) before this: a client could name any episode id,
+		// including one belonging to a completely different scope, and
+		// it would be stored as-is. No explicit scope_kind/scope_owner
+		// filter needed here — this SELECT runs inside the same
+		// RLS-scoped transaction episodes' own policy already enforces
+		// (schema/0005), so a real episode id from a *different* scope
+		// is invisible to this query exactly as if it didn't exist,
+		// which is exactly the outcome wanted: reject it the same way as
+		// a genuinely made-up id, not just ones from this scope.
+		if ep.Type == "feedback" && ep.RefersTo != "" {
+			var exists bool
+			if err := tx.QueryRowContext(ctx, `select exists(select 1 from episodes where id = $1)`, ep.RefersTo).Scan(&exists); err != nil {
+				return fmt.Errorf("check feedback episode_id exists: %w", err)
+			}
+			if !exists {
+				return gateway.ErrFeedbackEpisodeNotFound
+			}
+		}
+
 		_, err := tx.ExecContext(ctx, `
 			insert into episodes (
 				id, ts, type, provider_vendor, provider_model,

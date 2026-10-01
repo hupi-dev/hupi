@@ -113,6 +113,19 @@ func (r FeedbackRating) valid() bool {
 	}
 }
 
+// ErrFeedbackEpisodeNotFound is returned by Capturer.Capture for a
+// feedback episode (review finding B17) whose RefersTo doesn't name a
+// real episode in the caller's own scope — the feedback endpoint used
+// to build and persist a feedback row pointing at any client-supplied
+// episode id with no verification it belonged to the caller at all,
+// a real (if low-exploitability — ids are high-entropy and unguessable,
+// and nothing reads content back through this path) unvalidated
+// cross-scope reference. handleFeedbackScoped checks for this specific
+// sentinel to answer with 400, not the generic 500 every other Capture
+// failure gets — a bad episode_id is the client's mistake, not an
+// infrastructure failure.
+var ErrFeedbackEpisodeNotFound = errors.New("gateway: episode_id does not refer to an episode in this scope")
+
 // Episode is what gets written to the `episodes` table
 // (schema/0001_init.sql) once a turn completes. Type "feedback" rows use
 // only ID, TS, Type, RefersTo, Rating, and Note — the rest are zero-valued,
@@ -422,6 +435,10 @@ func (h *Handler) handleFeedbackScoped(w http.ResponseWriter, r *http.Request, s
 	// submission *is* the entire point of this request: if it doesn't
 	// persist, the caller needs to know, not get a silent 200.
 	if err := h.Capturer.Capture(r.Context(), scope, ep); err != nil {
+		if errors.Is(err, ErrFeedbackEpisodeNotFound) {
+			http.Error(w, "episode_id does not refer to an episode in this scope", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, fmt.Sprintf("failed to record feedback: %v", err), http.StatusInternalServerError)
 		return
 	}
