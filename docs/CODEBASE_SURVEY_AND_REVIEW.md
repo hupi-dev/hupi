@@ -276,7 +276,7 @@ subsystem. Each cites exact file:line and a concrete failure scenario.
 
 ## A. Likely real bugs
 
-**A1. Streaming responses leak a goroutine and an open HTTP connection on client disconnect or context cancellation mid-stream.**
+**A1. ✅ FIXED ([PR #18](https://github.com/hupi-dev/hupi/pull/18)) — Streaming responses leak a goroutine and an open HTTP connection on client disconnect or context cancellation mid-stream.**
 `internal/gateway/handler.go` (`handleStream`'s drain loop) stops reading
 from the provider's channel the instant `ctx.Done()` fires. Both provider
 adapters (`internal/provider/openai_compat.go`, `anthropic.go`) feed that
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 2 fixed — A4, A5, PR #17 open; 11 remaining) |
+| Likely real bugs | 13 (✅ 3 fixed — A1 PR #18, A4/A5 PR #17 open; 10 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
