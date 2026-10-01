@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"hupi/internal/audit"
 	"hupi/internal/crypto"
@@ -2503,11 +2504,19 @@ func rankBM25(docs []bm25Document, queryTerms []string) []string {
 	return ids
 }
 
+// truncateToBudget and hardTruncate both count and cut by rune, not byte
+// (review finding B9): maxChars has always meant character count, by
+// name and by every caller's own intent, but raw byte-slicing (s[:n])
+// can land in the middle of a multi-byte UTF-8 sequence for any
+// non-ASCII content — an accented letter, CJK text, an emoji — producing
+// invalid UTF-8 at the cut point. Identical to the old byte-based
+// behavior for pure ASCII text (every rune is one byte there), the
+// common case this went uncaught in.
 func truncateToBudget(s string, maxChars int) string {
-	if len(s) <= maxChars {
+	if utf8.RuneCountInString(s) <= maxChars {
 		return s
 	}
-	return s[:maxChars] + "\n...[truncated to fit context budget]"
+	return string([]rune(s)[:maxChars]) + "\n...[truncated to fit context budget]"
 }
 
 // hardTruncate is truncateToBudget without the "...[truncated]" marker
@@ -2519,10 +2528,10 @@ func truncateToBudget(s string, maxChars int) string {
 // truncateToBudget call — telling the model there was more it isn't
 // seeing — not on every individual, already-expected minor shortening.
 func hardTruncate(s string, maxChars int) string {
-	if len(s) <= maxChars {
+	if utf8.RuneCountInString(s) <= maxChars {
 		return s
 	}
-	return s[:maxChars]
+	return string([]rune(s)[:maxChars])
 }
 
 func lastUserMessage(msgs []provider.Message) string {
