@@ -93,7 +93,7 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 		"key_facts": [{"fact": "Decided to use pgvector", "source_episode_ids": ["ep_test_run_daily"]}],
 		"entities_touched": [{"id": "project:hupi", "kind": "project", "name": "HUPI", "attributes": {"vector_index": "pgvector"}}]
 	}`
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	runner, db := testRunner(t, consolidationJSON, groundingJSON)
 
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-run-daily"}
@@ -231,7 +231,7 @@ func TestRunDaily_EmbedsOnlyGroundedKeyFactsInOneBatchedCall(t *testing.T) {
 	// Only the first fact is grounded — grounding.go's real groundingCheck
 	// is bypassed by this fake, but storeSummary's own handling of the
 	// grounded[] result is exactly what's under test here.
-	groundingJSON := `{"grounded": [true, false]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}, {"i":2,"ok":false}]}`
 	var embedRequests []provider.EmbedRequest
 	fake := fakeConsolidationProvider{response: consolidationJSON, capturedEmbedRequests: &embedRequests}
 	groundingFake := fakeConsolidationProvider{response: groundingJSON}
@@ -363,7 +363,7 @@ func TestRunDaily_SucceedsDespiteEmbeddingFailure(t *testing.T) {
 		"key_facts": [{"fact": "Decided to use pgvector", "source_episode_ids": ["ep_test_embed_fail"]}],
 		"entities_touched": [{"id": "project:hupi-embed-fail", "kind": "project", "name": "HUPI", "attributes": {"vector_index": "pgvector"}}]
 	}`
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 
 	dsn := os.Getenv("HUPI_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -443,7 +443,7 @@ func TestRunDaily_SetsEntityDatesToTheSimulatedDateNotRealNow(t *testing.T) {
 		"key_facts": [{"fact": "The user attended an AI conference.", "source_episode_ids": ["ep_test_entity_date"]}],
 		"entities_touched": [{"id": "project:ai-conference", "kind": "project", "name": "AI conference", "attributes": {"topic": "neural networks"}}]
 	}`
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	runner, db := testRunner(t, consolidationJSON, groundingJSON)
 
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-entity-date"}
@@ -971,7 +971,7 @@ func TestCorrect_WritesAuditLogWithGivenActor(t *testing.T) {
 // RunDaily now looks up the existing current draft via currentSummaryID
 // and supersedes it instead.
 func TestRunDaily_SupersedesExistingDraftOnReconsolidation(t *testing.T) {
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	firstJSON := `{
 		"summary": "First draft: only the morning conversation.",
 		"key_facts": [{"fact": "morning fact", "source_episode_ids": ["ep_recon_morning"]}],

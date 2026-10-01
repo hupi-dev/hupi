@@ -178,7 +178,7 @@ func TestFindRelatedSummaries_PrefersSpecificSharedEntityOverHub(t *testing.T) {
 // v1, not the current v2.
 func TestFindRelatedSummaries_ExcludesSupersededIncludesCorrection(t *testing.T) {
 	contradictionJSON := `{"contradictions": [{"old_fact": "irrelevant", "replacement": "irrelevant"}], "corrected_prose": "corrected"}`
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	runner, db := testRunner(t, contradictionJSON, groundingJSON)
 
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-find-related-supersession"}
@@ -266,7 +266,7 @@ func TestFindRelatedSummaries_ExcludesSupersededIncludesCorrection(t *testing.T)
 // stale duplicate sitting alongside it.
 func TestCheckCrossPeriodContradictions_AppliesCorrection(t *testing.T) {
 	contradictionJSON := `{"contradictions": [{"old_fact": "Wells Fargo pre-approval amount is $250,000", "replacement": "Wells Fargo pre-approval amount is $300,000"}], "corrected_prose": "Discussed mortgage pre-approval, now at $300,000."}`
-	groundingJSON := `{"grounded": [true]}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	runner, db := testRunner(t, contradictionJSON, groundingJSON)
 
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-cross-period-contradiction"}
