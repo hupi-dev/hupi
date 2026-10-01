@@ -11,12 +11,12 @@ based on `main` @ `551ff54`), and several findings were further cross-checked
 against currently-running code before being accepted.
 
 **One load-bearing cross-reference up front**: two of this review's own
-findings (A4, A5 below) are already fixed on a separate branch
+findings (A4, A5 below) were already fixed on a separate branch
 (`fix/guarantee-line-budget-starvation`, commits `ef97aea`/`2491ad6`,
-[PR #17](https://github.com/hupi-dev/hupi/pull/17), open, not yet merged
-at time of writing). They're included here because they're real bugs in
-the code this review actually read (`main`), not because they're
-unknown — once PR #17 merges, A4/A5 close automatically.
+[PR #17](https://github.com/hupi-dev/hupi/pull/17)) at the time this
+review was conducted — that PR has since merged into `main`. They're
+included here because they were real bugs in the code this review
+actually read, not because they were unknown.
 
 ---
 
@@ -289,7 +289,7 @@ whose request context is cancelled while a streamed answer is still being
 generated — a routine occurrence for chat UIs with a "stop generating"
 button or for any reverse proxy with an aggressive timeout.
 
-**A2. `attributionCheck` failures are indistinguishable from a positively-verified "not used," contradicting the documented `nil`-means-"not checked" contract.**
+**A2. ✅ FIXED ([PR #19](https://github.com/hupi-dev/hupi/pull/19)) — `attributionCheck` failures are indistinguishable from a positively-verified "not used," contradicting the documented `nil`-means-"not checked" contract.**
 `internal/gateway/handler.go`/`attribution.go`. `Citation.Used`'s own doc
 comment promises `nil` unless the check actually ran. But when the judge
 LLM call succeeds yet returns unparsable or miscounted JSON,
@@ -311,7 +311,7 @@ probe catches it. This is the only place this mismatch is tracked at all
 (the consolidation-side backfill queries know about `embedding_model`;
 retrieval doesn't).
 
-**A4. ✅ FIXED (PR #17, open) — Cross-summary guarantee-line budget starvation.**
+**A4. ✅ FIXED (merged, PR #17) — Cross-summary guarantee-line budget starvation.**
 `internal/store/retrieve.go`, `fusedSearchSummaries` pass 1. No per-summary
 cap on the "guaranteed fact" line means the highest-ranked summaries among
 many candidates can exhaust the whole context budget before a lower-ranked
@@ -321,9 +321,9 @@ consistently wrong after an unrelated fix changed which fact gets
 guaranteed, shifting line lengths enough to tip the budget). Fixed on
 `fix/guarantee-line-budget-starvation` (`ef97aea`) via a fair, N-aware
 per-summary cap. Real-verified 4/4 correct, stable across 4 full sample
-re-runs. **Status: fixed, [PR #17](https://github.com/hupi-dev/hupi/pull/17) open, not yet merged into `main`.**
+re-runs. **Status: fixed and merged into `main` ([PR #17](https://github.com/hupi-dev/hupi/pull/17)).**
 
-**A5. ✅ FIXED (PR #17, open) — Episode text has no per-entry budget cap and no excerpt-centering.**
+**A5. ✅ FIXED (merged, PR #17) — Episode text has no per-entry budget cap and no excerpt-centering.**
 `internal/store/retrieve.go`, `vectorSearchEpisodes`/`keywordSearchEpisodes`.
 Every matched episode's full USER/ASSISTANT text is written uncapped; the
 only backstop is one global tail-truncate with no awareness of where in a
@@ -331,7 +331,7 @@ long, multi-turn episode's own text the relevant detail sits. Real,
 confirmed failure case where a needed detail sat ~18,000 characters into one
 matched episode. Fixed on the same branch (`2491ad6`) via a per-episode cap
 plus a density-weighted centered excerpt. Real-verified 5/5 correct, stable
-across 4 full sample re-runs. **Status: fixed, [PR #17](https://github.com/hupi-dev/hupi/pull/17) open, not yet merged into `main`.**
+across 4 full sample re-runs. **Status: fixed and merged into `main` ([PR #17](https://github.com/hupi-dev/hupi/pull/17)).**
 
 **A6. The consolidation pipeline's "best-effort" post-commit steps aren't actually best-effort — they propagate into a hard failure and skip further real work.**
 `internal/consolidation/store.go` (`storeSummary`'s post-commit
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 3 fixed — A1 PR #18, A4/A5 PR #17 open; 10 remaining) |
+| Likely real bugs | 13 (✅ 4 fixed — A1 PR #18, A2 PR #19, A4/A5 merged PR #17; 9 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
