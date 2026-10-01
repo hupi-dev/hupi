@@ -1203,6 +1203,102 @@ better-understood.
 - **Category 1 (`single-session-preference`) multi-candidate ranking** —
   tracked separately in `docs/LONGMEMEVAL_ACCURACY_PLAN.md`, already
   noted below.
+- **Fresh 8-conversation real rescore (post-PR #14): ✅ confirms net
+  progress, surfaces one new real gap at scale.** A representative
+  8-question LongMemEval sample, replayed end to end against a fresh,
+  isolated DB (real GPT-4.1, real official LongMemEval GPT-4o judge):
+  **3/8 (37.5%) → 6/8 (75%)**. 3 confirmed real fixes landing cleanly
+  (Ibotta, Wells Fargo, backpack-delivery — all exact gold matches); 1
+  question initially mis-flagged as a regression and walked back after
+  checking the original run's own judge verdict (`f4f1d8a4_abs` — the
+  "not mentioned" answer was graded correct both times; not a
+  regression); 2 misses matching the already-documented ~40-65%
+  per-call extraction-reliability ceiling (`1d4e3b97` preference,
+  `b46e15ed` charity events — retrieval itself confirmed fully correct
+  this run); and 1 new failure (`gpt4_45189cb4`, sports-order) that did
+  not match any previously-documented gap.
+- **`gpt4_45189cb4` (sports-order) deep dive: ✅ three distinct, real
+  bugs found and fixed, all at the same root cause class as the
+  semantic-bridging item above, recurring at a scale that item's own fix
+  didn't anticipate.** Root traced to a genuine 41-episode/112-fact busy
+  day — 5-6x beyond what `depthText`'s own doc comment anticipated
+  ("20+ of them") — that diluted the NFL-playoffs fact this question
+  needed out of easy reach three separate ways:
+  1. **`writeKeyFacts` had no relevance ordering at all** — facts were
+     written in raw cluster-merge insertion order, and
+     `mostRelevantFactIndex`'s winner-take-all tie-break (built for
+     small fact counts) gives up entirely (`-1`) once enough facts tie
+     at the same lexical-overlap score, which happens far more often at
+     112 candidates than at the handful it was designed against. Fixed
+     by generalizing it into a full ranking, `rankFactsByRelevance`
+     (`internal/store/retrieve.go`) — same scoring logic, shared via a
+     new `factScores` helper, but every fact gets an order instead of
+     an all-or-nothing pick; `writeKeyFacts` now writes the whole list
+     in descending-relevance order (stable on ties) so if
+     `truncateToBudget`'s backstop has to cut something, it cuts the
+     least-relevant tail, not an arbitrary one. No facts dropped, only
+     reordered. 4 new unit tests, `go test ./... -count=1` clean.
+  2. **The separate aggregation-reasoning pass (Gap 4 mechanism 2, built
+     earlier in this document) had its own "order" hint sub-feature,
+     and it was a measured net negative once (1) existed.** The
+     question's "order of ... in January" phrasing also matched
+     `looksLikeOrderingRequest`, triggering this pass's own extraction
+     LLM call — subject to the same already-documented ~50-65%
+     per-call reliability ceiling — which missed the NFL fact roughly
+     half the time and injected an incomplete "chronological order"
+     hint. Real-verified the hint was actively harmful, not just
+     redundant: the exact same captured context, answered directly with
+     no hint, scored 15/15 correct; the real pipeline, with the
+     incomplete hint present, scored 5/5 *wrong* — the model deferred
+     to the incomplete list over the full, by-then well-ranked context,
+     despite the hint's own "use this only if it directly answers the
+     question" caveat. Fixed by removing the "order" hint path entirely
+     (`resolveOrderHint` deleted, `resolveAggregationHint` now only
+     handles the "consecutive pair" shape, `AggregationHint` short-
+     circuits before paying for the extraction call on anything else).
+     The "pair" shape keeps real value — ranking alone can't identify
+     *which two* facts form a specific adjacent pair a "two events in a
+     row" question needs — only "order" was a net negative once ranking
+     existed to solve that shape on its own. Order-shaped questions
+     still get retrieval's own breadth-widening (Phase D item 2,
+     `looksLikeOrderingRequest`, unchanged) — only this pass's own extra
+     hint was removed.
+  3. **`guaranteedFact` — the mechanism this document's own
+     semantic-bridging fix (directly above) built to survive truncation
+     — still called the old `mostRelevantFactIndex` directly, not the
+     new ranking.** This was the actual proximate cause once (1) and
+     (2) were both fixed and the sports-order question *still* failed
+     5/5: `HUPI_DEBUG_FUSION` showed the busy day's summary was picked
+     (`fused=0.3333`, lowest of 3 competing summaries) but its
+     `guaranteedFact` line — written first, before any depth, so it
+     survives `truncateToBudget` no matter what — resolved to an
+     unrelated tire-pressure fact. With 112 facts, several legitimately
+     tied at the same nonzero score (sharing one query term each), and
+     the old tie-break's "tied == no signal" rule discarded that and
+     fell back to `facts[0]`, exactly the same bug class the
+     semantic-bridging fix above already diagnosed and fixed — just not
+     carried over to this second call site. Fixed:
+     `guaranteedFact` now uses `rankFactsByRelevance(...)[0]` instead,
+     a strict improvement (identical behavior in the true all-zero
+     case, a real relevant pick instead of an arbitrary one on a tie
+     among relevant facts). 1 new regression test distinguishing "all
+     facts equally relevant" (existing test, unchanged) from "some
+     facts tied-but-relevant, facts[0] itself irrelevant" (the real bug).
+
+  **Real end-to-end re-verification after all three fixes**, at the
+  real production-default `HUPI_CONTEXT_CHAR_BUDGET` (2000, no
+  override): **5/5 correct**, all three events in gold-matching
+  chronological order. Confirmed via the actual assembled context (not
+  just the final answer) that the busy day's guarantee line now reads
+  the real NFL-playoffs fact, not the tire-pressure one — the fix lands
+  on the actual mechanism, not a lucky budget side effect. An
+  intermediate diagnostic step (temporarily raising the budget to
+  20,000 to isolate which of several hypotheses was the real
+  bottleneck) confirmed 3/3 correct even with only the `writeKeyFacts`
+  ranking fix and the hint removal in place, before the `guaranteedFact`
+  fix existed — i.e. a larger budget alone was *also* sufficient, but
+  the `guaranteedFact` fix solves the real mechanism at the
+  already-shipped default budget, with no budget-size tradeoff.
 
 ## Non-goals
 
