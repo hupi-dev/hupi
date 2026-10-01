@@ -423,7 +423,7 @@ behavior.
 - **✅ FIXED ([PR #29](https://github.com/hupi-dev/hupi/pull/29)) — Mid-stream provider errors weren't counted in `ProviderCallErrorsTotal`** — only the initial-connect failure path incremented it; a failure arriving via a stream chunk's `Err` field only logged. (`internal/gateway/handler.go`)
 - **✅ FIXED ([PR #30](https://github.com/hupi-dev/hupi/pull/30)) — `docs/API_REFERENCE.md` documented team-route functions/line numbers that don't exist in this OSS build** (`HandleTeamChatCompletions`, `resolveTeamScope`) — stale doc from before the current nil-hook mechanism replaced an earlier inline implementation.
 - **✅ FIXED ([PR #31](https://github.com/hupi-dev/hupi/pull/31)) — Demo's `clientIP` trusted the leftmost `X-Forwarded-For` entry unconditionally** — defeatable under the common "append" reverse-proxy pattern, which let an attacker fabricate a value and bypass the per-IP session limiter.
-- **Retry logic applies identically to `Embed` (idempotent) and `ChatCompletion`/stream (billed, not idempotent) with no idempotency key** — a network error arriving after the upstream provider already received and processed the request can cause a real duplicate-billed/duplicate-generated retry. (`internal/provider/retry.go`)
+- **✅ FIXED ([PR #32](https://github.com/hupi-dev/hupi/pull/32)) — Retry logic applied identically to `Embed` (idempotent) and `ChatCompletion`/stream (billed, not idempotent) with no idempotency key** — a network error arriving after the upstream provider already received and processed the request could cause a real duplicate-billed/duplicate-generated retry. Investigated (and ruled out) adding an `Idempotency-Key` header first: verified against the real OpenAI/Anthropic Python SDK source that neither vendor's concrete client actually activates that mechanism for their chat/messages API — it would have been a no-op fix. Fixed instead by using `net/http/httptrace`'s `WroteRequest` hook to tell "never reached the provider" (always safe to retry) apart from "fully sent, provider may already be processing/billing" (no longer retried for a non-idempotent call). (`internal/provider/retry.go`)
 - **`migrateLegacyDEK`'s existence-check and insert aren't wrapped in one transaction** — two processes racing through `bootstrap.Load` on first deploy could both pass the check (safe in the end due to `on conflict do nothing`, but recoverable-only, not truly atomic).
 - **The shipped `probes.yaml` only exercises the happy-path/full-gate shape** — no probe asserts a `partial` gate, a correctly-skipped irrelevant query, or a non-default scope; a regression that always over-matches to "full gate" would pass every shipped probe.
 - **`vectorSearchEpisodes` is the one retrieval path that never received the timeframe hard-filter fix five sibling paths got** — a "last month"-shaped query can still surface a temporally-wrong raw episode verbatim via the vector path alone. (`internal/store/retrieve.go`)
@@ -504,7 +504,7 @@ just to pad the findings list:
 | Severity | Count |
 |---|---|
 | Likely real bugs | 13 (✅ all 13 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25, A11 PR #26, A12 PR #27, A13 PR #28) |
-| Plausible edge cases | 28 (✅ 3 fixed — B1 PR #29, B2 PR #30, B3 PR #31; 25 remaining; count corrected from a stale 24) |
+| Plausible edge cases | 28 (✅ 4 fixed — B1 PR #29, B2 PR #30, B3 PR #31, B4 PR #32; 24 remaining; count corrected from a stale 24) |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
 
