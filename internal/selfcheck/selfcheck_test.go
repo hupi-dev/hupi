@@ -121,6 +121,50 @@ func TestRunInvalidExpectMinGateErrors(t *testing.T) {
 	}
 }
 
+// TestRunFailsWhenGateAboveMaximum is the real regression test for review
+// finding B6: ExpectMinGate could only assert a floor, never a ceiling —
+// a probe had no way to say "this query should never escalate past
+// partial" or "this irrelevant query should be skipped," so a regression
+// that always over-matched to "full" for every query would have passed
+// every probe the mechanism could even express. A query that incorrectly
+// gets a stronger gate than expected must now fail.
+func TestRunFailsWhenGateAboveMaximum(t *testing.T) {
+	r := stubRetriever{result: gateway.RetrievalResult{Gate: gateway.GateFull}}
+	probes := []Probe{{ID: "p1", Query: "q", ExpectMaxGate: "skipped"}}
+
+	results, err := Run(context.Background(), r, probes)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if results[0].Passed {
+		t.Error("expected the probe to fail when the gate exceeds the maximum")
+	}
+}
+
+// TestRunPassesWhenGateWithinMaximum confirms ExpectMaxGate doesn't
+// reject a gate at or below the ceiling, only one that exceeds it.
+func TestRunPassesWhenGateWithinMaximum(t *testing.T) {
+	r := stubRetriever{result: gateway.RetrievalResult{Gate: gateway.GatePartial}}
+	probes := []Probe{{ID: "p1", Query: "q", ExpectMaxGate: "partial"}}
+
+	results, err := Run(context.Background(), r, probes)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !results[0].Passed {
+		t.Errorf("expected the probe to pass when the gate is at the maximum, got: %s", results[0].Detail)
+	}
+}
+
+func TestRunInvalidExpectMaxGateErrors(t *testing.T) {
+	r := stubRetriever{result: gateway.RetrievalResult{}}
+	probes := []Probe{{ID: "p1", Query: "q", ExpectMaxGate: "not-a-real-gate"}}
+
+	if _, err := Run(context.Background(), r, probes); err == nil {
+		t.Fatal("Run: expected an error for an invalid expect_max_gate value")
+	}
+}
+
 type recordingRetriever struct {
 	stubRetriever
 	onRetrieve func(actingUser, workspace identity.Scope)
