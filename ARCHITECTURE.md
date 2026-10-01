@@ -183,6 +183,50 @@ something worth making async:
   row per keystroke pause. `hupi_capture_total`'s `result` label gains a
   third value, `skipped`, alongside `ok`/`error`.
 
+### Attachments (files and images)
+
+A chat completion request can additionally include `attachments`: an
+array of `{type: "document"|"image", filename, content_type, data}`,
+`data` base64-encoded raw bytes. This is purely additive — a client that
+never sends it sees byte-for-byte unchanged behavior.
+
+Rather than teaching the capture/consolidation/embedding/retrieval
+pipeline anything about files or images, each attachment is converted to
+plain text once, at ingest time, and merged into the last user message's
+content before capture:
+
+- **Documents** (`.txt`/`.docx`/`.pdf`): extracted via `internal/ingest`
+  (stdlib-only for `.docx`; `github.com/ledongthuc/pdf`, pure Go, for
+  `.pdf` — no cgo, no external `pdftotext` binary). A scanned/image-only
+  PDF has no extractable text layer under any such library — this is a
+  known, explicitly out-of-scope gap (OCR is a materially bigger scope
+  item), surfaced as a warning rather than silently captured as nothing.
+- **Images**: described once by a vision-capable model
+  (`active_vision_provider` in `providers.yaml`, falling back to
+  `active_chat_provider` when unset) via a narrow `DescribeImage` call —
+  deliberately a separate interface from the general chat path, not a
+  change to the core `Message`/`ChatRequest` types, so it doesn't touch
+  either adapter's existing chat-completion code.
+
+Both are merged with a provenance marker (`[Attached file: resume.pdf]`,
+`[Shared image: vacation.jpg]`) so the consolidation prompts can
+attribute the content to the file/image it came from, the same
+discipline already applied to assistant-generated content — never
+confused with something the user typed directly.
+
+Because the merge happens before capture, every downstream mechanism —
+per-episode chunking, embedding, retrieval ranking — applies with no
+further changes: file/image content becomes "just more characters in the
+one captured input string." No schema migration, no new episode type.
+
+A single attachment is capped at 8 MiB (post-base64-decode) with a
+5-per-request count limit, checked before any parsing or upstream call;
+an oversized/malformed/disallowed-MIME attachment is a `400`, while a
+per-attachment extraction/captioning *failure* (a corrupt PDF, a vision
+provider timeout) degrades to a placeholder marker instead of failing
+the whole turn — the same "never block the turn" posture as capture
+itself.
+
 ## Retrieval observability & evaluation
 
 RAG's classic failure mode is silent: wrong or missing retrieval doesn't
@@ -305,6 +349,7 @@ active_chat_provider: work-openai               # what you talk to day to day
 active_consolidation_provider: personal-claude  # what writes your memory
 active_grounding_provider: groq-fast            # optional — omit to reuse the consolidation profile
 active_embedding_provider: local-ollama
+active_vision_provider: work-openai             # optional — omit to reuse active_chat_provider; used for image attachment captioning
 
 providers:
   work-openai:
@@ -313,6 +358,7 @@ providers:
     api_base: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     model: gpt-4.1
+    vision_model: gpt-4.1  # optional — omit to reuse this profile's own model, if it's already vision-capable
 
   personal-claude:
     kind: anthropic

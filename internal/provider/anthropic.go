@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,13 +19,14 @@ import (
 // embeddings endpoint at all. This adapter exists so that difference stops
 // at this file — every caller still only sees the Provider interface.
 type Anthropic struct {
-	name       string
-	vendor     string
-	model      string
-	baseURL    string
-	apiKey     string
-	apiVersion string
-	client     *http.Client
+	name        string
+	vendor      string
+	model       string
+	visionModel string
+	baseURL     string
+	apiKey      string
+	apiVersion  string
+	client      *http.Client
 }
 
 type AnthropicConfig struct {
@@ -35,6 +37,12 @@ type AnthropicConfig struct {
 	APIKey     string
 	APIVersion string // e.g. "2023-06-01"; required by the API on every request
 	Client     *http.Client
+	// VisionModel optionally names a separate upstream model for
+	// DescribeImage calls — falls back to Model when empty, see
+	// resolveVisionModel. In practice all current Claude models are
+	// vision-capable, so this exists mainly for profiles pointed at a
+	// future non-vision model.
+	VisionModel string
 }
 
 func NewAnthropic(cfg AnthropicConfig) *Anthropic {
@@ -43,13 +51,14 @@ func NewAnthropic(cfg AnthropicConfig) *Anthropic {
 		client = http.DefaultClient
 	}
 	return &Anthropic{
-		name:       cfg.Name,
-		vendor:     cfg.Vendor,
-		model:      cfg.Model,
-		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:     cfg.APIKey,
-		apiVersion: cfg.APIVersion,
-		client:     client,
+		name:        cfg.Name,
+		vendor:      cfg.Vendor,
+		model:       cfg.Model,
+		visionModel: cfg.VisionModel,
+		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:      cfg.APIKey,
+		apiVersion:  cfg.APIVersion,
+		client:      client,
 	}
 }
 
@@ -60,6 +69,14 @@ func (p *Anthropic) Model() string  { return p.model }
 func (p *Anthropic) resolveModel(requested string) string {
 	if requested != "" {
 		return requested
+	}
+	return p.model
+}
+
+// resolveVisionModel mirrors resolveModel's own fallback shape.
+func (p *Anthropic) resolveVisionModel() string {
+	if p.visionModel != "" {
+		return p.visionModel
 	}
 	return p.model
 }
@@ -144,6 +161,83 @@ func (p *Anthropic) buildRequest(ctx context.Context, body any, stream bool) fun
 		}
 		return req, nil
 	}
+}
+
+// anthropicVisionMessage/anthropicContentPart/anthropicImageSource are
+// request-only structs for DescribeImage — the response is decoded with
+// the existing anthropicResponse unchanged, since its content-block
+// text-filtering already handles exactly the shape a vision reply
+// returns. Deliberately separate from anthropicRequest/anthropicMessage
+// rather than teaching those types about multimodal content.
+type anthropicVisionMessage struct {
+	Role    Role                   `json:"role"`
+	Content []anthropicContentPart `json:"content"`
+}
+
+type anthropicContentPart struct {
+	Type   string                `json:"type"` // "text" | "image"
+	Text   string                `json:"text,omitempty"`
+	Source *anthropicImageSource `json:"source,omitempty"`
+}
+
+type anthropicImageSource struct {
+	Type string `json:"type"` // "base64"
+	// MediaType/Data are always caller-supplied bytes re-encoded here,
+	// never a client-supplied URL the server would fetch — avoids SSRF
+	// entirely.
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"` // base64, no "data:" prefix — Anthropic's own convention differs from OpenAI's
+}
+
+type anthropicVisionRequest struct {
+	Model     string                   `json:"model"`
+	Messages  []anthropicVisionMessage `json:"messages"`
+	MaxTokens int                      `json:"max_tokens"`
+}
+
+// anthropicVisionMaxTokens bounds a caption response — generous for a
+// descriptive paragraph, nowhere near a real chat completion's own
+// default (anthropicRequest's toAnthropicRequest uses 4096).
+const anthropicVisionMaxTokens = 1024
+
+// DescribeImage calls the configured vision model once to produce a
+// factual text description of an image — see provider.VisionCapable's
+// own doc comment for why this is a narrow, separate interface rather
+// than a change to Message/ChatRequest.
+func (p *Anthropic) DescribeImage(ctx context.Context, img ImageInput, instruction string) (string, error) {
+	body := anthropicVisionRequest{
+		Model: p.resolveVisionModel(),
+		Messages: []anthropicVisionMessage{{
+			Role: RoleUser,
+			Content: []anthropicContentPart{
+				{Type: "image", Source: &anthropicImageSource{
+					Type:      "base64",
+					MediaType: img.MIMEType,
+					Data:      base64.StdEncoding.EncodeToString(img.Data),
+				}},
+				{Type: "text", Text: instruction},
+			},
+		}},
+		MaxTokens: anthropicVisionMaxTokens,
+	}
+	status, respBody, err := sendWithRetry(ctx, p.client, p.name, false, p.buildRequest(ctx, body, false))
+	if err != nil {
+		return "", err
+	}
+	if status >= 400 {
+		return "", fmt.Errorf("provider %s: /messages (vision) returned %d: %s", p.name, status, string(respBody))
+	}
+	var raw anthropicResponse
+	if err := json.Unmarshal(respBody, &raw); err != nil {
+		return "", fmt.Errorf("provider %s: decode vision response: %w", p.name, err)
+	}
+	var text strings.Builder
+	for _, block := range raw.Content {
+		if block.Type == "text" {
+			text.WriteString(block.Text)
+		}
+	}
+	return text.String(), nil
 }
 
 func (p *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {

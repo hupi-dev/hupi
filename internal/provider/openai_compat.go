@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,12 +18,13 @@ import (
 // entirely in config (base URL, key, model name), never in code — this is
 // the one adapter that covers most of "plug in any endpoint."
 type OpenAICompat struct {
-	name    string
-	vendor  string
-	model   string
-	baseURL string
-	apiKey  string
-	client  *http.Client
+	name        string
+	vendor      string
+	model       string
+	visionModel string
+	baseURL     string
+	apiKey      string
+	client      *http.Client
 }
 
 type OpenAICompatConfig struct {
@@ -32,6 +34,10 @@ type OpenAICompatConfig struct {
 	BaseURL string       // e.g. https://api.openai.com/v1 (no trailing slash)
 	APIKey  string       // empty for unauthenticated local endpoints (Ollama)
 	Client  *http.Client // optional, defaults to http.DefaultClient
+	// VisionModel optionally names a separate upstream model for
+	// DescribeImage calls (e.g. the profile's own Model is a non-vision
+	// model) — falls back to Model when empty, see resolveVisionModel.
+	VisionModel string
 }
 
 func NewOpenAICompat(cfg OpenAICompatConfig) *OpenAICompat {
@@ -40,12 +46,13 @@ func NewOpenAICompat(cfg OpenAICompatConfig) *OpenAICompat {
 		client = http.DefaultClient
 	}
 	return &OpenAICompat{
-		name:    cfg.Name,
-		vendor:  cfg.Vendor,
-		model:   cfg.Model,
-		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:  cfg.APIKey,
-		client:  client,
+		name:        cfg.Name,
+		vendor:      cfg.Vendor,
+		model:       cfg.Model,
+		visionModel: cfg.VisionModel,
+		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:      cfg.APIKey,
+		client:      client,
 	}
 }
 
@@ -60,6 +67,18 @@ func (p *OpenAICompat) Model() string  { return p.model }
 func (p *OpenAICompat) resolveModel(requested string) string {
 	if requested != "" {
 		return requested
+	}
+	return p.model
+}
+
+// resolveVisionModel mirrors resolveModel's own fallback shape: use the
+// profile's configured VisionModel if set, else fall back to its chat
+// Model (works today for any profile already pointed at a vision-capable
+// model like gpt-4.1/gpt-4o; the override exists for profiles whose chat
+// Model isn't vision-capable, e.g. a local non-vision Ollama model).
+func (p *OpenAICompat) resolveVisionModel() string {
+	if p.visionModel != "" {
+		return p.visionModel
 	}
 	return p.model
 }
@@ -118,6 +137,62 @@ func (p *OpenAICompat) do(ctx context.Context, method, path string, idempotent b
 		}
 	}
 	return nil
+}
+
+// openAIVisionMessage/openAIVisionContent/openAIImageURL are
+// request-only structs for DescribeImage — the response is decoded with
+// the existing openAIChatResponse unchanged, since a vision reply's
+// choices[0].message.content is still a plain string. Deliberately
+// separate from openAIChatRequest/Message rather than teaching those
+// types about multimodal content: zero changes to ChatCompletion,
+// StreamChatCompletion, or either's existing wire shape.
+type openAIVisionMessage struct {
+	Role    string                `json:"role"`
+	Content []openAIVisionContent `json:"content"`
+}
+
+type openAIVisionContent struct {
+	Type     string          `json:"type"` // "text" | "image_url"
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openAIImageURL `json:"image_url,omitempty"`
+}
+
+type openAIImageURL struct {
+	// URL is always a data: URI built from the caller's own bytes, never
+	// a client-supplied URL the server would fetch — avoids SSRF
+	// entirely.
+	URL string `json:"url"`
+}
+
+type openAIVisionRequest struct {
+	Model    string                `json:"model"`
+	Messages []openAIVisionMessage `json:"messages"`
+}
+
+// DescribeImage calls the configured vision model once to produce a
+// factual text description of an image — see provider.VisionCapable's
+// own doc comment for why this is a narrow, separate interface rather
+// than a change to Message/ChatRequest.
+func (p *OpenAICompat) DescribeImage(ctx context.Context, img ImageInput, instruction string) (string, error) {
+	dataURL := "data:" + img.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(img.Data)
+	body := openAIVisionRequest{
+		Model: p.resolveVisionModel(),
+		Messages: []openAIVisionMessage{{
+			Role: string(RoleUser),
+			Content: []openAIVisionContent{
+				{Type: "text", Text: instruction},
+				{Type: "image_url", ImageURL: &openAIImageURL{URL: dataURL}},
+			},
+		}},
+	}
+	var raw openAIChatResponse
+	if err := p.do(ctx, http.MethodPost, "/chat/completions", false, body, &raw); err != nil {
+		return "", err
+	}
+	if len(raw.Choices) == 0 {
+		return "", fmt.Errorf("provider %s: empty choices in vision response", p.name)
+	}
+	return raw.Choices[0].Message.Content, nil
 }
 
 func (p *OpenAICompat) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {

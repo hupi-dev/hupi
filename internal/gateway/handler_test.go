@@ -663,3 +663,73 @@ func TestHandleChatCompletions_AcceptsEveryValidRole(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleChatCompletions_DocumentAttachmentReachesCapturedEpisode is
+// the real end-to-end check the file-ingestion feature exists for: a
+// document attachment's extracted text must end up in the captured
+// Episode's InputText, provenance-framed, via the ordinary capture path
+// — no special-cased episode type or storage.
+func TestHandleChatCompletions_DocumentAttachmentReachesCapturedEpisode(t *testing.T) {
+	retriever := &fakeRetriever{}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+
+	reqBody := fmt.Sprintf(`{"model":"test","messages":[{"role":"user","content":"here's my resume, what should I highlight?"}],"attachments":[{"type":"document","filename":"resume.txt","data":%q}]}`,
+		b64("Senior Go engineer, 5 years of distributed systems experience."))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	w := httptest.NewRecorder()
+	h.HandleChatCompletions(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if len(capturer.episodes) != 1 {
+		t.Fatalf("len(capturer.episodes) = %d, want 1", len(capturer.episodes))
+	}
+	inputText := capturer.episodes[0].InputText
+	if !strings.Contains(inputText, "here's my resume") {
+		t.Errorf("captured InputText = %q, want the original user text preserved", inputText)
+	}
+	if !strings.Contains(inputText, "[Attached file: resume.txt]") || !strings.Contains(inputText, "Senior Go engineer, 5 years of distributed systems experience.") {
+		t.Errorf("captured InputText = %q, want the provenance-framed extracted document text", inputText)
+	}
+}
+
+// TestHandleChatCompletions_RejectsInvalidAttachment confirms a
+// malformed attachment (here: invalid base64) is rejected with 400
+// before any capture happens — a request-level validation failure, not
+// a degraded placeholder.
+func TestHandleChatCompletions_RejectsInvalidAttachment(t *testing.T) {
+	retriever := &fakeRetriever{}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+
+	reqBody := `{"model":"test","messages":[{"role":"user","content":"hi"}],"attachments":[{"type":"document","filename":"x.txt","data":"not-valid-base64!!!"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	w := httptest.NewRecorder()
+	h.HandleChatCompletions(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want %d", w.Code, w.Body.String(), http.StatusBadRequest)
+	}
+	if len(capturer.episodes) != 0 {
+		t.Error("a rejected attachment must not reach capture")
+	}
+}
+
+// TestHandleChatCompletions_NoAttachmentsIsByteForByteUnchanged confirms
+// the additive field doesn't disturb any existing client that never
+// sends it.
+func TestHandleChatCompletions_NoAttachmentsIsByteForByteUnchanged(t *testing.T) {
+	retriever := &fakeRetriever{}
+	capturer := &fakeCapturer{}
+	h := newTestHandler(t, retriever, capturer)
+
+	w := postChatCompletion(t, h, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if len(capturer.episodes) != 1 || capturer.episodes[0].InputText != "hi" {
+		t.Errorf("captured episode = %+v, want InputText unchanged (\"hi\")", capturer.episodes)
+	}
+}

@@ -24,6 +24,10 @@ type ProfileConfig struct {
 	APIKey     string
 	Model      string
 	APIVersion string // Anthropic only
+	// VisionModel optionally names a separate upstream model for
+	// DescribeImage calls — falls back to Model when empty. See
+	// OpenAICompatConfig/AnthropicConfig's own VisionModel field.
+	VisionModel string
 }
 
 // Config mirrors providers.yaml: named profiles, plus which named profile
@@ -42,7 +46,11 @@ type Config struct {
 	ActiveConsolidationProvider string
 	ActiveGroundingProvider     string
 	ActiveEmbeddingProvider     string
-	Providers                   map[string]ProfileConfig
+	// ActiveVisionProvider is optional, same shape as
+	// ActiveGroundingProvider: leave it blank to reuse ActiveChatProvider
+	// for DescribeImage calls, or point it at a separate profile.
+	ActiveVisionProvider string
+	Providers            map[string]ProfileConfig
 }
 
 // Registry builds and holds one Provider instance per configured profile,
@@ -54,6 +62,7 @@ type Registry struct {
 	consolidation string
 	grounding     string
 	embedding     string
+	vision        string
 }
 
 func NewRegistry(cfg Config) (*Registry, error) {
@@ -71,12 +80,17 @@ func NewRegistry(cfg Config) (*Registry, error) {
 	if groundingProvider == "" {
 		groundingProvider = cfg.ActiveConsolidationProvider
 	}
+	visionProvider := cfg.ActiveVisionProvider
+	if visionProvider == "" {
+		visionProvider = cfg.ActiveChatProvider
+	}
 
 	for role, name := range map[string]string{
 		"active_chat_provider":          cfg.ActiveChatProvider,
 		"active_consolidation_provider": cfg.ActiveConsolidationProvider,
 		"active_grounding_provider":     groundingProvider,
 		"active_embedding_provider":     cfg.ActiveEmbeddingProvider,
+		"active_vision_provider":        visionProvider,
 	} {
 		if _, ok := reg.byName[name]; !ok {
 			return nil, fmt.Errorf("provider registry: %s %q is not a defined profile", role, name)
@@ -86,6 +100,7 @@ func NewRegistry(cfg Config) (*Registry, error) {
 	reg.consolidation = cfg.ActiveConsolidationProvider
 	reg.grounding = groundingProvider
 	reg.embedding = cfg.ActiveEmbeddingProvider
+	reg.vision = visionProvider
 
 	return reg, nil
 }
@@ -94,11 +109,11 @@ func build(name string, pc ProfileConfig) (Provider, error) {
 	switch pc.Kind {
 	case KindOpenAICompat:
 		return NewOpenAICompat(OpenAICompatConfig{
-			Name: name, Vendor: pc.Vendor, Model: pc.Model, BaseURL: pc.BaseURL, APIKey: pc.APIKey,
+			Name: name, Vendor: pc.Vendor, Model: pc.Model, BaseURL: pc.BaseURL, APIKey: pc.APIKey, VisionModel: pc.VisionModel,
 		}), nil
 	case KindAnthropic:
 		return NewAnthropic(AnthropicConfig{
-			Name: name, Vendor: pc.Vendor, Model: pc.Model, BaseURL: pc.BaseURL, APIKey: pc.APIKey, APIVersion: pc.APIVersion,
+			Name: name, Vendor: pc.Vendor, Model: pc.Model, BaseURL: pc.BaseURL, APIKey: pc.APIKey, APIVersion: pc.APIVersion, VisionModel: pc.VisionModel,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", pc.Kind)
@@ -121,6 +136,14 @@ func (r *Registry) Grounding() Provider { return r.byName[r.grounding] }
 // Embedding is used both for live retrieval queries and for index rebuild
 // during consolidation.
 func (r *Registry) Embedding() Provider { return r.byName[r.embedding] }
+
+// Vision is what attachment image captioning (internal/gateway's
+// describeAttachments) calls DescribeImage on — defaults to Chat's
+// profile if active_vision_provider was left unset in providers.yaml.
+// Callers must still type-assert the result to provider.VisionCapable:
+// the configured profile's adapter implements it (both OpenAICompat and
+// Anthropic do), but Provider itself doesn't require it.
+func (r *Registry) Vision() Provider { return r.byName[r.vision] }
 
 // SetEmbedding overrides what Embedding() returns from now on — used by
 // bootstrap.VerifyEmbedding to swap in VerifyEmbeddingDimensions' result

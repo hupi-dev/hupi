@@ -160,3 +160,20 @@ type Provider interface {
 
 	Embed(ctx context.Context, req EmbedRequest) (EmbedResponse, error)
 }
+
+// ImageInput is the ingest-time-only multimodal payload DescribeImage
+// accepts. It deliberately never touches Message/ChatRequest — this is a
+// one-shot captioning call, not a general chat capability.
+type ImageInput struct {
+	Data     []byte
+	MIMEType string // e.g. "image/png", "image/jpeg"
+}
+
+// VisionCapable is implemented by adapters that can call a vision-capable
+// model to describe an image — a separate interface from Provider, not a
+// new Provider method, so adding it doesn't force every existing
+// fake/mock Provider in tests to grow a stub method just to keep
+// compiling. Callers type-assert: vp, ok := p.(VisionCapable).
+type VisionCapable interface {
+	DescribeImage(ctx context.Context, img ImageInput, instruction string) (string, error)
+}
