@@ -58,8 +58,9 @@ internal/
   demo/                   anonymous guest-session lifecycle (create/resolve/sweep) backing the public hosted demo — used by cmd/hupi-demo, cmd/hupi-demo-sweep
   metrics/                every Prometheus metric HUPI exposes at /metrics, plus an http.HandlerFunc-wrapping helper — used by cmd/hupi, cmd/hupi-demo, internal/gateway
 
-schema/                   numbered SQL migrations, applied in order 0001 -> 0011
+schema/                   numbered SQL migrations, applied in order 0001 -> 0020
                           migrate.sh — POSIX-sh idempotent runner used by the Docker image/Kubernetes migrate Job (install.sh's bash equivalent is for bare-metal; kept as two separate implementations on purpose, see migrate.sh's own comment)
+                          migration_scripts_consistency_test.go — a `schema`-package Go test parsing both migrate.sh and install.sh, failing if they ever disagree on the migration file set or a probe's SQL (the two scripts' own duplication is deliberate, see migrate.sh's comment; this only guards against it silently drifting)
 docs/                      this file, and everything else under docs/
 bench/                     LoCoMo/LongMemEval benchmark data-fetch scripts, each benchmark's own unmodified upstream scoring code, the EvalMem Python adapter, and archived run results — the non-Go scaffolding cmd/hupi-bench's predictions need to actually get scored; see docs/BENCHMARKS.md and docs/EVALMEM_INTEGRATION_PLAN.md
 
@@ -134,16 +135,16 @@ ever needing to know Postgres exists.
 |---|---|---|
 | `identity` | The scope/identity vocabulary every other package shares | `Scope`, `Identity`, `Ref`, `DefaultScope`, `ScopeKindPrivate`/`ScopeKindShared` |
 | `pgfmt` | Format Go values as Postgres literals, driver-agnostically | `TextArray`, `ParseTextArray`, `VectorLiteral`, `Nullable` |
-| `crypto` | AES-256-GCM field encryption; one or more keys per scope (versioned for rotation) | `Encryptor`, `KeyStore` (`GetOrCreate` = current version, `GetVersion` = a specific one, `CurrentVersion`, `CreateNextVersion`, `Evict`), `GenerateDEK`, `WrapDEK`/`UnwrapDEK` |
+| `crypto` | AES-256-GCM field encryption; one or more keys per scope (versioned for rotation) | `Encryptor`, `KeyStore` (`GetOrCreate` = current version, `GetVersion` = a specific one, `CurrentVersion`, `CreateNextVersion`, `Evict`), `GenerateDEK`, `WrapDEK`/`UnwrapDEK`, `ErrKeyVersionNotFound` (sentinel a caller can `errors.Is` against to detect, and recover from, a version pruned out from under a concurrent reader — see `reembed.decryptWithRetry` below) |
 | `dbscope` | Open a transaction with RLS session variables set correctly | `Querier`, `SetSession`, `Run` |
-| `audit` | Single writer for every `audit_log` row, any event type | `Entry`, `Write`, `LogStandalone`, `Event*` constants |
-| `provider` | One interface per vendor wire format, not per vendor | `Provider`, `OpenAICompat`, `Anthropic`, `Registry` |
+| `audit` | Single writer for every `audit_log` row, any event type, plus the read side | `Entry`, `Write`, `LogStandalone`, `Event*` constants, `Query`, `QueryFilter` (`TargetID` included, matched against `target_ref->>'id'` via a partial expression index, `schema/0020_audit_log_target_ref_index.sql`) |
+| `provider` | One interface per vendor wire format, not per vendor | `Provider`, `OpenAICompat`, `Anthropic`, `Registry`, `Role` (`Valid()` — checked in `handleChatCompletionsScoped` alongside the existing empty-messages check, same `FeedbackRating.valid()` style) |
 | `auth` | Scope provisioning + operator credentials (this repo); real end-user/team auth is a separate, commercially-licensed extension — see §6 | `Store` (`CreateUser`, `CreateTeam`, `ListUsers`, `ListTeams`, `CreateOperator`, `ResolveOperator`, `ListOperators`, `RevokeOperator`); `TeamAuthenticator` interface + `NewTeamAuthenticator` hook (nil unless the Tier 3 extension is present) |
 | `gateway` | The HTTP surface + the interfaces storage must implement | `Handler`, `Retriever`, `Capturer`, `Authenticator`, `Episode`, `RetrievalResult` |
 | `store` | Postgres+pgvector implementation of retrieval/capture/trace | `Store` (`Retrieve`, `Capture`, `Trace`) |
 | `consolidation` | Nightly rollup: episodes -> grounded summaries | `Runner` (`RunDaily`, `RunRollup`, `Correct`) |
 | `hpmf` | Portable memory format read/write (MEMORY_FORMAT.md) + age packaging | `ExportScope`, `ExportBundle`, `ImportScope`, `PackAndEncrypt`, `DecryptAndUnpack`, `Manifest` |
-| `rotate` | Online, resumable per-scope key rotation | `Runner` (`Start`, `Continue`, `Status`, `Prune`) |
+| `rotate` | Online, resumable per-scope key rotation | `Runner` (`Start`, `Continue`, `Status`, `Prune`), `MaxBatchSize` (5000, enforced by `clampBatchSize` at the top of `Continue` — a caller-requested batch above the cap is silently capped, non-positive is coerced to 1) |
 | `reembed` | Bulk re-embed a scope's summaries/high-importance episodes/entities after an embedding-provider change | `Runner` (`Status`, `Continue`, `LogRun`) |
 | `selfcheck` | Run probes against a live `Retriever` | `Probe`, `Result`, `Run` |
 | `bootstrap` | Read config, connect Postgres, build the `KeyStore` | `Deps`, `Load` |
@@ -185,16 +186,19 @@ see [HARDENING_PLAN.md](HARDENING_PLAN.md) D5-D7.
 
 ### 4.3 RLS session variables
 
-Every database read or write that touches `episodes`, `summaries`, or
-`entities` runs inside a transaction opened by `dbscope.Run` (or, for
-`consolidation.storeSummary`'s multi-statement write, a transaction that
-calls `dbscope.SetSession` directly). That call sets four Postgres session
-variables (`hupi.acting_scope_kind`/`owner`,
+Every database read or write that touches `episodes`, `summaries`,
+`summary_key_facts`, or `entities` runs inside a transaction opened by
+`dbscope.Run` (or, for `consolidation.storeSummary`'s multi-statement
+write, a transaction that calls `dbscope.SetSession` directly). That call
+sets four Postgres session variables (`hupi.acting_scope_kind`/`owner`,
 `hupi.workspace_scope_kind`/`owner`) that the RLS policies in
-`schema/0005_hardening_phase3_rls.sql` check on every row. Code that
+`schema/0005_hardening_phase3_rls.sql` (and, for `summary_key_facts`,
+`schema/0018_summary_key_facts_rls.sql` — it had none of its own before,
+relying only on caller-side sequencing) check on every row. Code that
 bypasses `dbscope` and queries `*sql.DB` directly will see **zero rows**
 under RLS, not an error — this is deliberate (fail closed), and is
-exactly what `internal/store/rls_test.go` tests for.
+exactly what `internal/store/rls_test.go` and
+`internal/store/summary_key_facts_rls_test.go` test for.
 
 ## 5. Non-HTTP entry points, call chain by call chain
 
@@ -247,7 +251,7 @@ permissive, schema/0007_audit_log.sql):
 | Subcommand | Behavior |
 |---|---|
 | `tail -n N` | `order by ts desc limit N`, then prints oldest-first |
-| `query -scope-kind -scope-owner -actor -event-type -since -until -limit` | Builds a parameterized `WHERE` clause from whichever flags are set, `order by ts asc` |
+| `query -scope-kind -scope-owner -actor -event-type -target-id -since -until -limit` | Builds a parameterized `WHERE` clause from whichever flags are set, `order by ts asc` — `-target-id` matches `target_ref->>'id'` via a partial expression index (`schema/0020_audit_log_target_ref_index.sql`), answering "every event about entity X" directly |
 
 ### `cmd/hupi-export` — write a portable snapshot
 
@@ -268,7 +272,7 @@ Default action (no `-status`/`-prune-old-versions`) runs a rotation to completio
 
 1. `bootstrap.Load(ctx)`.
 2. `rotate.Runner.Start(ctx, scope, actor)` (`internal/rotate/rotate.go`) — `keys.CurrentVersion` + `keys.CreateNextVersion` mint the new DEK; upserts one row in `key_rotations` (idempotent: returns the existing from/to unchanged if a rotation is already `in_progress`); writes a `key_rotation` `audit_log` entry (`action: start`). From this point, every *new* write anywhere in the app resolves the new version via `KeyStore.GetOrCreate` — nothing in this package has to chase writes that happen during the rotation.
-3. Loop `rotate.Runner.Continue(ctx, scope, batchSize, actor)` until `done`: each call migrates up to `batchSize` rows of whichever table `cursor_table` points at (`episodes` -> `summaries` -> `entities`, migrating each `summaries` row's `summary_key_facts` alongside it), decrypting with `keys.GetVersion(fromVersion)` and re-encrypting with `keys.GetVersion(toVersion)` inside one transaction per batch; a row with a `NULL` encrypted column (`episodes.note` on a non-feedback row) is left `NULL`, not turned into an encrypted `""`. Advancing past the last table calls `markCompleted` (`status='completed'`, another `audit_log` entry).
+3. Loop `rotate.Runner.Continue(ctx, scope, batchSize, actor)` until `done`: `batchSize` is first clamped by `clampBatchSize` (`rotate.MaxBatchSize` = 5000 — a caller-requested value above the cap is silently capped, non-positive coerced to 1, bounding how long a single batch's transaction and row locks stay open). Each call then migrates up to that many rows of whichever table `cursor_table` points at (`episodes` -> `summaries` -> `entities`, migrating each `summaries` row's `summary_key_facts` alongside it), decrypting with `keys.GetVersion(fromVersion)` and re-encrypting with `keys.GetVersion(toVersion)` inside one transaction per batch; a row with a `NULL` encrypted column (`episodes.note` on a non-feedback row) is left `NULL`, not turned into an encrypted `""`. Advancing past the last table calls `markCompleted` (`status='completed'`, another `audit_log` entry).
 4. `-status`: prints the `key_rotations` row for the scope, no writes.
 5. `-prune-old-versions`: `rotate.Runner.Prune` — refuses unless `status='completed'`, double-checks no row anywhere in the scope still references a version it's about to delete (not just trusting the status flag), deletes those `scope_keys` rows, and calls `KeyStore.Evict` so this process's own cache stops serving the pruned version immediately (a separately-running process, e.g. the live gateway, keeps its cached copy until it restarts — the CLI prints this caveat).
 
@@ -354,11 +358,19 @@ ones.
 3. Loop `reembed.Runner.Continue(ctx, scope, batchSize)` until `done`:
    each call processes up to `batchSize` rows from whichever table has
    work first (`summaries` -> `episodes` -> `entities`) — decrypt via
-   `crypto.KeyStore.GetVersion`, re-embed via `provider.Provider.Embed`,
-   write back `embedding`/`embedding_model` inside a `dbscope.Run`
-   transaction per batch. Episodes only count if
+   `r.decryptWithRetry` (`internal/reembed/reembed.go`), re-embed via
+   `provider.Provider.Embed`, write back `embedding`/`embedding_model`
+   inside a `dbscope.Run` transaction per batch. Episodes only count if
    `type='interaction' and importance >= consolidation.EpisodeEmbedImportanceThreshold`
    — one never meant to be embedded is simply out of scope, not pending.
+   `decryptWithRetry` exists because a batch's `key_version`/ciphertext
+   pair, read at the top of the batch, can go stale if `internal/rotate`
+   migrates and then prunes the row's old version before this call
+   decrypts it: `KeyStore.GetVersion` fails with
+   `crypto.ErrKeyVersionNotFound`, and the retry re-reads *both* the
+   current `key_version` and the ciphertext columns together (not just
+   the version — a stale ciphertext paired with the fresh version fails
+   decryption too) before retrying once.
 4. `reembed.Runner.LogRun(ctx, scope, actor, counts)` once, after the
    loop finishes with any rows processed — one `audit.Entry`
    (`internal/audit`). Unlike `internal/rotate` (which audits
