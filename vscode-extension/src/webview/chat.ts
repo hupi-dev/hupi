@@ -22,6 +22,7 @@ interface Citation {
 
 type ToWebview =
   | { type: 'userEcho'; text: string }
+  | { type: 'fileContext'; relativePath: string }
   | { type: 'delta'; text: string }
   | { type: 'citations'; items: Citation[] }
   | { type: 'done' }
@@ -160,6 +161,20 @@ input.addEventListener('keydown', (e) => {
 window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
   const message = event.data;
   switch (message.type) {
+    case 'fileContext': {
+      // Surfaces, on the just-sent user bubble, that this turn also
+      // attached the active file/selection as context (review finding
+      // A13 — this used to be sent with no UI indication at all).
+      const lastUserMsg = log.querySelectorAll('.msg.user');
+      const target = lastUserMsg[lastUserMsg.length - 1]?.querySelector('.content');
+      if (target) {
+        target.insertAdjacentHTML(
+          'beforeend',
+          `<div class="fileContextBadge">📎 includes code context from ${escapeHtml(message.relativePath)}</div>`,
+        );
+      }
+      break;
+    }
     case 'delta': {
       currentAssistantRaw += message.text;
       scheduleRender();

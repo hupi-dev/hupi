@@ -21,6 +21,7 @@ import { HupiChatViewProvider } from './chatViewProvider';
 
 type ToWebview =
   | { type: 'userEcho'; text: string }
+  | { type: 'fileContext'; relativePath: string }
   | { type: 'delta'; text: string }
   | { type: 'citations'; items: Citation[] }
   | { type: 'done' }
@@ -218,7 +219,7 @@ describe('HupiChatViewProvider', () => {
     expect(lastMessages()).toEqual([{ role: 'user', content: 'after clear' }]);
   });
 
-  it('prefixes the message with file context when there is an active editor', async () => {
+  it('prefixes the message with file context and posts a fileContext notice when there is an active editor', async () => {
     __setActiveTextEditor({
       document: {
         getText: () => 'const x = 1;',
@@ -228,7 +229,7 @@ describe('HupiChatViewProvider', () => {
       selection: { isEmpty: true },
     });
     mockStreamChat(async () => 'reply');
-    const { send } = makeProvider();
+    const { send, posted } = makeProvider();
 
     await send({ type: 'send', text: 'what does this do?' });
 
@@ -236,6 +237,28 @@ describe('HupiChatViewProvider', () => {
     expect(content).toContain('Context — visible file from');
     expect(content).toContain('const x = 1;');
     expect(content.endsWith('what does this do?')).toBe(true);
+    // review finding A13 — this used to be sent with no UI indication at
+    // all; the webview now renders this as a 📎 note on the user bubble.
+    expect(posted).toContainEqual({ type: 'fileContext', relativePath: 'src/index.ts' });
+  });
+
+  it('sends no file context and posts no fileContext notice when hupi.fileContext.enabled is false (review finding A13)', async () => {
+    __setActiveTextEditor({
+      document: {
+        getText: () => 'const x = 1;',
+        languageId: 'typescript',
+        uri: { path: 'src/index.ts' },
+      },
+      selection: { isEmpty: true },
+    });
+    __setConfig({ 'fileContext.enabled': false });
+    mockStreamChat(async () => 'reply');
+    const { send, posted } = makeProvider();
+
+    await send({ type: 'send', text: 'what does this do?' });
+
+    expect(lastMessages()[0].content).toBe('what does this do?');
+    expect(posted.some((m) => m.type === 'fileContext')).toBe(false);
   });
 
   it('sends the message unprefixed when there is no active editor', async () => {
