@@ -4,6 +4,11 @@
 -- 'admin_provision' — "show me every rotation ever run on this scope" is
 -- a real question, and a distinct type answers it directly via
 -- `hupi-audit query -event-type key_rotation`.
+--
+-- Wrapped in an explicit transaction — see schema/0009's comment on why
+-- (the drop and the add are otherwise two separately-autocommitted
+-- statements under psql's defaults).
+begin;
 alter table audit_log drop constraint audit_log_event_type_check;
 alter table audit_log add constraint audit_log_event_type_check
     check (event_type in (
@@ -12,3 +17,4 @@ alter table audit_log add constraint audit_log_event_type_check
         'export', 'import',
         'key_rotation'
     ));
+commit;
