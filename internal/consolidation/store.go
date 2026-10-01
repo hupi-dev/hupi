@@ -214,15 +214,27 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 		return err
 	}
 
-	// Embedding runs after commit, best-effort: a failed embed means this
-	// summary won't surface via vector search until the next reindex, not
-	// that consolidation itself failed — the summary row is already
-	// durably stored.
+	// Embedding runs after commit, genuinely best-effort — a real,
+	// confirmed bug this used to get wrong (docs/CODEBASE_SURVEY_AND_REVIEW.md
+	// finding A6): a failed embed means this summary/these entities won't
+	// surface via vector search until the next reindex, not that
+	// consolidation itself failed — the summary row, its key facts, and
+	// every touched entity are already durably stored. Returning an error
+	// here used to propagate all the way to cmd/hupi-consolidate's scope
+	// loop, making a transient embedding-provider hiccup register as a
+	// failed consolidation run (a false alarm — everything that actually
+	// matters already committed) *and*, because RunDaily returned
+	// immediately on this error, silently skip the cross-period
+	// contradiction check and the embedding backfills that would
+	// otherwise have run next for this scope/day — real functional work
+	// lost, not just a misleading metric. Logging and continuing (the
+	// same pattern this package already uses for every other genuinely
+	// best-effort step, e.g. checkCrossPeriodContradictions) fixes both.
 	if err := r.embedSummary(ctx, in.scope, id, in.output.Summary); err != nil {
-		return fmt.Errorf("embed summary %s (row committed, embedding not): %w", id, err)
+		slog.Warn("consolidation: embed summary failed, row committed without it", "summary", id, "error", err)
 	}
 	if err := r.embedEntities(ctx, in.scope, entityIDs); err != nil {
-		return fmt.Errorf("embed entities touched by summary %s (rows committed, embeddings not): %w", id, err)
+		slog.Warn("consolidation: embed entities failed, rows committed without it", "summary", id, "error", err)
 	}
 	return nil
 }
