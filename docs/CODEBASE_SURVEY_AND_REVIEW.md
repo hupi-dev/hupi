@@ -388,7 +388,7 @@ without `-merge`, a retry of the identical command now fails outright
 remediation — the omission can't self-heal the way a merge-mode retry
 eventually would.
 
-**A11. The demo's daily session cap is defeated by the sweep job, making the real achievable session volume roughly 8x the intended cap.**
+**A11. ✅ FIXED ([PR #26](https://github.com/hupi-dev/hupi/pull/26)) — The demo's daily session cap is defeated by the sweep job, making the real achievable session volume roughly 8x the intended cap.**
 `internal/demo/store.go`, `cmd/hupi-demo-sweep/main.go`. The cap counts
 `demo_sessions` rows created in the last 24 hours, but the sweep job
 (meant to run every ~15 minutes) hard-deletes a session's row once its
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 10 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25; 3 remaining) |
+| Likely real bugs | 13 (✅ 11 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25, A11 PR #26; 2 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
@@ -511,9 +511,9 @@ just to pad the findings list:
 Of the two highest-leverage findings, **A6** (consolidation's best-effort
 steps aren't best-effort — a transient provider hiccup used to produce a
 false alarm *and* silently drop real downstream work) is now fixed
-([PR #21](https://github.com/hupi-dev/hupi/pull/21)). **A11** (the
-demo's cost-control cap is defeated by its own sweep job by roughly 8x)
-remains open. Both were genuine business-logic gaps between what the
-code's own comments say the design intends and what it actually does,
-not edge-case corner
-cutting.
+([PR #21](https://github.com/hupi-dev/hupi/pull/21)), and **A11** (the
+demo's cost-control cap was defeated by its own sweep job by roughly 8x)
+is now fixed too ([PR #26](https://github.com/hupi-dev/hupi/pull/26)).
+Both were genuine business-logic gaps between what the code's own
+comments say the design intends and what it actually does, not
+edge-case corner cutting.
