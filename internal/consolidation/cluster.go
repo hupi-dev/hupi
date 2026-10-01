@@ -76,10 +76,14 @@ func maxClustersPerDay() int {
 // see that document's Status section for why a soft instruction wasn't
 // enough to change this behavior on its own).
 //
-// Below clusterEpisodeThreshold, or if embedding/clustering fails or
-// degenerates to one cluster, this falls back to exactly today's
-// single-call behavior rather than erroring the whole day's
-// consolidation over an optimization.
+// Below clusterEpisodeThreshold, clustering itself is never attempted —
+// a genuinely different case from the three fallbacks below, not a busy
+// day clustering exists to protect (review finding B15's own wording:
+// "whenever the clustering embedding call fails or collapses to one
+// cluster," not "whenever clustering never ran because the day was too
+// small"). The per-episode insurance pass below runs regardless, though
+// (see singlePassWithInsurance's own doc comment for why a light day
+// needs it too, not just a busy one).
 //
 // knownEntities (RunDaily's own findKnownEntities result, computed once
 // for the whole day) is passed unchanged to every cluster's
@@ -88,24 +92,34 @@ func maxClustersPerDay() int {
 // relevant context regardless of which cluster a given episode landed
 // in.
 func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope, period string, sources []textSource, establishedRecord string, knownEntities []knownEntityContext) (ConsolidationOutput, error) {
-	if len(sources) <= clusterEpisodeThreshold {
-		// Below the threshold, clustering is never attempted at all — a
-		// genuinely different case from the three below, not a busy day
-		// the insurance pass exists to protect (review finding B15's own
-		// wording: "whenever the clustering embedding call fails or
-		// collapses to one cluster," not "whenever clustering never ran
-		// because the day was too small").
-		return r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
-	}
-
-	// singlePassWithInsurance is every one of this function's clustering-
-	// failed-or-collapsed fallbacks (review finding B15): these are
-	// exactly the busy days the insurance pass exists to protect — a day
-	// with enough sources to attempt clustering, where clustering itself
-	// then failed to separate topics into more than one group. Falling
-	// back to a bare single-pass summary with no insurance pass on top
-	// reintroduces the exact pre-clustering dilution behavior this whole
-	// mechanism exists to avoid, on precisely the days it matters most.
+	// singlePassWithInsurance is the fallback for every one of this
+	// function's clustering-failed-or-collapsed cases (review finding
+	// B15) — a day with enough sources to attempt clustering, where
+	// clustering itself then failed to separate topics into more than one
+	// group — and, since the real cases below, is also what a day at or
+	// below clusterEpisodeThreshold runs unconditionally.
+	//
+	// Originally light days (<= clusterEpisodeThreshold) skipped the
+	// per-episode pass entirely — a deliberate cost tradeoff when it was
+	// built (Phase B's second design option), reasoning that dilution
+	// across many crowded episodes was the problem this insurance pass
+	// existed to catch, and a light day has nothing to dilute it. Two
+	// real, independent LongMemEval failures on genuinely light days
+	// (89527b6b, a 4-session day; 852ce960, a 1-session day) disproved
+	// that: a single message can bury a real, specific detail as a
+	// trailing aside after its own primary topic — a children's story's
+	// per-dinosaur description, or "...by the way, remember when I got
+	// pre-approved for $400,000 from Wells Fargo?" tacked onto a message
+	// about cable TV providers — and the one whole-day generateSummary
+	// call compressed both away, judging the day's "real" topic to be
+	// whatever the message was mostly about. perEpisodeFactPrompt's own
+	// existing "pay particular attention to incidental scene-setting
+	// remarks... even though it don't look like the main topic" guidance
+	// already covers exactly this shape; it just never got a chance to
+	// run on these days. The added cost is bounded by
+	// clusterEpisodeThreshold itself (at most 8 extra calls on the
+	// busiest day this branch ever sees, typically far fewer), not the
+	// unbounded-busy-day cost this pass was originally gated to avoid.
 	singlePassWithInsurance := func() (ConsolidationOutput, error) {
 		out, err := r.generateSummary(ctx, scope, "daily", period, sources, establishedRecord, knownEntities)
 		if err != nil {
@@ -113,6 +127,10 @@ func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope,
 		}
 		out.KeyFacts = append(out.KeyFacts, r.extractPerEpisodeFacts(ctx, sources)...)
 		return out, nil
+	}
+
+	if len(sources) <= clusterEpisodeThreshold {
+		return singlePassWithInsurance()
 	}
 
 	texts := make([]string, len(sources))

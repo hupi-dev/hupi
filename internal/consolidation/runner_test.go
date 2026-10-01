@@ -1138,22 +1138,33 @@ func TestRunDaily_PassesEstablishedRecordOnReconsolidation(t *testing.T) {
 	if err := runner.RunDaily(ctx, scope, date); err != nil {
 		t.Fatalf("first RunDaily: %v", err)
 	}
-	if len(captured) != 1 {
-		t.Fatalf("got %d consolidation LLM calls after first RunDaily, want 1", len(captured))
+	// 2 calls, not 1: the whole-day summary call, plus one per-episode
+	// insurance-pass call for the single episode — generateDailySummary
+	// now runs that pass on every day, not just busy ones (see its own
+	// doc comment, 89527b6b/852ce960). The summary call always goes
+	// first (singlePassWithInsurance's own order), so captured[0] is
+	// still the one to check for the established-record block.
+	if len(captured) != 2 {
+		t.Fatalf("got %d consolidation LLM calls after first RunDaily, want 2 (1 summary + 1 per-episode)", len(captured))
 	}
 	firstPrompt := captured[0].Messages[len(captured[0].Messages)-1].Content
 	if strings.Contains(firstPrompt, "ALREADY-ESTABLISHED RECORD") {
-		t.Error("first RunDaily call included an established-record block — there was nothing to establish yet")
+		t.Error("first RunDaily's summary call included an established-record block — there was nothing to establish yet")
 	}
 
 	seedEpisode("ep_established_2", "second question", "second answer")
 	if err := runner.RunDaily(ctx, scope, date); err != nil {
 		t.Fatalf("second RunDaily: %v", err)
 	}
-	if len(captured) != 2 {
-		t.Fatalf("got %d consolidation LLM calls after second RunDaily, want 2", len(captured))
+	// +3 calls: the second day's summary call (now covering both
+	// episodes) plus one per-episode call each for ep_established_1 and
+	// ep_established_2 — total 5. The second summary call is captured[2]
+	// (index 0-1 were the first RunDaily's summary + single per-episode
+	// call).
+	if len(captured) != 5 {
+		t.Fatalf("got %d consolidation LLM calls after second RunDaily, want 5 (2 from the first run + 1 summary + 2 per-episode from the second)", len(captured))
 	}
-	secondPrompt := captured[1].Messages[len(captured[1].Messages)-1].Content
+	secondPrompt := captured[2].Messages[len(captured[2].Messages)-1].Content
 	if !strings.Contains(secondPrompt, "ALREADY-ESTABLISHED RECORD") {
 		t.Error("second RunDaily call (a re-consolidation) did not include the established-record block")
 	}
