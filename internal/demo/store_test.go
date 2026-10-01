@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -391,5 +392,68 @@ func TestCreateSession_CapStillCountsASweptSession(t *testing.T) {
 	// created seconds ago), so it must still count.
 	if _, err := s.CreateSession(ctx); !errors.Is(err, ErrDailySessionCapReached) {
 		t.Errorf("CreateSession() after sweeping an expired-but-recent session = %v, want %v — a swept session must still count toward the cap until capWindow has passed", err, ErrDailySessionCapReached)
+	}
+}
+
+// TestCreateSession_ConcurrentCallsNeverOvershootTheDailyCap is the real
+// regression test for review finding B21 — a separate race from A11
+// above: even with A11's counting fixed, CreateSession's own
+// count-check-then-insert was two independent statements with nothing
+// tying them together, so concurrent callers arriving while the count
+// was one under the cap could all read the same pre-increment count and
+// all succeed, overshooting the configured cap.
+func TestCreateSession_ConcurrentCallsNeverOvershootTheDailyCap(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	var existing int
+	if err := db.QueryRowContext(ctx,
+		`select count(*) from demo_sessions where created_at > now() - interval '1 day'`,
+	).Scan(&existing); err != nil {
+		t.Fatalf("count existing sessions: %v", err)
+	}
+
+	const allowMore = 5
+	const concurrency = 20
+	limits := testLimits()
+	limits.MaxSessionsPerDay = existing + allowMore
+	s := newTestStore(t, db, &stubRunner{}, limits)
+
+	var wg sync.WaitGroup
+	results := make(chan struct {
+		guestID string
+		err     error
+	}, concurrency)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sess, err := s.CreateSession(ctx)
+			results <- struct {
+				guestID string
+				err     error
+			}{sess.GuestUserID, err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	succeeded, overCap := 0, 0
+	for r := range results {
+		switch {
+		case r.err == nil:
+			succeeded++
+			trackGuest(t, db, r.guestID)
+		case errors.Is(r.err, ErrDailySessionCapReached):
+			overCap++
+		default:
+			t.Fatalf("CreateSession: unexpected error: %v", r.err)
+		}
+	}
+	if succeeded != allowMore {
+		t.Errorf("succeeded = %d, want exactly %d — the daily cap must hold exactly under concurrency, not overshoot it", succeeded, allowMore)
+	}
+	if overCap != concurrency-allowMore {
+		t.Errorf("rejected-for-cap count = %d, want %d", overCap, concurrency-allowMore)
 	}
 }
