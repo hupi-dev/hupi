@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,5 +136,38 @@ func TestRunDueRollups_NoJobsDueIsNoop(t *testing.T) {
 	failed := runDueRollups(nil, nil, mustDate(t, "2026-09-15"), scopes)
 	if failed != 0 {
 		t.Errorf("expected 0 failures with no jobs due, got %d", failed)
+	}
+}
+
+// TestRunSafely_RecoversPanicAsError is the real regression test for
+// review finding C4: without this, a panic inside one scope's
+// RunDaily/RunRollup call would unwind straight past the per-scope
+// log-and-continue error handling in run()/runDueRollups and crash the
+// whole batch — taking every other scope's consolidation down with it,
+// exactly contradicting those loops' own stated "one scope's failure
+// never blocks another's" design intent.
+func TestRunSafely_RecoversPanicAsError(t *testing.T) {
+	err := runSafely(func() error {
+		panic("simulated consolidation panic")
+	})
+	if err == nil {
+		t.Fatal("expected runSafely to convert the panic into a returned error")
+	}
+	if !strings.Contains(err.Error(), "simulated consolidation panic") {
+		t.Errorf("err = %q, want it to contain the panic value", err.Error())
+	}
+}
+
+func TestRunSafely_PassesThroughAReturnedError(t *testing.T) {
+	want := errors.New("a normal error")
+	err := runSafely(func() error { return want })
+	if !errors.Is(err, want) {
+		t.Errorf("runSafely(f) = %v, want %v unchanged", err, want)
+	}
+}
+
+func TestRunSafely_PassesThroughSuccess(t *testing.T) {
+	if err := runSafely(func() error { return nil }); err != nil {
+		t.Errorf("runSafely(f) = %v, want nil", err)
 	}
 }

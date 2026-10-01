@@ -85,11 +85,14 @@ func run() error {
 	period := date.Format("2006-01-02")
 	var failed int
 	for _, scope := range scopes {
-		if err := runner.RunDaily(ctx, scope, date); err != nil {
+		if err := runSafely(func() error { return runner.RunDaily(ctx, scope, date) }); err != nil {
 			// One user's or team's bad day (a malformed LLM response, a
 			// transient network error) shouldn't block everyone else's
 			// consolidation — log and keep going, report the failure
-			// count at the end.
+			// count at the end. runSafely additionally converts a panic
+			// into this same path (review finding C4): a panic is exactly
+			// the one failure mode this loop's own stated design intent
+			// doesn't actually cover without it.
 			slog.Error("daily consolidation failed for scope",
 				"scope_kind", scope.Kind, "scope_owner", scope.Owner, "date", period, "error", err)
 			failed++
@@ -108,6 +111,23 @@ func run() error {
 		return fmt.Errorf("consolidation failed for %d scope-runs on %s", failed, period)
 	}
 	return nil
+}
+
+// runSafely isolates one scope's consolidation/rollup call from a panic
+// in f — both per-scope loops in this file already log-and-continue on a
+// returned error specifically so one user's or team's bad day can't block
+// anyone else's, but a panic would still unwind straight past that and
+// crash the whole batch, taking every other scope down with it (review
+// finding C4: a real gap in that stated design intent, even though no
+// concrete panic path exists today — this is a defensive backstop against
+// a future one).
+func runSafely(f func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return f()
 }
 
 // pushMetrics sends this run's consolidation/grounding/rollup metrics
@@ -139,7 +159,9 @@ func runDueRollups(ctx context.Context, runner *consolidation.Runner, date time.
 	var failed int
 	for _, job := range jobs {
 		for _, scope := range scopes {
-			if err := runner.RunRollup(ctx, scope, job.level, job.sourceLevel, job.period, job.sourcePeriods); err != nil {
+			if err := runSafely(func() error {
+				return runner.RunRollup(ctx, scope, job.level, job.sourceLevel, job.period, job.sourcePeriods)
+			}); err != nil {
 				metrics.RollupRunsTotal.WithLabelValues("error").Inc()
 				slog.Error("rollup failed for scope",
 					"scope_kind", scope.Kind, "scope_owner", scope.Owner,
