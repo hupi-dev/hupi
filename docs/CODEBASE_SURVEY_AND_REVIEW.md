@@ -359,7 +359,7 @@ now provably stale by the code's own staleness check. Nothing in the
 ordinary cron cadence ever revisits a past calendar boundary, so the gap is
 permanent until an operator manually re-triggers the rollup.
 
-**A8. `rotate.Start` has an unlocked check-then-act race that can orphan a key version under concurrent rotations of the same scope.**
+**A8. ✅ FIXED ([PR #23](https://github.com/hupi-dev/hupi/pull/23)) — `rotate.Start` has an unlocked check-then-act race that can orphan a key version under concurrent rotations of the same scope.**
 `internal/rotate/rotate.go`. Two simultaneous `Start` calls for a scope with
 no existing rotation can both read "not in progress," both proceed, and
 each resolve `CreateNextVersion` against whatever the *other* has already
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 7 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22; 6 remaining) |
+| Likely real bugs | 13 (✅ 8 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23; 5 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
