@@ -476,6 +476,101 @@ func TestRunRollup_RegeneratesWhenSourceChangesAfterward(t *testing.T) {
 	}
 }
 
+// TestRunDaily_FirstSummaryForGapDayRefreshesExistingRollup is a real
+// regression test (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A7):
+// RunDaily used to only call refreshRollupsCovering when
+// existingCurrentID != "" — reasoning that a day's first-ever summary
+// couldn't leave an existing rollup stale, since nothing existed to be
+// stale before. That misses exactly the scenario here: a week's rollup
+// already ran with "2026-09-08" as a genuine gap day (no episodes, no
+// daily summary yet) — weeklyRollup's own fixed 7-day calendar template
+// means the rollup's source_summary_periods already lists 2026-09-08
+// even though it contributed nothing. When that day's episodes are
+// later captured (an out-of-order import, a manual re-run, a late
+// sync) and RunDaily gives it its first-ever summary, the existing
+// rollup is now provably stale (its sources changed) but the old guard
+// never even tried to check.
+func TestRunDaily_FirstSummaryForGapDayRefreshesExistingRollup(t *testing.T) {
+	consolidationJSON := `{"summary": "Rolled up the week.", "key_facts": [], "entities_touched": []}`
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-gap-day-refresh"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+
+	// Only 2026-09-07 has a daily summary when the week first rolls up —
+	// 2026-09-08 is a genuine gap day (no episodes at all yet).
+	dailyCT, _ := enc.Encrypt("daily summary text")
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into summaries (id, period, level, summary, scope_kind, scope_owner)
+			values ($1, $2, 'daily', $3, $4, $5)
+		`, "sum_gap_test_2026-09-07", "2026-09-07", dailyCT, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed the one real daily summary: %v", err)
+	}
+
+	sourcePeriods := []string{"2026-09-07", "2026-09-08"} // weeklyRollup's own fixed 7-day template, truncated here to the two days this test cares about
+	if err := runner.RunRollup(ctx, scope, "weekly", "daily", "2026-W37", sourcePeriods); err != nil {
+		t.Fatalf("seed weekly rollup over the gap week: %v", err)
+	}
+
+	// Now the gap day's episodes arrive (out-of-order capture, backfill,
+	// whatever the real cause) and RunDaily gives it its first-ever
+	// summary — existingCurrentID is "" going into this call.
+	inputCT, _ := enc.Encrypt("what happened on the gap day?")
+	outputCT, _ := enc.Encrypt("here's what happened")
+	gapDate := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+			values ('ep_test_gap_day', $1, 'interaction', $2, $3, 'sha256:test', 0.5, $4, $5)
+		`, gapDate, inputCT, outputCT, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed gap day episode: %v", err)
+	}
+	if err := runner.RunDaily(ctx, scope, gapDate); err != nil {
+		t.Fatalf("RunDaily for the gap day: %v", err)
+	}
+
+	// The existing weekly rollup must have been regenerated: two total
+	// rows (original + regenerated), exactly one current.
+	var total, current int
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `
+			select count(*) from summaries where level = 'weekly' and period = '2026-W37' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&total); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries s where level = 'weekly' and period = '2026-W37' and scope_kind = $1 and scope_owner = $2
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		`, scope.Kind, scope.Owner).Scan(&current)
+	}); err != nil {
+		t.Fatalf("count weekly summaries: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("got %d total weekly summaries for 2026-W37, want 2 (original + regenerated after the gap day's first summary) — the rollup was never refreshed", total)
+	}
+	if current != 1 {
+		t.Errorf("got %d current weekly summaries for 2026-W37, want exactly 1", current)
+	}
+}
+
 // TestRefreshRollupsCovering_FindsAndRegeneratesExistingRollup is Phase D
 // item 4's other real half: the query that finds *which* already-existing
 // rollups cover a corrected period (RunDaily and checkOneRelatedSummary
