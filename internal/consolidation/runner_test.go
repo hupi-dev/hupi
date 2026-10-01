@@ -193,6 +193,103 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 	}
 }
 
+// failingEmbedder wraps fakeConsolidationProvider but always fails Embed
+// — used by TestRunDaily_SucceedsDespiteEmbeddingFailure to simulate a
+// transient embedding-provider outage while consolidation and grounding
+// still succeed normally.
+type failingEmbedder struct {
+	fakeConsolidationProvider
+}
+
+func (failingEmbedder) Embed(context.Context, provider.EmbedRequest) (provider.EmbedResponse, error) {
+	return provider.EmbedResponse{}, errors.New("simulated embedding provider outage")
+}
+
+// TestRunDaily_SucceedsDespiteEmbeddingFailure is a real regression test
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A6): embedSummary,
+// embedEntities, embedHighImportanceEpisodes, and the entity-embedding
+// backfill are all documented as best-effort — a failure shouldn't fail
+// consolidation itself, since the summary/key-facts/entities are already
+// durably stored by the time any of them run. The code used to return
+// these errors anyway, making a transient embedding outage register as a
+// failed RunDaily (a false alarm) and, because RunDaily returned
+// immediately, silently skip real downstream work (the entity-embedding
+// backfill, reachable only after embedHighImportanceEpisodes). This test
+// uses an embedder that fails on every call and confirms RunDaily still
+// returns nil — if any of the now-fixed call sites still propagated its
+// error, this would fail.
+func TestRunDaily_SucceedsDespiteEmbeddingFailure(t *testing.T) {
+	consolidationJSON := `{
+		"summary": "Discussed the HUPI project.",
+		"key_facts": [{"fact": "Decided to use pgvector", "source_episode_ids": ["ep_test_embed_fail"]}],
+		"entities_touched": [{"id": "project:hupi-embed-fail", "kind": "project", "name": "HUPI", "attributes": {"vector_index": "pgvector"}}]
+	}`
+	groundingJSON := `{"grounded": [true]}`
+
+	dsn := os.Getenv("HUPI_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("HUPI_TEST_DATABASE_URL not set; skipping integration test")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	keys := crypto.NewKeyStore(db, make([]byte, 32))
+
+	consolidationProvider := fakeConsolidationProvider{response: consolidationJSON}
+	groundingProvider := fakeConsolidationProvider{response: groundingJSON}
+	runner := New(db, keys, consolidationProvider, groundingProvider, failingEmbedder{})
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-run-daily-embed-fail"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, _, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	inputCT, _ := enc.Encrypt("what should we use for the vector index?")
+	outputCT, _ := enc.Encrypt("let's use pgvector")
+	date := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, importance, scope_kind, scope_owner)
+			values ('ep_test_embed_fail', $1, 'interaction', $2, $3, 'sha256:test', 0.9, $4, $5)
+		`, date, inputCT, outputCT, scope.Kind, scope.Owner)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed episode: %v", err)
+	}
+
+	if err := runner.RunDaily(ctx, scope, date); err != nil {
+		t.Fatalf("RunDaily: %v, want nil — a failed embed must not fail consolidation (finding A6)", err)
+	}
+
+	// The summary itself must still be durably stored despite every
+	// embed call failing.
+	var summaryCount int
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from summaries where level = 'daily' and period = '2026-09-09' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&summaryCount)
+	})
+	if err != nil {
+		t.Fatalf("check summary: %v", err)
+	}
+	if summaryCount != 1 {
+		t.Error("expected the daily summary to be durably stored even though embedding failed")
+	}
+}
+
 // TestRunDaily_SetsEntityDatesToTheSimulatedDateNotRealNow is the real,
 // confirmed fix (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): upsertEntities
 // previously stamped every touched entity's first_seen/last_updated with
