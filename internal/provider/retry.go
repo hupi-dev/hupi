@@ -122,7 +122,7 @@ func sendWithRetry(ctx context.Context, client *http.Client, name string, idempo
 			}
 			select {
 			case <-ctx.Done():
-				return 0, nil, ctx.Err()
+				return 0, nil, fmt.Errorf("provider %s: cancelled while waiting to retry: %w", name, ctx.Err())
 			case <-time.After(retryDelay(attempt, "")):
 			}
 			continue
@@ -135,7 +135,7 @@ func sendWithRetry(ctx context.Context, client *http.Client, name string, idempo
 		if retryableStatus(resp.StatusCode) && attempt < maxRetries {
 			select {
 			case <-ctx.Done():
-				return 0, nil, ctx.Err()
+				return 0, nil, fmt.Errorf("provider %s: cancelled while waiting to retry: %w", name, ctx.Err())
 			case <-time.After(retryDelay(attempt, resp.Header.Get("Retry-After"))):
 			}
 			continue
@@ -174,7 +174,7 @@ func connectWithRetry(ctx context.Context, client *http.Client, name string, ide
 			}
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, fmt.Errorf("provider %s: cancelled while waiting to retry: %w", name, ctx.Err())
 			case <-time.After(retryDelay(attempt, "")):
 			}
 			continue
@@ -184,7 +184,7 @@ func connectWithRetry(ctx context.Context, client *http.Client, name string, ide
 			resp.Body.Close()
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, fmt.Errorf("provider %s: cancelled while waiting to retry: %w", name, ctx.Err())
 			case <-time.After(retryDelay(attempt, retryAfter)):
 			}
 			continue
