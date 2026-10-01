@@ -278,6 +278,22 @@ ranking overriding lexical outright) was tried and proven wrong by live
 re-verification — see PR #67's own description for the real regression
 it caused and why RRF fusion was used instead.
 
+**Update (2026-10-01, round 2)**: a fresh, unbiased 6-conversation
+validation (not a re-check of already-tuned cases) found a *different*
+temporal-reasoning failure (`gpt4_4edbafa2`, "what date did I attend the
+first BBQ event in June") answering "1 June 2023" — the resolved start
+date of a monthly period rollup, not any of the three real June dates
+actually in the source. Real root cause, confirmed via direct DB
+inspection and live reproduction: the grounding-check batch-mismatch bug
+described in `docs/CONSOLIDATION_COMPLETENESS_PLAN.md`'s own 2026-10-01
+round-2 update had zeroed out the exact 20-fact batch containing the
+correct June 3rd fact, making it invisible to retrieval — the monthly
+rollup's own start-date was the only day-adjacent signal left for the
+model to fall back on. Fixed in the same
+[PR #71](https://github.com/hupi-dev/hupi/pull/71). Reconsolidating this
+scope and re-answering confirmed **"3 June 2023" (gold: "June 3rd"), 3/3
+trials**, no longer the period-start fallback.
+
 ## Category 3: `knowledge-update` — no recency precedence across periods
 
 **Real finding, confirmed directly against the real database** (not
@@ -353,6 +369,150 @@ in code comments as previously-observed production issues:
   candidate pair gets compared at all. See
   `docs/CONSOLIDATION_COMPLETENESS_PLAN.md`'s Gap 3 section for the full
   detail on the underlying mechanism this extends.
+
+  **Update (2026-10-01, round 2)**: the same fresh 6-conversation
+  validation found a different `knowledge-update` failure (`07741c45`,
+  "where do I currently keep my old sneakers?" — location changed from
+  "under the bed" to "a shoe rack in my closet" across two sessions)
+  answering "not mentioned," recovering *neither* value. Real root cause:
+  the same grounding-check batch-mismatch bug as Category 2's update
+  above (`docs/CONSOLIDATION_COMPLETENESS_PLAN.md`'s round-2 follow-up)
+  had zeroed the batches containing both the old and the updated
+  location fact on different days, so this mechanism's own contradiction
+  detection never had two real facts to adjudicate between in the first
+  place — a recall/grounding gap upstream of Phase C's supersession
+  logic, not a defect in it. Fixed in the same
+  [PR #71](https://github.com/hupi-dev/hupi/pull/71). Reconsolidating
+  both affected days and re-answering confirmed **"Shoe rack in your
+  closet" (gold: "in a shoe rack in my closet"), 3/3 trials.**
+
+## Category 4 (added 2026-10-01, round 2): `single-session-assistant` — multi-milestone timeline extraction gap
+
+This category wasn't in this plan's original scope — the 44/48
+re-verification above found it at 100%. The fresh, unbiased 6-conversation
+validation found a real, new failure in it: `5809eb10` asked what year a
+house's construction began, from a single session where the user pasted a
+legal-case summary stating 5 different years across 5 different
+milestones of one case (construction began 2014, contract signed 2015,
+completed/keys received 2016, case decided/cited 2021). The predicted
+answer, "2020," matched none of them.
+
+**Real finding**, confirmed by decrypting and reading the actual stored
+memory for this scope/day: "construction began in 2014" was never
+extracted at all — neither as a key_fact nor in the summary prose — while
+the 2015 (signed) and 2016 (keys received) milestones, from the exact
+same source paragraph, were. Chunking and grounding were both checked and
+ruled out (the real source text fits in one chunk; this day's summary had
+0 ungrounded facts). Neither extraction prompt had guidance for "several
+dated milestones of one story" — the closest existing instruction covers
+attributing a detail to the assistant vs. the user, a different axis
+entirely.
+
+**Fix**, [PR #72](https://github.com/hupi-dev/hupi/pull/72): both
+`perEpisodeFactPrompt` and `summarySystemPrompt` now explicitly require
+each milestone of a multi-milestone timeline to be extracted as its own
+fact, naming the specific milestone so one doesn't silently absorb or
+replace another.
+
+**Real, measured, partial result, reported honestly**: live replay of the
+real source episode through the real model (3/3 trials) confirms "The
+construction began in 2014" is now extracted as its own fact. Reconsolidating
+the real scope with the fix moved the final predicted answer from a pure
+hallucination ("2020", matching nothing in the source) to a grounded
+"2015" — the fact now exists, correctly, in storage, but wasn't reaching
+the model's context at all (confirmed absent from the real assembled
+context via `-retrieved-context-out-file`).
+
+**Follow-up investigation found and fixed one real contributing cause**:
+direct measurement of this exact query against this real 62-fact summary
+found `factScores` (the lexical half of `rankKeyFacts`'s RRF fusion, see
+Category 2's own update above) gave the generic case-description fact a
+higher score (7) than the answer fact (3) purely because it repeated more
+of the question's own common, widely-shared vocabulary ("Bajimaya",
+"Reward Homes Pty Ltd", "case") — the answer fact's genuinely rare,
+distinguishing terms ("house", "began") counted no higher than any other
+shared word under the old flat overlap count. Fixed in
+[PR #75](https://github.com/hupi-dev/hupi/pull/75): `factScores` now uses
+BM25 (IDF-weighted, already relied on elsewhere in this file for
+summaries/episodes/entities) with length normalization disabled
+specifically for key facts (see that PR's own description for why).
+
+**Still not fully resolved, reported honestly**: even with that real
+lexical-scoring bug fixed, the final predicted answer for this exact
+scope/question is still "2015," not "2014." Direct measurement found two
+further, compounding factors, neither touched by PR #75: (1) this
+specific fact's real OpenAI `text-embedding-3-small` similarity to this
+query is measurably weaker (0.5456) than several longer, more
+generically-matching case-description facts (0.60-0.69), dragging down
+its fused RRF rank despite now having the strongest lexical score — the
+same class of real embedding-model limitation `rankKeyFacts`'s own doc
+comment already documents for a different case; and (2) `summaryDepthCap`
+(700 chars) still truncates the depth section before reaching this fact's
+now-improved-but-not-top-3 rank, because several longer, less-relevant
+facts ranked just above it consume the budget first. Both are real,
+distinct, deeper tuning questions (RRF fusion weighting, and the
+depth-budget/fact-length interaction) that would need their own dedicated
+investigation and re-verification against every already-tuned case (the
+same discipline that caught PR #75's own length-normalization regression
+risk against `gpt4_45189cb4` before it shipped) — recorded here as a
+known, deliberately not-further-chased residual, not glossed over.
+
+## Category 5 (added 2026-10-01, round 2): `multi-session` — cross-scenario figure conflation at answer time
+
+Also outside this plan's original scope (44/48 re-verification had this
+at 50%, not chosen for that round). The fresh 6-conversation validation's
+`multi-session` instance, `09ba9854_abs`, asked a bus fare from Narita
+airport to a Shinjuku hotel; the predicted answer, "about ¥4,000 (bus
+¥3,200 vs taxi ¥7,000)," paired a genuine, scenario-matched Narita bus
+fare (from the session that specifies Narita+Shinjuku) with a genuine but
+wrong-airport (Haneda) taxi estimate from an earlier, more generic
+session, and did clean arithmetic on the mismatched pair. Gold is an
+abstention — no bus fare was ever actually stated for this route.
+
+**Real finding**: not fabrication from nothing — both individual figures
+are real, just from two different scenarios never stated together. This
+is a distinct failure shape from Category 3's "two competing values of
+one fact" (already covered by the existing recency-preference
+instruction in `internal/qaprompt`) — here there are two different real
+facts about two different scenarios, wrongly combined into one computed
+answer.
+
+**Fix**, [PR #73](https://github.com/hupi-dev/hupi/pull/73): `qaprompt.Concise`
+now instructs that computing a derived value from two figures requires
+both to be stated about the exact same specific scenario named in the
+question — give individually-labeled figures instead of inventing a
+combined one when they don't match. Deliberately narrow: doesn't touch
+the existing "best specific attempt" default or the recency-preference
+paragraph.
+
+A broader "hedged/unconfirmed advice isn't a usable fact" rule was
+deliberately **not** added, even though it would likely also be needed
+for this exact question to reach its gold abstention in every case — this
+conversation is pre-booking brainstorming throughout, and distinguishing
+that from a confirmed fact is a materially bigger, less-verified change
+than the conflation guard, based on one real example. Recorded here as a
+known, deliberately deferred residual, matching this plan's own
+established discipline against shipping speculative prompt changes from a
+single failing case.
+
+**Real, measured result**: live verification against the real,
+already-consolidated scope — 3/3 trials pre-fix confidently answered a
+hallucinated figure; 3/3 trials post-fix abstain or explicitly label the
+bus fare as not mentioned.
+
+## Round 2 validation summary (2026-10-01)
+
+The fresh, unbiased 6-conversation sample that surfaced Categories 4/5
+above and the round-2 updates to Categories 2/3 started at **2/6**
+correct and ended at **5/6** after PR #71/#72/#73 — `gpt4_4edbafa2` and
+`07741c45` now match gold exactly (3/3 trials each); `09ba9854_abs` now
+correctly abstains (3/3 trials); `5809eb10` improved from hallucination to
+a grounded-but-wrong-milestone answer, with the residual fact-ranking gap
+above recorded rather than chased further this round. The other 2
+instances (`35a27287`, `0862e8bf_abs`) were already correct and unchanged
+— `35a27287`'s verbose, hedging answer style was confirmed, by direct
+reproduction against the pre-fix binary, to be pre-existing and
+unaffected by any of this round's changes.
 
 ## Sequenced steps
 
