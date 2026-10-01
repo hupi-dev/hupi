@@ -260,7 +260,19 @@ func (s *server) auditQuery(w http.ResponseWriter, r *http.Request) {
 		EventType:  q.Get("event_type"),
 		TargetID:   q.Get("target_id"),
 		Limit:      limit,
-		Ascending:  true,
+		// Deliberately the zero value (descending — "most recent N"),
+		// matching cmd/hupi-audit's own "tail" semantics, not its "query"
+		// subcommand's ascending one: audit_log is insert-only and only
+		// ever grows (schema/0007's own comment — no DELETE grant for
+		// hupi_app), so with a fixed limit and no explicit since/until
+		// range, ascending order silently stops returning *any* new event
+		// of a given filter once that filter's lifetime row count exceeds
+		// the limit — a real, worsening-over-time correctness bug for the
+		// one request shape (no date range given) that's supposed to mean
+		// "show me what's recent." Was previously hardcoded Ascending:
+		// true here; a caller that explicitly sets both since and until
+		// gets a genuine bounded range either way, so this only changes
+		// the open-ended "no date range" default.
 	}
 	if raw := q.Get("since"); raw != "" {
 		ts, err := time.Parse(time.RFC3339, raw)

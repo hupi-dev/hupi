@@ -15,8 +15,11 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"hupi/internal/audit"
 	"hupi/internal/auth"
 	"hupi/internal/crypto"
+	"hupi/internal/dbscope"
+	"hupi/internal/identity"
 )
 
 // See internal/store/scope_isolation_test.go's doc comment for how to run
@@ -427,6 +430,83 @@ func TestAuditQuery(t *testing.T) {
 		if e.Actor != opName {
 			t.Errorf("actor-filtered query returned a row for %q, want only %q", e.Actor, opName)
 		}
+	}
+}
+
+// TestAuditQuery_RecentRowReturnedEvenWhenHistoricalCountExceedsLimit is
+// the real regression test for the root cause of TestAuditQuery's own
+// flakiness in a long-lived shared test database: auditQuery used to
+// hardcode Ascending: true, so with a fixed limit and no since/until
+// range, a filter whose lifetime row count exceeds that limit silently
+// stops returning *any* new row of that filter at all — audit_log is
+// insert-only and only ever grows (schema/0007's own comment), so this
+// got permanently worse over the table's lifetime, not just occasionally
+// flaky. Seeds far more historical admin_provision rows than the query
+// limit (all strictly before the real action under test, so a correct
+// descending/"most recent N" query always surfaces the real one
+// regardless of how much older noise exists), then confirms the real,
+// freshly-created row is still present.
+func TestAuditQuery_RecentRowReturnedEvenWhenHistoricalCountExceedsLimit(t *testing.T) {
+	srv, db := testServer(t)
+	ctx := context.Background()
+	noiseActor := fmt.Sprintf("test-adminui-op-audit-noise-%d", time.Now().UnixNano())
+	opName := fmt.Sprintf("test-adminui-op-audit-growth-%d", time.Now().UnixNano())
+	userID := "user:test-adminui-audit-growth"
+	t.Cleanup(func() {
+		db.Exec(`delete from operators where name = $1`, opName)
+		cleanupIDs(t, db, userID, "")
+	})
+
+	const limit = 100
+	const noiseRows = limit + 50 // strictly more historical rows than the query will ever return
+	err := dbscope.Run(ctx, db, identity.DefaultScope, identity.DefaultScope, func(tx *sql.Tx) error {
+		for i := 0; i < noiseRows; i++ {
+			if err := audit.Write(ctx, tx, audit.Entry{
+				EventType:      audit.EventAdminProvision,
+				Actor:          noiseActor,
+				ActingScope:    identity.DefaultScope,
+				WorkspaceScope: identity.DefaultScope,
+				Detail:         map[string]any{"seq": i},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed historical noise rows: %v", err)
+	}
+
+	if _, err := srv.store.CreateOperator(ctx, opName); err != nil {
+		t.Fatalf("create operator: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/users", bytes.NewReader(mustJSON(t, map[string]string{
+		"id": userID, "email": "audit-growth@example.com",
+	})))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req.WithContext(context.WithValue(req.Context(), operatorContextKey{}, opName)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create user status = %d, body:\n%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, srv, http.MethodGet, fmt.Sprintf("/api/audit?event_type=admin_provision&limit=%d", limit), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/audit status = %d, body:\n%s", rec.Code, rec.Body.String())
+	}
+	var all []auditEntryForTest
+	decodeBody(t, rec, &all)
+	if len(all) != limit {
+		t.Fatalf("got %d rows, want exactly %d (the limit) given %d historical + 1 fresh row", len(all), limit, noiseRows)
+	}
+	seen := false
+	for _, e := range all {
+		if e.Actor == opName {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("the real, freshly-created row (actor=%q) was missing from a %d-row result even though only %d historical rows exist — ordering must be returning the oldest rows, not the most recent", opName, limit, noiseRows)
 	}
 }
 
