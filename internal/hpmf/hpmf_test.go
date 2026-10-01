@@ -79,9 +79,9 @@ func seedScope(t *testing.T, ctx context.Context, db *sql.DB, keys *crypto.KeySt
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded)
-			values ($1, $2, $3, true)
-		`, "sum_"+tag+"_v1", v1CT, "{ep_"+tag+"}"); err != nil {
+			insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, scope_kind, scope_owner)
+			values ($1, $2, $3, true, $4, $5)
+		`, "sum_"+tag+"_v1", v1CT, "{ep_"+tag+"}", scope.Kind, scope.Owner); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `

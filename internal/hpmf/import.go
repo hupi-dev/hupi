@@ -252,9 +252,9 @@ func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, key
 						return fmt.Errorf("hpmf: encrypt key fact for %s: %w", newID, err)
 					}
 					_, err = tx.ExecContext(ctx, `
-						insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version)
-						values ($1, $2, $3::text[], $4, $5)
-					`, newID, factCT, pgfmt.TextArray(kf.SourceEpisodeIDs), kf.Grounded, keyVersion)
+						insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner)
+						values ($1, $2, $3::text[], $4, $5, $6, $7)
+					`, newID, factCT, pgfmt.TextArray(kf.SourceEpisodeIDs), kf.Grounded, keyVersion, scope.Kind, scope.Owner)
 					if err != nil {
 						return fmt.Errorf("hpmf: insert key fact for %s: %w", newID, err)
 					}
