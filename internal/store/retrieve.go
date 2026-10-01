@@ -1124,12 +1124,25 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// charity-events LongMemEval case. Writing every picked summary's
 	// guarantee first, before any summary's depth, means a global
 	// truncateToBudget cut (still the final backstop) can only ever
-	// land on depth, never on a guarantee that hasn't been written yet.
+	// land on depth, never on a guarantee that hasn't been written yet
+	// — never land on one that's already been written, that is: see
+	// guaranteeBudgetPerSummary's own doc comment for a second, real
+	// regression this same "write every guarantee first" design still
+	// had, now also fixed — several picks' guarantee lines, with no
+	// per-summary cap, could together exhaust the budget before a
+	// lower-ranked pick's own guarantee was ever reached.
 	//
 	// Pass 2 doesn't repeat "related memory (summary %s...)" — just the
 	// depth content itself — so each summary's id still appears exactly
 	// once in the assembled context
 	// (TestRetrieve_FusedSearchLabelsSummaryFoundByBothMechanisms).
+	//
+	// perSummaryGuaranteeCap bounds each pick's own guarantee line to a
+	// fair share of the budget (guaranteeBudgetPerSummary's own doc
+	// comment has the real regression this fixes) — computed once per
+	// call from how many summaries were actually picked, not a flat
+	// constant, since "fair" depends on how many are competing for room.
+	perSummaryGuaranteeCap := guaranteeBudgetPerSummary(len(picks))
 	for _, p := range picks {
 		// dateLabel hands the answering model an already-computed
 		// relative date, not just a raw one (docs/CONSOLIDATION_COMPLETENESS_PLAN.md
@@ -1144,7 +1157,30 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				dateLabel = fmt.Sprintf(", dated %s (%s)", p.c.period, rel)
 			}
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (summary %s%s%s): %s", p.c.id, dateLabel, p.label, guaranteedFact(p.c.text, p.facts, queryTerms)))
+		// factCap reserves whatever the prefix actually costs for *this*
+		// summary (its own id/date-label/match-type length all vary) out
+		// of the shared per-summary line cap, then guarantees at least
+		// guaranteeMinFactChars for the fact itself regardless — see
+		// guaranteeBudgetPerSummary's own doc comment for why capping
+		// only the fact text, and ignoring real prefix cost, was the bug
+		// in this fix's first version. Uses hardTruncate, not
+		// truncateToBudget — a second real miscalculation found during
+		// re-verification: truncateToBudget's own "...[truncated to fit
+		// context budget]" marker (37 chars) was itself being added once
+		// per picked summary, and with 9 real picks that overhead alone
+		// was enough to still exceed the budget before the lowest-ranked
+		// one was reached, even after this cap. That marker earns its
+		// cost once, at the final whole-context cut, where it tells the
+		// model there was more it isn't seeing — repeating it on every
+		// individual guarantee line adds the same cost 9 times over for
+		// an expected, minor per-line shortening, not a meaningful signal.
+		prefix := fmt.Sprintf("\nrelated memory (summary %s%s%s): ", p.c.id, dateLabel, p.label)
+		factCap := perSummaryGuaranteeCap - len(prefix)
+		if factCap < guaranteeMinFactChars {
+			factCap = guaranteeMinFactChars
+		}
+		guarantee := hardTruncate(guaranteedFact(p.c.text, p.facts, queryTerms), factCap)
+		sb.WriteString(prefix + guarantee)
 	}
 
 	var refs []identity.Ref
@@ -1325,6 +1361,77 @@ func guaranteedFact(prose string, facts []string, queryTerms []string) string {
 // small on purpose, a fallback for a summary with nothing grounded to
 // guarantee, not meant to substitute for real prose depth.
 const guaranteedProseFallbackChars = 300
+
+// guaranteeSectionFraction/guaranteeMinPerSummary bound how much of the
+// total context budget a single picked summary's guarantee line
+// (fusedSearchSummaries' pass 1, written before any pass-2 depth) is
+// allowed to cost — a real, confirmed production regression, not a
+// hypothetical. Pass 1's own doc comment explains why a guarantee is
+// written before any depth: so the final truncateToBudget backstop can
+// only ever land on depth, never on a guarantee. That protection has a
+// real blind spot once *several* summaries are picked for the same
+// question and nothing caps each one's share: with no per-summary cap,
+// the guarantee lines written first (highest relevance first) can,
+// together, consume the *entire* budget before a lower-ranked-but-still-
+// correctly-matched summary's own guarantee is ever reached — not cut
+// off mid-line by truncateToBudget, simply never written in time to
+// survive it.
+//
+// Real-verified against gpt4_e072b769 ("how many weeks ago did I start
+// using Ibotta") — a real regression introduced by guaranteedFact's own
+// fix (above): 9 summaries matched this generic query, the Ibotta
+// summary's fused score was the lowest of the 9, and its guarantee line
+// sat past the real production-default 2000-char budget. Confirmed via
+// a temporary budget override that the fact was present and correct the
+// whole time ("3 weeks ago") — just unreachable in write order, not
+// missing. guaranteedFact's fix (picking a real relevant fact on a tie
+// instead of an arbitrary one) made this worse without changing the
+// underlying architecture: a genuinely relevant fact is sometimes longer
+// text than the arbitrary facts[0] fallback it replaced, which shifted
+// how many characters several higher-ranked summaries' guarantee lines
+// cost, enough to push Ibotta's past the cutoff where it used to just
+// barely fit.
+//
+// The fix: cap each picked summary's whole guarantee *line* — not just
+// its fact text — to a fair share of the budget, computed from how many
+// summaries were actually picked. With few picks, the share is generous
+// — most real facts (short, atomic, per summarySystemPrompt's own
+// instruction) are well under it, so this changes nothing for the
+// common case. With many picks, each gets a smaller but *guaranteed*
+// slice instead of a first-come-first-served race for the whole budget.
+//
+// A first version of this fix capped only the fact text returned by
+// guaranteedFact, not the "related memory (summary <id>, dated ...,
+// ... match): " prefix wrapped around it in fusedSearchSummaries' own
+// write loop — and real re-verification showed it didn't actually fix
+// the Ibotta regression at all. Summary IDs in this real test data run
+// ~130-160 characters on their own; 9 picks' worth of *prefixes alone*
+// already exceeded the 2000-char default budget before any fact text
+// was even considered, so capping only the fact text left the real
+// bottleneck untouched. guaranteeMinPerSummary is sized to comfortably
+// cover a realistic prefix (measured against this real data) plus a
+// real short fact, not reverse-engineered to one specific ID format —
+// the write loop separately reserves guaranteeMinFactChars for the fact
+// itself regardless of how long a given summary's own prefix happens to
+// be, so an unusually long ID in some other deployment can't silently
+// crowd the fact out to zero the same way.
+const guaranteeSectionFraction = 0.5
+const guaranteeMinPerSummary = 220
+const guaranteeMinFactChars = 60
+
+// guaranteeBudgetPerSummary computes the per-summary *line* cap
+// described above (prefix + fact together). Pure arithmetic — see that
+// constant's doc comment for the real regression this exists to fix.
+func guaranteeBudgetPerSummary(numPicks int) int {
+	if numPicks <= 0 {
+		return 0
+	}
+	share := int(float64(contextCharBudget())*guaranteeSectionFraction) / numPicks
+	if share < guaranteeMinPerSummary {
+		return guaranteeMinPerSummary
+	}
+	return share
+}
 
 // proseDepthCap bounds only a summary's full PROSE contribution to its
 // depth section — key facts (writeKeyFacts) are deliberately NOT capped
@@ -2193,6 +2300,21 @@ func truncateToBudget(s string, maxChars int) string {
 		return s
 	}
 	return s[:maxChars] + "\n...[truncated to fit context budget]"
+}
+
+// hardTruncate is truncateToBudget without the "...[truncated]" marker
+// — used by fusedSearchSummaries' per-summary guarantee-line cap
+// (guaranteeBudgetPerSummary's own doc comment), where the marker's own
+// 37 characters, repeated once per picked summary, was itself enough to
+// blow the fair per-summary budget this cap exists to enforce. The
+// marker is worth its cost exactly once, at the final whole-context
+// truncateToBudget call — telling the model there was more it isn't
+// seeing — not on every individual, already-expected minor shortening.
+func hardTruncate(s string, maxChars int) string {
+	if len(s) <= maxChars {
+		return s
+	}
+	return s[:maxChars]
 }
 
 func lastUserMessage(msgs []provider.Message) string {

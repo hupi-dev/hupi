@@ -1300,6 +1300,83 @@ better-understood.
   the `guaranteedFact` fix solves the real mechanism at the
   already-shipped default budget, with no budget-size tradeoff.
 
+- **A real, confirmed regression from the above, found and fixed after
+  PR #15 merged — cross-summary guarantee-line budget starvation
+  (`docs/MEMORY_SCENARIOS.md` scenario D).** Re-running the same real
+  8-conversation sample post-merge: `gpt4_e072b769` ("how many weeks ago
+  did I start using Ibotta"), previously a confirmed exact-gold-match
+  fix, now consistently wrong. Root cause: 9 summaries get picked for
+  this generic question; `fusedSearchSummaries`' pass 1 writes every
+  picked summary's `guaranteedFact` line, highest-relevance first, with
+  no per-summary cap — the Ibotta summary, lowest-fused of the 9, never
+  got its guarantee line written before the global budget ran out.
+  Confirmed via a budget override that the fact was present and correct
+  the whole time, just unreachable in write order. The `guaranteedFact`
+  fix itself is what exposed this: picking a genuinely relevant fact on
+  a tie (correct) is sometimes longer than the arbitrary `facts[0]`
+  fallback it replaced, shifting cumulative guarantee-line cost enough
+  to push Ibotta's past the cutoff where it used to just barely fit.
+
+  **Fix**: `guaranteeBudgetPerSummary` caps each picked summary's whole
+  guarantee line to a fair, N-aware share of the budget
+  (`internal/store/retrieve.go`). Two further real mistakes were found
+  and fixed while building and re-verifying this, both the same
+  category of error (measuring the wrong thing's cost): the first
+  version capped only the fact text, not the `"related memory (summary
+  <id>, dated ..., ... match): "` prefix — and this real benchmark's own
+  summary IDs run ~130-160 characters, so 9 prefixes alone still
+  exceeded the budget regardless of the cap. Fixed by reserving the
+  real, measured prefix cost per summary before capping the fact
+  (`guaranteeMinFactChars` floors the fact's own share regardless of
+  prefix length). The second: `truncateToBudget`'s own
+  `"...[truncated to fit context budget]"` marker (37 chars), fine once
+  at the final whole-context cut, was being repeated once per picked
+  summary — 9 repeats of that overhead alone still blew the budget even
+  after the prefix fix. Fixed with a new `hardTruncate` (same cap, no
+  repeated marker) used specifically for this per-summary case.
+
+  **Real re-verification**: 4/4 correct on the isolated Ibotta question,
+  and stable across 4 full re-runs of the whole 8-conversation sample —
+  `gpt4_45189cb4` (sports-order) unaffected (still 4/4 correct),
+  confirming the fix doesn't trade one failure for another the way the
+  first attempt did. `go build`/`go vet`/`go test ./... -count=1` clean
+  across all 20 packages; 3 new unit tests in
+  `internal/store/keyfacts_test.go` cover the few-picks (unaffected) and
+  many-picks (floor-respecting) cases.
+
+  **A second, separate, still-open issue found during this
+  re-verification, not fixed here**: `60bf93ed` ("how many days did my
+  backpack take to arrive") has also been consistently wrong since PR
+  #15 merged — confirmed present in the very first post-merge rerun,
+  before this fix existed, so it's independent of the guarantee-line
+  starvation above, not something this fix should have touched. Only one
+  summary is picked for this question (no cross-summary competition),
+  but the fact needed — "I bought it from Amazon on 1/15" — lives in raw
+  episode text appended after all summary content, at position ~18,300
+  in an unbudgeted dump, nowhere near the default 2,000-char cutoff.
+  Confirmed via the same budget-override technique: correct ("5 days")
+  once nothing is truncated. This is the same "context assembly is
+  naive tail-truncation, not actually budget-aware" gap Phase B's own
+  follow-up item 1 already named — this fix narrowed it for summaries'
+  guarantee lines specifically; episodes, entities, and graph content
+  still have no per-section budget fairness at all. Tracked as the next
+  piece of the same gap, not fixed in this pass.
+
+  **Two other apparent "regressions" checked and ruled out as real model
+  variance, not bugs**: `852ce960` (Wells Fargo) and `89527b6b`
+  (dinosaur color) were also inconsistent across today's runs — but
+  checking every run since the PR #15 merge (12 runs each, including the
+  very first, before any further fix) shows both were *already*
+  inconsistent from the start (852ce960: 3/12 correct; 89527b6b: 2/12
+  correct), not freshly broken by anything built today. 852ce960 in
+  particular is a live, real instance of Gap 3's own acknowledged
+  non-goal — two genuine, unresolved conflicting pre-approval amounts
+  sit side by side in that scope's real data, and the model picks
+  between them inconsistently, exactly the class of problem a fully
+  general cross-fact contradiction system (explicitly out of scope) would
+  address. Confirmed via direct grep across every saved prediction file
+  from today, not assumed.
+
 ## Non-goals
 
 - A general-purpose "detect and resolve any factual contradiction"
