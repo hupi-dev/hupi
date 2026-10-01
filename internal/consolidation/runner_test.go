@@ -156,11 +156,14 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 		t.Errorf("summary text = %q, want the seeded consolidation output", text)
 	}
 
-	// summary_key_facts has no scope columns of its own and isn't
-	// RLS-protected (see schema/0005's doc comment) — a plain query is
-	// correct here, not an oversight.
+	// summary_key_facts gained its own scope columns and RLS in
+	// schema/0018 (docs/CODEBASE_SURVEY_AND_REVIEW.md B18) — a scoped
+	// query is required now, not optional.
 	var grounded bool
-	if err := db.QueryRowContext(ctx, `select grounded from summary_key_facts where summary_id = $1`, summaryID).Scan(&grounded); err != nil {
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select grounded from summary_key_facts where summary_id = $1`, summaryID).Scan(&grounded)
+	})
+	if err != nil {
 		t.Fatalf("expected a key_facts row: %v", err)
 	}
 	if !grounded {
