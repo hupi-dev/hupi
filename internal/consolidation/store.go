@@ -182,9 +182,9 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 				}
 			}
 			_, err = tx.ExecContext(ctx, `
-				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version)
-				values ($1, $2, $3::text[], $4, $5)
-			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion)
+				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner)
+				values ($1, $2, $3::text[], $4, $5, $6, $7)
+			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner)
 			if err != nil {
 				return fmt.Errorf("insert key fact %d for summary %s: %w", i, id, err)
 			}

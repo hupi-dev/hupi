@@ -92,7 +92,9 @@ func TestRunDaily_DropsKeyFactCitationNotAmongRealSourceEpisodes(t *testing.T) {
 	}
 
 	var sourceEpisodeIDsLit string
-	if err := db.QueryRowContext(ctx, `select source_episode_ids from summary_key_facts where summary_id = $1`, summaryID).Scan(&sourceEpisodeIDsLit); err != nil {
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select source_episode_ids from summary_key_facts where summary_id = $1`, summaryID).Scan(&sourceEpisodeIDsLit)
+	}); err != nil {
 		t.Fatalf("expected a key_facts row: %v", err)
 	}
 	got := pgfmt.ParseTextArray(sourceEpisodeIDsLit)

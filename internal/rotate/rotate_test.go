@@ -82,8 +82,8 @@ func seed(t *testing.T, ctx context.Context, db *sql.DB, keys *crypto.KeyStore, 
 				return err
 			}
 			_, err := tx.ExecContext(ctx, `
-				insert into summary_key_facts (summary_id, fact, grounded) values ($1, $2, true)
-			`, "sum_"+suffix, factCT)
+				insert into summary_key_facts (summary_id, fact, grounded, scope_kind, scope_owner) values ($1, $2, true, $3, $4)
+			`, "sum_"+suffix, factCT, scope.Kind, scope.Owner)
 			return err
 		})
 		if err != nil {
