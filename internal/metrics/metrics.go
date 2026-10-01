@@ -122,6 +122,20 @@ var (
 		Name: "hupi_keyword_search_skipped_no_terms_total",
 		Help: "Retrieval turns where keyword search was silently skipped because the query tokenized to zero real search terms (e.g. punctuation-only), despite passing stage 1 and reaching vector search.",
 	})
+
+	// AttachmentIngestTotal/AttachmentIngestDuration cover file/image
+	// attachment processing (internal/gateway/attachments.go) —
+	// deliberately no filename/content label, matching this file's own
+	// privacy/cardinality rule at the top.
+	AttachmentIngestTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hupi_attachment_ingest_total",
+		Help: `Attachment extraction/captioning outcomes, by kind ("document", "image") and result ("ok", "warning", "error", "rejected").`,
+	}, []string{"kind", "result"})
+
+	AttachmentIngestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "hupi_attachment_ingest_duration_seconds",
+		Help: "Attachment extraction/captioning duration in seconds, by kind.",
+	}, []string{"kind"})
 )
 
 // InstrumentHandler wraps h to record HTTPRequestsTotal/HTTPRequestDuration

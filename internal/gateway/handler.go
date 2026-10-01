@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,21 @@ import (
 	"hupi/internal/metrics"
 	"hupi/internal/provider"
 )
+
+// defaultMaxRequestBodyBytes covers a handful of attachments at
+// maxAttachmentBytes (8 MiB each) plus base64's ~33% size inflation and
+// JSON overhead — same "informed minority override" pattern as
+// internal/store/retrieve.go's contextCharBudget.
+const defaultMaxRequestBodyBytes = 20 << 20 // 20 MiB
+
+func maxRequestBodyBytes() int64 {
+	if v := os.Getenv("HUPI_MAX_REQUEST_BODY_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxRequestBodyBytes
+}
 
 // MemoryGate mirrors the outcome defined in ARCHITECTURE.md § Request
 // lifecycle: skipped means retrieval never ran; partial/full both mean it
@@ -242,8 +259,19 @@ func (h *Handler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Request, actingUser, workspace identity.Scope) {
+	// http.MaxBytesReader, not an unbounded decode: a latent gap for
+	// plain text before attachments existed, and attachments (base64
+	// file/image data) make it both more valuable to exploit and more
+	// likely to be hit by accident. A decode failure specifically from
+	// exceeding this maps to 413, not the generic 400 below.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes())
 	var req chatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, fmt.Sprintf("request body exceeds %d byte limit", maxBytesErr.Limit), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -303,6 +331,25 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 		systemMessages = append(systemMessages, provider.Message{Role: provider.RoleSystem, Content: result.ContextMessage})
 	}
 
+	// Attachments (file-ingestion design): merged after retrieval (so a
+	// turn's retrieval query doesn't balloon with a document's full
+	// text — only capture does) and before inputText is computed below,
+	// so the merged content flows through buildEpisode/Capture/
+	// EpisodeEmbedText/chunking with no further code changes anywhere
+	// else. A validation failure here (too many attachments, oversized,
+	// bad MIME, no user message present) is a 400; a per-attachment
+	// extraction/captioning failure degrades to a placeholder marker
+	// instead (see mergeAttachments' own doc comment).
+	var attachmentWarnings []string
+	if len(req.Attachments) > 0 {
+		var err error
+		messages, attachmentWarnings, err = h.mergeAttachments(ctx, messages, req.Attachments)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid attachments: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Step 1 (model name -> provider profile) + step 4 (forward upstream).
 	target := h.resolveProvider(req.Model)
 	inputText := lastUserMessage(messages)
@@ -324,10 +371,10 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	augmented := append(systemMessages, messages...)
 
 	if req.Stream {
-		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode)
+		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode, attachmentWarnings)
 		return
 	}
-	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode)
+	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode, attachmentWarnings)
 }
 
 // resolveIdentity authenticates a request. With h.Auth nil (Tier 1/2
@@ -466,6 +513,7 @@ func (h *Handler) handleNonStream(
 	actor string,
 	skipCapture bool,
 	explainMode string,
+	attachmentWarnings []string,
 ) {
 	// Model is left blank here on purpose: req.Model was used above only
 	// to pick a provider profile (resolveProvider) and may well be a
@@ -522,6 +570,7 @@ func (h *Handler) handleNonStream(
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
 		},
+		AttachmentWarnings: attachmentWarnings,
 	}
 	if explainMode != "" {
 		citations := append([]Citation{}, result.Citations...)
@@ -558,6 +607,7 @@ func (h *Handler) handleStream(
 	actor string,
 	skipCapture bool,
 	explainMode string,
+	attachmentWarnings []string,
 ) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -647,7 +697,8 @@ drain:
 	finish := "stop"
 	terminal := chatCompletionChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: target.Model(),
-		Choices: []chatCompletionChunkChoice{{Index: 0, Delta: chatCompletionChunkDelta{}, FinishReason: &finish}},
+		Choices:            []chatCompletionChunkChoice{{Index: 0, Delta: chatCompletionChunkDelta{}, FinishReason: &finish}},
+		AttachmentWarnings: attachmentWarnings,
 	}
 	if explainMode != "" {
 		citations := append([]Citation{}, result.Citations...)

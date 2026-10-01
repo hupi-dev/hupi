@@ -88,7 +88,19 @@ Entry point: `gateway.Handler.HandleChatCompletions`
 3. **Inject.** If retrieval produced any `ContextMessage`, it's prepended
    as a `system`-role message ahead of the client's own messages. Nothing
    after it is touched.
-4. **Resolve the provider.** `resolveProvider(req.Model)` first checks
+4. **Merge attachments, if any** (`mergeAttachments`,
+   `internal/gateway/attachments.go`) — after retrieval (so a turn's
+   retrieval query doesn't balloon with a document's full text), before
+   the provider call. Each `attachments` entry is converted to plain
+   text (extracted document text via `internal/ingest`, or an image
+   caption via the vision-capable provider's `DescribeImage`) and
+   appended, with a provenance marker, to the last user message's
+   content — the same string every later step (upstream call, capture,
+   consolidation) already handles, with no further code changes
+   anywhere. An extraction/captioning failure degrades to a placeholder
+   marker, never fails the request; a malformed attachment (oversized,
+   bad MIME, no user message to attach to) is a `400`.
+5. **Resolve the provider.** `resolveProvider(req.Model)` first checks
    whether the client's `model` field matches a *named profile* in
    `providers.yaml` (e.g. a client asking for `"personal-claude"` reaches
    that exact profile); otherwise it falls back to
@@ -97,10 +109,10 @@ Entry point: `gateway.Handler.HandleChatCompletions`
    `Anthropic`) uses its own configured `Model()` unless the request
    explicitly overrides it, so a profile name never accidentally becomes
    an invalid upstream model id.
-5. **Call upstream**, streaming or not (`handleNonStream` /
+6. **Call upstream**, streaming or not (`handleNonStream` /
    `handleStream`). Streaming buffers the full text server-side while
    forwarding each delta to the client immediately.
-6. **Capture — synchronously, before the turn is considered done**
+7. **Capture — synchronously, before the turn is considered done**
    (`Store.Capture`, `internal/store/capture.go`). This is a single
    Postgres insert, no network calls beyond that one round trip:
    - Cheap local heuristic importance score (`estimateImportance`, keyword
@@ -119,7 +131,7 @@ Entry point: `gateway.Handler.HandleChatCompletions`
      deliberately held back until after the capture attempt — "before the
      turn is considered done" means before the client is *told* it's done,
      not merely before the content finishes arriving.
-7. **Respond.**
+8. **Respond.**
 
 ## 4. Retrieval, in detail
 
@@ -253,8 +265,16 @@ Ollama/vLLM, anything sharing that wire schema) and `Anthropic` (its own
 system-prompt handling, auth headers, SSE event shape). `provider.Registry`
 holds one instance per named profile from `providers.yaml`
 (`providers.yaml.example` in the repo root is the template) and exposes
-four roles: `Chat()`, `Consolidation()`, `Grounding()` (falls back to
-`Consolidation()` if unset), `Embedding()`.
+five roles: `Chat()`, `Consolidation()`, `Grounding()` (falls back to
+`Consolidation()` if unset), `Embedding()`, `Vision()` (falls back to
+`Chat()` if unset).
+
+Both adapters additionally implement `provider.VisionCapable`'s
+`DescribeImage` — a separate, narrow interface from `Provider` itself
+(not a method on it), used only for image attachment captioning
+(§3 step 4). This is deliberately not a change to `Message`/`ChatRequest`:
+it keeps every existing chat-completion code path, in both adapters,
+completely untouched.
 
 ## 8. Deployment shape
 
