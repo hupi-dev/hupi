@@ -36,11 +36,20 @@ func buildAttributionPrompt(answer string, citations []Citation) string {
 // for deep attribution and reusing the answer model needs no new
 // config.
 //
-// Same safe-degrade direction as groundingCheck: a verdict this can't
-// parse, or that comes back the wrong length, defaults every citation to
-// "not used" rather than failing the whole request — an explain-mode
-// request erroring out over a judge-parsing hiccup would be a strictly
-// worse failure than just not narrowing the citation list this one time.
+// A verdict this can't parse, or that comes back the wrong length,
+// returns an error rather than silently defaulting every citation to
+// "not used" — a real, confirmed bug this used to have
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A2): Citation.Used's own
+// contract (handler.go) is nil-means-"not checked", specifically so a
+// caller can't mistake "not checked" with "checked and found unused" —
+// but synthesizing a false-filled slice with a nil error made exactly
+// that confusion happen for every malformed-judge-response case, not
+// just the LLM-call-failure case the caller already handled correctly.
+// Both call sites already leave Used nil whenever this returns a
+// non-nil error (the LLM-call-failure path always worked this way);
+// this change just routes the other two failure modes through that
+// same, already-correct path instead of inventing a third, wrong
+// outcome.
 func attributionCheck(ctx context.Context, judge provider.Provider, answer string, citations []Citation) ([]bool, error) {
 	if len(citations) == 0 {
 		return nil, nil
@@ -60,13 +69,13 @@ func attributionCheck(ctx context.Context, judge provider.Provider, answer strin
 		Used []bool `json:"used"`
 	}
 	if err := json.Unmarshal([]byte(extractJSON(resp.Message.Content)), &result); err != nil {
-		slog.Warn("gateway: could not parse attribution result, treating all citations as unused", "error", err)
-		result.Used = make([]bool, len(citations))
+		slog.Warn("gateway: could not parse attribution result, leaving citations unchecked", "error", err)
+		return nil, fmt.Errorf("attribution: parse judge response: %w", err)
 	}
 	if len(result.Used) != len(citations) {
-		slog.Warn("gateway: attribution check returned a mismatched result count, treating all citations as unused",
+		slog.Warn("gateway: attribution check returned a mismatched result count, leaving citations unchecked",
 			"got", len(result.Used), "want", len(citations))
-		result.Used = make([]bool, len(citations))
+		return nil, fmt.Errorf("attribution: judge returned %d verdicts, want %d", len(result.Used), len(citations))
 	}
 	return result.Used, nil
 }

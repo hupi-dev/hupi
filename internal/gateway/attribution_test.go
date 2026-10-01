@@ -59,36 +59,39 @@ func TestAttributionCheck_ToleratesMarkdownFence(t *testing.T) {
 	}
 }
 
-// TestAttributionCheck_DefaultsToUnusedOnMismatchedCount mirrors
-// groundingCheck's own safe-degrade direction: a judge response with the
-// wrong number of verdicts shouldn't fail the whole request, just
-// default every citation to "not used."
-func TestAttributionCheck_DefaultsToUnusedOnMismatchedCount(t *testing.T) {
+// TestAttributionCheck_ErrorsOnMismatchedCount is a real regression test
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A2): this used to default
+// every citation to "not used" on a mismatched verdict count, with a nil
+// error — indistinguishable, from the caller's side, from a genuine
+// "checked and confirmed every citation unused" result, contradicting
+// Citation.Used's own documented nil-means-"not checked" contract. It
+// must return an error instead, so the caller's existing nil-preserving
+// error path is what actually runs.
+func TestAttributionCheck_ErrorsOnMismatchedCount(t *testing.T) {
 	judge := &fakeJudge{content: `{"used": [true]}`}
 	citations := []Citation{{Snippet: "a"}, {Snippet: "b"}, {Snippet: "c"}}
 
 	got, err := attributionCheck(context.Background(), judge, "the answer", citations)
-	if err != nil {
-		t.Fatalf("attributionCheck: %v", err)
+	if err == nil {
+		t.Fatalf("attributionCheck() = (%v, nil), want a non-nil error on a mismatched verdict count", got)
 	}
-	if len(got) != 3 || got[0] || got[1] || got[2] {
-		t.Errorf("attributionCheck() = %v, want [false false false]", got)
+	if got != nil {
+		t.Errorf("attributionCheck() = %v, want nil on error", got)
 	}
 }
 
-// TestAttributionCheck_DefaultsToUnusedOnUnparsableResponse mirrors
-// groundingCheck's own behavior for a response with no valid JSON at
-// all.
-func TestAttributionCheck_DefaultsToUnusedOnUnparsableResponse(t *testing.T) {
+// TestAttributionCheck_ErrorsOnUnparsableResponse is the same regression
+// as above, for a response with no valid JSON at all.
+func TestAttributionCheck_ErrorsOnUnparsableResponse(t *testing.T) {
 	judge := &fakeJudge{content: "I'm not sure how to answer that."}
 	citations := []Citation{{Snippet: "a"}}
 
 	got, err := attributionCheck(context.Background(), judge, "the answer", citations)
-	if err != nil {
-		t.Fatalf("attributionCheck: %v", err)
+	if err == nil {
+		t.Fatalf("attributionCheck() = (%v, nil), want a non-nil error on an unparsable response", got)
 	}
-	if len(got) != 1 || got[0] {
-		t.Errorf("attributionCheck() = %v, want [false]", got)
+	if got != nil {
+		t.Errorf("attributionCheck() = %v, want nil on error", got)
 	}
 }
 
