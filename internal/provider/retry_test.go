@@ -1,8 +1,13 @@
 package provider
 
 import (
+	"bufio"
+	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -89,5 +94,145 @@ func TestRetryDelay_FallsBackToExponentialWithoutHeader(t *testing.T) {
 	d3 := retryDelay(3, "")
 	if d3 <= d1 {
 		t.Errorf("retryDelay(3, \"\") = %v should be greater than retryDelay(1, \"\") = %v", d3, d1)
+	}
+}
+
+// startDroppingServer is a real regression-test fixture for review
+// finding B4: a raw TCP listener (not an http.HandlerFunc — that would
+// only run after the request is already read, same as this does, but
+// via an http.Server that masks exactly what we need to control here)
+// that fully reads one HTTP request per connection, then closes the
+// connection without writing any response at all. That reproduces the
+// real-world case the finding describes: the provider received the
+// full request — and, for a billed call, may already be generating and
+// charging for a response — before the connection dropped. Every
+// connection accepted increments the counter so tests can assert
+// exactly how many times the request was actually, fully delivered.
+func startDroppingServer(t *testing.T, connections *int32) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			atomic.AddInt32(connections, 1)
+			go func() {
+				defer conn.Close()
+				req, err := http.ReadRequest(bufio.NewReader(conn))
+				if err == nil {
+					io.Copy(io.Discard, req.Body)
+				}
+				// Deliberately no response written — the connection is
+				// simply dropped once the full request has been read.
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// TestSendWithRetry_NonIdempotentDoesNotRetryAfterRequestFullySent is the
+// core regression test for review finding B4: a network-level error
+// (here, the connection dropping with no response) that surfaces *after*
+// the request was fully sent used to be retried unconditionally, for
+// every call site — including a billed, non-deterministic chat
+// completion, which has no idempotency key to let a retry be recognized
+// and deduplicated by the provider. A retry in that situation risks a
+// real duplicate charge and a second, different generated answer.
+// idempotent=false must now fail immediately instead of retrying.
+func TestSendWithRetry_NonIdempotentDoesNotRetryAfterRequestFullySent(t *testing.T) {
+	var connections int32
+	addr := startDroppingServer(t, &connections)
+
+	buildReq := func() (*http.Request, error) {
+		return http.NewRequest(http.MethodPost, "http://"+addr+"/v1/chat/completions", strings.NewReader(`{}`))
+	}
+
+	_, _, err := sendWithRetry(context.Background(), http.DefaultClient, "test", false, buildReq)
+	if err == nil {
+		t.Fatal("sendWithRetry: expected an error (connection dropped after the request was fully sent), got nil")
+	}
+	if got := atomic.LoadInt32(&connections); got != 1 {
+		t.Errorf("dropping server saw %d connections, want exactly 1 (no retry once a non-idempotent request was fully sent)", got)
+	}
+}
+
+// TestSendWithRetry_IdempotentStillRetriesAfterRequestFullySent confirms
+// the fix is scoped to idempotent=false only: a safely-retryable call
+// (e.g. Embed) must keep retrying through the exact same kind of
+// network failure exactly as before this finding was fixed.
+func TestSendWithRetry_IdempotentStillRetriesAfterRequestFullySent(t *testing.T) {
+	var connections int32
+	droppingAddr := startDroppingServer(t, &connections)
+
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer okServer.Close()
+
+	var attempt int32
+	buildReq := func() (*http.Request, error) {
+		target := okServer.URL
+		if atomic.AddInt32(&attempt, 1) == 1 {
+			target = "http://" + droppingAddr
+		}
+		return http.NewRequest(http.MethodPost, target, strings.NewReader(`{}`))
+	}
+
+	status, body, err := sendWithRetry(context.Background(), http.DefaultClient, "test", true, buildReq)
+	if err != nil {
+		t.Fatalf("sendWithRetry: %v (an idempotent call should have retried past the dropped connection)", err)
+	}
+	if status != http.StatusOK || string(body) != "ok" {
+		t.Errorf("status=%d body=%q, want 200/\"ok\"", status, string(body))
+	}
+	if got := atomic.LoadInt32(&connections); got != 1 {
+		t.Errorf("dropping server saw %d connections, want 1", got)
+	}
+}
+
+// TestSendWithRetry_NonIdempotentStillRetriesWhenRequestNeverFullySent
+// confirms the fix is specifically about requests that were fully
+// sent, not network errors in general: a connection that was never
+// even established (nothing could have received the request) is always
+// safe to retry, idempotent or not.
+func TestSendWithRetry_NonIdempotentStillRetriesWhenRequestNeverFullySent(t *testing.T) {
+	// Grab a real local address, then close it immediately — nothing is
+	// listening, so client.Do fails at connect time, before any request
+	// bytes are written.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := ln.Addr().String()
+	ln.Close()
+
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer okServer.Close()
+
+	var attempt int32
+	buildReq := func() (*http.Request, error) {
+		target := okServer.URL
+		if atomic.AddInt32(&attempt, 1) == 1 {
+			target = "http://" + deadAddr
+		}
+		return http.NewRequest(http.MethodPost, target, strings.NewReader(`{}`))
+	}
+
+	status, body, err := sendWithRetry(context.Background(), http.DefaultClient, "test", false, buildReq)
+	if err != nil {
+		t.Fatalf("sendWithRetry: %v (a connection that was never established is always safe to retry)", err)
+	}
+	if status != http.StatusOK || string(body) != "ok" {
+		t.Errorf("status=%d body=%q, want 200/\"ok\"", status, string(body))
 	}
 }
