@@ -22,6 +22,8 @@ The user often states a fact about themselves by asking the assistant to recall 
 
 Be exhaustive, not selective: a single exchange can contain several unrelated reportable facts (e.g. one about something the user just started doing, and a separate one about an unrelated detail mentioned later) — list every one you find, not just the most prominent. Pay particular attention to incidental scene-setting remarks early in the exchange ("I just started X", "I've been doing Y for N months") — these are exactly the kind of fact a later question is likely to ask about, even though they don't look like the main topic of the exchange.
 
+When an exchange describes several different dated milestones about one underlying story, case, or project — for example, when something began, when an agreement was signed, when it was completed, when a decision was issued — report each milestone as its own separate fact, and name the specific milestone in the fact text itself (e.g. "the construction began in 2014," not just "2014" or "the case happened in 2014"). Do not let a passage's most memorable or most recent date stand in for all of them, and do not drop an earlier milestone in favor of a later one — a reader asking specifically "when did X begin" needs the begin date reported as its own fact, distinct from when it was signed, completed, or decided.
+
 Respond with exactly one JSON object, nothing else, no markdown fences:
 {"facts": ["<a single concrete, self-contained fact>", ...]}
 

@@ -139,6 +139,36 @@ func TestSummarySystemPromptAndPerEpisodeFactPromptWarnAgainstUnsupportedTempora
 	}
 }
 
+// TestSummarySystemPromptAndPerEpisodeFactPromptCoverMultiMilestoneTimelines
+// is the real regression test for 5809eb10 (a LongMemEval
+// single-session-assistant question asking what year a house's
+// construction began): direct inspection of the real, decrypted stored
+// memory for this scope/day (the actual benchmark run's own data)
+// confirmed "construction began in 2014" was never extracted at all —
+// neither as a key_fact nor in prose — while "contract signed in 2015"
+// and "keys received in December 2016," from the same source paragraph,
+// were. The source genuinely states 5 different years across 5
+// different milestones of one legal case; extraction kept 2 of them and
+// silently dropped the rest, including the one the benchmark question
+// actually asked about.
+func TestSummarySystemPromptAndPerEpisodeFactPromptCoverMultiMilestoneTimelines(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"summarySystemPrompt":  summarySystemPrompt,
+		"perEpisodeFactPrompt": perEpisodeFactPrompt,
+	} {
+		for _, want := range []string{
+			"several different dated milestones about one underlying story, case, or project",
+			"when something began, when an agreement was signed, when it was completed, when a decision was issued",
+			"name the specific milestone in the fact text itself",
+			"do not let a passage's most memorable or most recent date stand in for all of them, and do not drop an earlier milestone in favor of a later one",
+		} {
+			if !strings.Contains(strings.ToLower(prompt), strings.ToLower(want)) {
+				t.Errorf("%s missing expected multi-milestone guidance: %q", name, want)
+			}
+		}
+	}
+}
+
 // TestBuildSummaryPromptIncludesSourceDateWhenPresent is
 // docs/BENCHMARK_IMPROVEMENT_PLAN.md step 5's core check: a source with
 // a known date must show it in the labeled block the consolidation
