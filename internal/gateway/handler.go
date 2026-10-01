@@ -251,6 +251,12 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 		http.Error(w, "messages must not be empty", http.StatusBadRequest)
 		return
 	}
+	for _, m := range req.Messages {
+		if !provider.Role(m.Role).Valid() {
+			http.Error(w, fmt.Sprintf("invalid message role %q: must be one of %s, %s, %s", m.Role, provider.RoleSystem, provider.RoleUser, provider.RoleAssistant), http.StatusBadRequest)
+			return
+		}
+	}
 
 	ctx := r.Context()
 	messages := toProviderMessages(req.Messages)
