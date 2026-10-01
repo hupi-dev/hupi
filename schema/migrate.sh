@@ -41,6 +41,7 @@ probe() {
     0016_demo_sessions_decouple_cap_from_cleanup.sql) echo "select (select confdeltype from pg_constraint where conname = 'demo_sessions_guest_user_id_fkey') = 'n'" ;;
     0017_summaries_supersedes_unique.sql) echo "select (to_regclass('public.summaries_supersedes_unique_idx') is not null)" ;;
     0018_summary_key_facts_rls.sql)       echo "select coalesce((select relrowsecurity from pg_class where relname='summary_key_facts'), false)" ;;
+    0020_audit_log_target_ref_index.sql)  echo "select (to_regclass('public.audit_log_target_ref_id_idx') is not null)" ;;
     *) echo "no idempotency probe defined for $1" >&2; exit 1 ;;
   esac
 }
@@ -50,7 +51,7 @@ for f in 0001_init.sql 0002_tier3_phase1_identity.sql 0003_tier3_phase2_retrieve
          0007_audit_log.sql 0008_admin_operators.sql 0009_export_import_audit_events.sql \
          0010_key_rotation.sql 0011_key_rotation_audit_event.sql 0012_entity_embeddings.sql 0013_embedding_model_tracking.sql \
          0014_demo_sessions.sql 0015_entity_relationships.sql 0016_demo_sessions_decouple_cap_from_cleanup.sql \
-         0017_summaries_supersedes_unique.sql 0018_summary_key_facts_rls.sql; do
+         0017_summaries_supersedes_unique.sql 0018_summary_key_facts_rls.sql 0020_audit_log_target_ref_index.sql; do
   already="$(psql "$HUPI_ADMIN_DATABASE_URL" -tAc "$(probe "$f")" 2>/dev/null | tr -d '[:space:]')"
   if [ "$already" = "t" ]; then
     echo "schema/$f already applied, skipping"
