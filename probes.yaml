@@ -10,3 +10,27 @@
   query: "what did we decide to use for the vector index?"
   expect_substring: "pgvector"
   expect_min_gate: full
+
+# expect_max_gate is expect_min_gate's ceiling, not just a floor: it
+# catches a regression that always over-matches to "full" for every
+# query, including ones that have no business matching anything at all —
+# a failure mode none of the two probes above (both only ever assert a
+# minimum) could ever catch. A query with no real relationship to
+# anything durably stored should get gate "skipped" on any real
+# deployment; if retrieval starts hallucinating a match for pure
+# nonsense, that's exactly the over-matching regression worth alerting
+# on, not papering over.
+- id: nonsense-query-stays-skipped
+  query: "xqzplorf wibbendrax fluxmonate kezzarin throbulate"
+  expect_max_gate: skipped
+
+# scope demonstrates probing something other than identity.DefaultScope
+# (e.g. a Tier-3 team workspace) — safe to ship as-is even without Tier 3
+# configured, since a scope with no data simply retrieves nothing
+# (gate "skipped"), same as the probe above.
+- id: example-team-scope-stays-skipped
+  query: "what has this team decided?"
+  expect_max_gate: skipped
+  scope:
+    kind: shared
+    owner: "team:example"
