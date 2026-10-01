@@ -147,7 +147,7 @@ func (p *Anthropic) buildRequest(ctx context.Context, body any, stream bool) fun
 }
 
 func (p *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
-	status, respBody, err := sendWithRetry(ctx, p.client, p.name, p.buildRequest(ctx, p.toAnthropicRequest(req, false), false))
+	status, respBody, err := sendWithRetry(ctx, p.client, p.name, false, p.buildRequest(ctx, p.toAnthropicRequest(req, false), false))
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -181,7 +181,7 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 // final usage arrives on message_delta and is attached to the closing
 // chunk.
 func (p *Anthropic) StreamChatCompletion(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
-	resp, err := connectWithRetry(ctx, p.client, p.name, p.buildRequest(ctx, p.toAnthropicRequest(req, true), true))
+	resp, err := connectWithRetry(ctx, p.client, p.name, false, p.buildRequest(ctx, p.toAnthropicRequest(req, true), true))
 	if err != nil {
 		return nil, err
 	}

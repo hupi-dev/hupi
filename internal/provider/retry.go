@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"time"
 )
@@ -62,6 +63,28 @@ func retryDelay(attempt int, retryAfter string) time.Duration {
 	return jitter
 }
 
+// doTrackingWroteRequest performs client.Do(req), additionally reporting
+// whether the request was fully written to the connection before any
+// error surfaced — via httptrace.ClientTrace's WroteRequest hook, which
+// fires once the request (headers and body) has actually left this
+// process. A request that never fully went out could not possibly have
+// reached the provider, so retrying it is always safe; one that did go
+// out may already be processing — or, for a billed call, already
+// billed — by the time the error surfaces, which is exactly the
+// "no idempotency key" gap review finding B4 describes: there's no way
+// to ask the provider "did you already see this," so the next-best real
+// signal available is whether this process ever finished sending it.
+func doTrackingWroteRequest(client *http.Client, req *http.Request) (resp *http.Response, wroteRequest bool, err error) {
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			wroteRequest = info.Err == nil
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	resp, err = client.Do(req)
+	return resp, wroteRequest, err
+}
+
 // sendWithRetry sends an HTTP request built fresh by buildReq on every
 // attempt — a request body is a single-read io.Reader, so a genuine retry
 // needs a brand new *http.Request, not the same one resent — retrying on
@@ -69,14 +92,31 @@ func retryDelay(attempt int, retryAfter string) time.Duration {
 // maxRetries attempts total. Returns the final status code and the fully
 // read response body (already closed) once a non-retryable outcome is
 // reached.
-func sendWithRetry(ctx context.Context, client *http.Client, name string, buildReq func() (*http.Request, error)) (status int, respBody []byte, err error) {
+//
+// idempotent must be false for a billed, non-deterministic call like a
+// chat completion (review finding B4): if the network-level error
+// surfaces after the request was already fully sent, this process has
+// no way of knowing whether the provider received and started (or even
+// finished) generating and billing a response, so retrying risks a real
+// duplicate charge and a second, different answer. true for a call
+// where a duplicate causes no harm (e.g. Embed — deterministic given
+// the same input, nothing downstream distinguishes "the real one" from
+// "a repeat"), which keeps retrying unconditionally exactly as before.
+// This only changes the network-error path above: a clean 429/5xx
+// response is retried the same way regardless of idempotent, since the
+// status code itself is the provider confirming the request's outcome,
+// not an ambiguous transport failure.
+func sendWithRetry(ctx context.Context, client *http.Client, name string, idempotent bool, buildReq func() (*http.Request, error)) (status int, respBody []byte, err error) {
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		req, buildErr := buildReq()
 		if buildErr != nil {
 			return 0, nil, buildErr
 		}
-		resp, doErr := client.Do(req)
+		resp, wroteRequest, doErr := doTrackingWroteRequest(client, req)
 		if doErr != nil {
+			if !idempotent && wroteRequest {
+				return 0, nil, fmt.Errorf("provider %s: request failed after being fully sent — not retrying a non-idempotent call to avoid a possible duplicate: %w", name, doErr)
+			}
 			if attempt == maxRetries {
 				return 0, nil, fmt.Errorf("provider %s: request failed: %w", name, doErr)
 			}
@@ -114,14 +154,21 @@ func sendWithRetry(ctx context.Context, client *http.Client, name string, buildR
 // always reads the body fully into memory. Once streaming has actually
 // started there's no retrying a partial generation; only this initial
 // connect is covered.
-func connectWithRetry(ctx context.Context, client *http.Client, name string, buildReq func() (*http.Request, error)) (*http.Response, error) {
+//
+// idempotent has the same meaning as sendWithRetry's own parameter —
+// every current caller of this function is a streamed chat completion,
+// always billed and non-deterministic, so every call site passes false.
+func connectWithRetry(ctx context.Context, client *http.Client, name string, idempotent bool, buildReq func() (*http.Request, error)) (*http.Response, error) {
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		req, buildErr := buildReq()
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		resp, doErr := client.Do(req)
+		resp, wroteRequest, doErr := doTrackingWroteRequest(client, req)
 		if doErr != nil {
+			if !idempotent && wroteRequest {
+				return nil, fmt.Errorf("provider %s: request failed after being fully sent — not retrying a non-idempotent call to avoid a possible duplicate: %w", name, doErr)
+			}
 			if attempt == maxRetries {
 				return nil, fmt.Errorf("provider %s: request failed: %w", name, doErr)
 			}
