@@ -276,7 +276,7 @@ subsystem. Each cites exact file:line and a concrete failure scenario.
 
 ## A. Likely real bugs
 
-**A1. ✅ FIXED ([PR #18](https://github.com/hupi-dev/hupi/pull/18)) — Streaming responses leak a goroutine and an open HTTP connection on client disconnect or context cancellation mid-stream.**
+**A1. ✅ FIXED (merged, PR #18) — Streaming responses leak a goroutine and an open HTTP connection on client disconnect or context cancellation mid-stream.**
 `internal/gateway/handler.go` (`handleStream`'s drain loop) stops reading
 from the provider's channel the instant `ctx.Done()` fires. Both provider
 adapters (`internal/provider/openai_compat.go`, `anthropic.go`) feed that
@@ -289,7 +289,7 @@ whose request context is cancelled while a streamed answer is still being
 generated — a routine occurrence for chat UIs with a "stop generating"
 button or for any reverse proxy with an aggressive timeout.
 
-**A2. ✅ FIXED ([PR #19](https://github.com/hupi-dev/hupi/pull/19)) — `attributionCheck` failures are indistinguishable from a positively-verified "not used," contradicting the documented `nil`-means-"not checked" contract.**
+**A2. ✅ FIXED (merged, PR #19) — `attributionCheck` failures are indistinguishable from a positively-verified "not used," contradicting the documented `nil`-means-"not checked" contract.**
 `internal/gateway/handler.go`/`attribution.go`. `Citation.Used`'s own doc
 comment promises `nil` unless the check actually ran. But when the judge
 LLM call succeeds yet returns unparsable or miscounted JSON,
@@ -298,7 +298,7 @@ error** — the handler's only nil-preserving branch is `attrErr != nil`, so
 this specific failure mode silently reports every citation as "confirmed
 unused" to any caller building UI on top of `hupi_citations`.
 
-**A3. ✅ FIXED ([PR #20](https://github.com/hupi-dev/hupi/pull/20)) — Switching the active embedding provider without re-embedding silently mixes incompatible vector spaces, with nothing catching it.**
+**A3. ✅ FIXED (PR #20, open) — Switching the active embedding provider without re-embedding silently mixes incompatible vector spaces, with nothing catching it.**
 `bootstrap.VerifyEmbedding` only checks vector *length* compatibility, not
 model *identity*; the retrieval nearest-neighbor queries
 (`internal/store/retrieve.go`, vector search over summaries/episodes/
@@ -333,7 +333,7 @@ matched episode. Fixed on the same branch (`2491ad6`) via a per-episode cap
 plus a density-weighted centered excerpt. Real-verified 5/5 correct, stable
 across 4 full sample re-runs. **Status: fixed and merged into `main` ([PR #17](https://github.com/hupi-dev/hupi/pull/17)).**
 
-**A6. The consolidation pipeline's "best-effort" post-commit steps aren't actually best-effort — they propagate into a hard failure and skip further real work.**
+**A6. ✅ FIXED ([PR #21](https://github.com/hupi-dev/hupi/pull/21)) — The consolidation pipeline's "best-effort" post-commit steps aren't actually best-effort — they propagate into a hard failure and skip further real work.**
 `internal/consolidation/store.go` (`storeSummary`'s post-commit
 `embedSummary`/`embedEntities` calls) and `runner.go`
 (`embedHighImportanceEpisodes`, the entity-embedding backfill). Each
@@ -503,15 +503,17 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 5 fixed — A1 PR #18, A2 PR #19, A3 PR #20, A4/A5 merged PR #17; 8 remaining) |
+| Likely real bugs | 13 (✅ 6 fixed — A1/A2 merged PR #18/#19, A3 PR #20, A4/A5 merged PR #17, A6 PR #21; 7 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
 
-The two highest-leverage fixes not already in flight are **A6** (consolidation's
-best-effort steps aren't best-effort — a transient provider hiccup produces a
-false alarm *and* silently drops real downstream work) and **A11** (the
-demo's cost-control cap is defeated by its own sweep job by roughly 8x) —
-both are genuine business-logic gaps between what the code's own comments
-say the design intends and what it actually does, not edge-case corner
+Of the two highest-leverage findings, **A6** (consolidation's best-effort
+steps aren't best-effort — a transient provider hiccup used to produce a
+false alarm *and* silently drop real downstream work) is now fixed
+([PR #21](https://github.com/hupi-dev/hupi/pull/21)). **A11** (the
+demo's cost-control cap is defeated by its own sweep job by roughly 8x)
+remains open. Both were genuine business-logic gaps between what the
+code's own comments say the design intends and what it actually does,
+not edge-case corner
 cutting.
