@@ -379,7 +379,7 @@ call, the next invocation sees nothing pending (the live predicate is
 already satisfied) and never logs — that batch of real data changes is now
 permanently absent from `audit_log`, with no self-healing retry path.
 
-**A10. HPMF export/import audit entries are written after all real data writes commit, in a separate final step — and a crashed non-merge import can't be cleanly retried.**
+**A10. ✅ FIXED ([PR #25](https://github.com/hupi-dev/hupi/pull/25)) — HPMF export/import audit entries are written after all real data writes commit, in a separate final step — and a crashed non-merge import can't be cleanly retried.**
 `internal/hpmf/export.go`/`import.go`. A crash between the real writes
 committing and that final audit insert leaves a scope with genuinely
 changed/imported data and zero audit trail. For import specifically,
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 9 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24; 4 remaining) |
+| Likely real bugs | 13 (✅ 10 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25; 3 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
