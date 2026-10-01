@@ -1,6 +1,11 @@
 package consolidation
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"hupi/internal/identity"
+)
 
 // clusterIDs collects the ids from one cluster in source order, for
 // assertions that don't care which cluster is "cluster 0" vs "cluster 1"
@@ -195,5 +200,51 @@ func TestMaxClustersPerDayDefaultAndOverride(t *testing.T) {
 	t.Setenv("HUPI_MAX_CLUSTERS_PER_DAY", "not-a-number")
 	if got := maxClustersPerDay(); got != defaultMaxClustersPerDay {
 		t.Errorf("maxClustersPerDay() = %d, want the default %d for an invalid override", got, defaultMaxClustersPerDay)
+	}
+}
+
+// TestGenerateDailySummary_LightDayAlsoRunsPerEpisodeInsurancePass is a
+// real regression test for two independent live LongMemEval failures
+// (89527b6b, 852ce960 — see generateDailySummary's own doc comment):
+// a day at or below clusterEpisodeThreshold used to skip the per-episode
+// insurance pass entirely, on the reasoning that only a busy, crowded
+// day needed it. Both real failures were genuinely light days (4 and 1
+// sessions respectively) where a single message buried a real, specific
+// detail as a trailing aside after its own primary topic — the
+// whole-day summary call extracted the primary topic and silently
+// dropped the aside. This fixture reproduces that exact shape: one
+// source whose primary topic (cable/TV providers) is what the summary
+// call "notices," with a trailing Wells Fargo pre-approval mention the
+// per-episode pass is specifically positioned to catch.
+func TestGenerateDailySummary_LightDayAlsoRunsPerEpisodeInsurancePass(t *testing.T) {
+	fake := &fakeSequentialProvider{responses: []string{
+		// The whole-day summary call "notices" only the primary topic.
+		`{"summary": "The user asked for cable and TV provider recommendations.", "key_facts": [{"fact": "The user asked for cable and TV provider recommendations."}], "entities_touched": []}`,
+		// The per-episode insurance pass catches the trailing aside.
+		`{"facts": ["The user was pre-approved for $400,000 from Wells Fargo."]}`,
+	}}
+	runner := New(nil, nil, fake, nil, nil)
+
+	sources := []textSource{
+		{id: "ep_wells_fargo", text: "I need to set up cable and TV services. Can you recommend some providers? By the way, remember when I got pre-approved for $400,000 from Wells Fargo?"},
+	}
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-light-day-insurance"}
+
+	out, err := runner.generateDailySummary(context.Background(), scope, "2023-11-30", sources, "", nil)
+	if err != nil {
+		t.Fatalf("generateDailySummary: %v", err)
+	}
+	if fake.calls != 2 {
+		t.Fatalf("got %d consolidation LLM calls, want 2 (1 summary + 1 per-episode) — the per-episode pass must run on this light (1-source) day, not just busy ones", fake.calls)
+	}
+
+	foundWellsFargo := false
+	for _, f := range out.KeyFacts {
+		if f.Fact == "The user was pre-approved for $400,000 from Wells Fargo." {
+			foundWellsFargo = true
+		}
+	}
+	if !foundWellsFargo {
+		t.Errorf("generateDailySummary().KeyFacts = %+v, want it to include the per-episode pass's fact, not just the summary call's own fact", out.KeyFacts)
 	}
 }

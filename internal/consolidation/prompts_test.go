@@ -73,6 +73,72 @@ func TestExtractJSON(t *testing.T) {
 	}
 }
 
+// TestSummarySystemPromptCoversAssistantGeneratedContent is a real
+// regression test for the live LongMemEval failure this prompt change
+// exists to fix (89527b6b): a children's story the assistant wrote,
+// including a Plesiosaur's blue scaly body, was dropped wholesale from
+// its day's summary — summarySystemPrompt's only criterion was a
+// "concrete, checkable fact," implicitly framed around real-world
+// user-reported facts, with no natural home for assistant-written
+// creative content. Asserts the specific instructions this fix adds, not
+// just that the prompt changed.
+func TestSummarySystemPromptCoversAssistantGeneratedContent(t *testing.T) {
+	for _, want := range []string{
+		"a story, poem, children's book, plan, itinerary, recipe",
+		`"assistant:" line is assistant-written`,
+		"You are recording what was written, not judging whether it is true",
+	} {
+		if !strings.Contains(summarySystemPrompt, want) {
+			t.Errorf("summarySystemPrompt missing expected guidance: %q", want)
+		}
+	}
+}
+
+// TestPerEpisodeFactPromptCoversAssistantGeneratedContent is
+// perEpisodeFactPrompt's own counterpart to the test above — the
+// per-episode pass has the identical narrow-criteria problem
+// summarySystemPrompt had, so it needs the same broadening.
+func TestPerEpisodeFactPromptCoversAssistantGeneratedContent(t *testing.T) {
+	for _, want := range []string{
+		"a specific detail inside something the assistant produced for the user",
+		`"assistant:" line is assistant-written`,
+		"list its distinctive specific details",
+	} {
+		if !strings.Contains(perEpisodeFactPrompt, want) {
+			t.Errorf("perEpisodeFactPrompt missing expected guidance: %q", want)
+		}
+	}
+}
+
+// TestSummarySystemPromptAndPerEpisodeFactPromptWarnAgainstUnsupportedTemporalFraming
+// is a real regression test for 852ce960's grounding-stage rejection:
+// direct, repeated testing against the real grounding model showed it
+// consistently rejects "The user got pre-approved for $400,000 from
+// Wells Fargo in a previous conversation" (3/3 trials false — the
+// isolated exchange has no actual earlier conversation to confirm that
+// framing against) while accepting the same fact stated plainly, "The
+// user was pre-approved for $400,000 from Wells Fargo" (3/3 trials
+// true). Both extraction prompts need the same instruction: a user
+// stating a fact via "remember when I...?" is a real, direct statement
+// of that fact, and extracting it shouldn't add an inferred
+// "previously"/"earlier conversation" qualifier the source itself never
+// states.
+func TestSummarySystemPromptAndPerEpisodeFactPromptWarnAgainstUnsupportedTemporalFraming(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"summarySystemPrompt":  summarySystemPrompt,
+		"perEpisodeFactPrompt": perEpisodeFactPrompt,
+	} {
+		for _, want := range []string{
+			"remember when I got pre-approved for $400,000 from Wells Fargo",
+			`do not add a qualifier like "previously," "in an earlier conversation," or "as mentioned before"`,
+		} {
+			if !strings.Contains(strings.ToLower(prompt), strings.ToLower(want)) {
+				t.Errorf("%s missing expected guidance: %q", name, want)
+			}
+		}
+	}
+}
+
 // TestBuildSummaryPromptIncludesSourceDateWhenPresent is
 // docs/BENCHMARK_IMPROVEMENT_PLAN.md step 5's core check: a source with
 // a known date must show it in the labeled block the consolidation
