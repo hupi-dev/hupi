@@ -452,7 +452,7 @@ behavior.
 ## C. Minor / stylistic
 
 - **✅ FIXED ([PR #54](https://github.com/hupi-dev/hupi/pull/54))** — No validation that a chat message's `role` was one of the expected values before forwarding upstream (low blast radius — the vendor API would reject it anyway, but as an opaque upstream error rather than a clear 400 from HUPI itself). Fixed with `provider.Role.Valid()`, checked in `handleChatCompletionsScoped` right alongside the existing empty-messages check, matching the same `http.StatusBadRequest`-plus-named-allowed-values style `FeedbackRating.valid()` already uses. New tests confirm rejection and that all three real roles still work; confirmed the rejection test fails without the fix.
-- `X-Hupi-Memory`/`X-Hupi-Capture` header checks are case-sensitive exact matches (`"off"` only) — fails toward the safe default, but a client sending `"Off"` silently gets the opposite of what it asked for.
+- **✅ FIXED ([PR #55](https://github.com/hupi-dev/hupi/pull/55))** — `X-Hupi-Memory`/`X-Hupi-Capture` header checks were case-sensitive exact matches (`"off"` only) — fails toward the safe default, but a client sending `"Off"` silently got the opposite of what it asked for. Switched both to `strings.EqualFold`. New test confirms `"Off"`/`"OFF"`/`"oFF"` all correctly opt out; confirmed it fails without the fix.
 - Provider error-wrapping loses the provider's own name specifically on context-cancellation returns, unlike every other error path in the same function.
 - No panic recovery around the consolidation scope loop — contradicts the stated "one scope's failure never blocks another's" design intent in the one case (a panic, not a returned error) that intent doesn't actually cover; no concrete panic path was found.
 - `nextSummaryID`'s version computation has a narrow concurrent-write race (fails as a clean DB error, not silent corruption).
@@ -505,7 +505,7 @@ just to pad the findings list:
 |---|---|
 | Likely real bugs | 13 (✅ all 13 fixed — A1/A2/A3 merged PR #18/#19/#20, A4/A5 merged PR #17, A6 PR #21, A7 PR #22, A8 PR #23, A9 PR #24, A10 PR #25, A11 PR #26, A12 PR #27, A13 PR #28) |
 | Plausible edge cases | 28 (✅ 25 fixed — B1 PR #29, B2 PR #30, B3 PR #31, B4 PR #32, B6 PR #33, B7 PR #34, B8 PR #35, B9 PR #36, B10 PR #37, B12 PR #38, B13 PR #39, B14 PR #40, B15 PR #41, B16 PR #42, B17 PR #43, B18 PR #44, B19 PR #45, B20 PR #46, B21 PR #47, B22 PR #48, B23 PR #49, B24 PR #50, B25 PR #51, B26 PR #52, B27 PR #53; 3 investigated/no fix needed — B5, B11, B28; 0 remaining — every B finding resolved or investigated; count corrected from a stale 24) |
-| Minor / stylistic | 10 (✅ 1 fixed — C1 PR #54; 9 remaining) |
+| Minor / stylistic | 10 (✅ 2 fixed — C1 PR #54, C2 PR #55; 8 remaining) |
 | Confirmed clean | 7 areas |
 
 Of the two highest-leverage findings, **A6** (consolidation's best-effort
