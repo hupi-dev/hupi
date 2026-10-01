@@ -12,6 +12,7 @@ import (
 
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
+	"hupi/internal/qaprompt"
 )
 
 // staticAuth is the harness's own minimal gateway.Authenticator: the
@@ -147,65 +148,14 @@ func replayConversation(handler *gateway.Handler, userID, answerModel string, co
 	return dates, nil
 }
 
-// qaConcisenessPrompt is sent only during the QA phase, never during
-// session replay: LoCoMo/LongMemEval's own expected answers are short
-// phrases ("7 May 2023", "2022"), and their official scoring is literal
-// word-overlap F1, not an LLM judge. A real, measured effect: HUPI's
-// default hedging, multi-sentence answer style ("Unfortunately, the
-// provided text snippet does not specify...") scores near-zero F1
-// against a two-word expected answer even when the underlying retrieved
-// content was in the right area — this doesn't fix genuine recall
-// misses, but it stops good-content answers being scored as if they
-// were wrong purely on phrasing.
-//
-// Revised after the first real GPT-4.1/LoCoMo run (all 10 conversations,
-// 1,986 questions) surfaced three specific, real gaps in the original
-// wording:
-//
-//  1. "as few words as possible" was measurably too aggressive — it cost
-//     partial F1 credit by dropping words the reference answer needed
-//     (e.g. reference "Psychology, counseling certification" vs a
-//     truncated "counseling"). Categories that should be *easier*
-//     (single-hop, temporal) scored lower than harder ones
-//     (multi-hop, open-domain), which is backwards from what retrieval
-//     quality alone would predict — a real signal the old wording was
-//     itself costing points, not just style.
-//  2. Query time for LoCoMo QA has no real per-question date (there is
-//     no ground truth "now" — see runHUPIConversation's own
-//     "session + 1 day" heuristic), so the model would sometimes answer
-//     in relative terms ("Yesterday", "Last year") reasoned against
-//     that fabricated instant — scoring as wrong against an absolute
-//     reference date ("7 May 2023") even when the underlying recall was
-//     completely correct.
-//  3. Category 5 (adversarial) is scored by literal substring match on
-//     "no information available"/"not mentioned" — spot-checking real
-//     category-5 predictions found many correct abstentions in
-//     different words ("No recent setback mentioned", "No record of...")
-//     that scored as wrong purely on phrasing.
-//
-// Note on (3) specifically: this is benchmark-vocabulary-aware tuning,
-// not a general product improvement — teaching the model LoCoMo's exact
-// expected abstention phrase is fair (clear abstention is good UX
-// regardless), but it should be named honestly in any published
-// write-up rather than presented as an organic capability gain.
-const qaConcisenessPrompt = `Answer the following question directly, using a short phrase rather than a full sentence or explanation — but include every specific detail the question asks for (a complete name, date, or list), not just the first word or a truncated fragment.
-
-Always give dates as an absolute date (e.g. "7 May 2023"), never a relative term like "yesterday", "last year", or "this month".
-
-Make your best specific attempt using anything relevant you've been told, even if you're not fully certain or the exact wording isn't stated verbatim — a specific, plausible answer inferred from related information is better than declining to answer. Only say "not mentioned" or "no information available" if there is truly nothing relevant to work with at all — not merely because the precise fact isn't stated in so many words.
-
-Before answering, double-check WHO the retrieved information is actually about. A conversation between two people often has facts that apply to only one of them — if the question asks about person A but the fact you found belongs to person B, say so explicitly (e.g. "That's B's necklace, not A's — A's own necklace isn't mentioned") rather than answering as if it were A's.
-
-When the answer is a list of items or a yes/no question, give ONLY the items or the yes/no verdict itself — do not add supporting context, dates, or an explanation for each item, even when that detail is available in what you were given. Having more detail available doesn't mean including it is more correct; match the specificity level the question actually asked for, not everything you know that's related.`
-
-// preferenceAnswerPrompt is qaConcisenessPrompt's counterpart for
+// preferenceAnswerPrompt is qaprompt.Concise's counterpart for
 // LongMemEval's single-session-preference category — the one category
 // that scored 0% in both the n=3 and n=8 real runs (docs/BENCHMARKS.md
 // §7), traced to a real answer-*style* mismatch, not a retrieval
 // failure: that category's "answer" field isn't a fact to recall, it's
 // a grading rubric describing what a personalized recommendation
 // should reference (e.g. "should suggest quinoa-based recipes,
-// building on the user's stated preferences"), and qaConcisenessPrompt
+// building on the user's stated preferences"), and qaprompt.Concise
 // ("answer directly, using a short phrase") is close to the opposite of
 // what a rubric-satisfying recommendation needs.
 const preferenceAnswerPrompt = `Answer the following question by making a specific, substantive recommendation or suggestion — not a short factual phrase.
@@ -218,7 +168,7 @@ If nothing relevant about this person's preferences was actually mentioned, say 
 // LongMemEval's own questionType (unused by LoCoMo, which never sets it)
 // picks preferenceAnswerPrompt for the one category that needs a
 // genuinely different answer shape; every other case keeps
-// qaConcisenessPrompt. Used by both answerQuestions and
+// qaprompt.Concise. Used by both answerQuestions and
 // runBaselineConversation so the no-memory control isolates "does
 // memory help," not "does the new prompt help" — both paths see the
 // same prompt-selection logic.
@@ -226,7 +176,7 @@ func answerPromptFor(qa qaItem) string {
 	if qa.questionType == "single-session-preference" {
 		return preferenceAnswerPrompt
 	}
-	return qaConcisenessPrompt
+	return qaprompt.Concise
 }
 
 // runBaselineConversation is the no-memory control: no session replay, no

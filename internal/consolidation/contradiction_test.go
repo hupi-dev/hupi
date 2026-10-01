@@ -89,6 +89,175 @@ func TestFindRelatedSummaries_MatchesSharedEntityExcludesOthers(t *testing.T) {
 	}
 }
 
+// TestFindRelatedSummaries_PrefersSpecificSharedEntityOverHub is a real
+// regression test for a live failure (852ce960): two genuinely
+// conflicting Wells Fargo pre-approval amounts, in summaries months
+// apart, never got compared. The new summary's entitiesTouched included
+// person:user — present in nearly every summary in a real scope — and
+// ranking candidates by recency alone meant the
+// maxRelatedSummariesForContradictionCheck most-recent summaries sharing
+// *any* entity were all ones that only shared that hub, crowding out the
+// one genuinely related summary (sharing the rare, specific
+// organization:wells-fargo). This fails without the specificity-ranking
+// fix: with recency-only ordering, 6 newer hub-only summaries fill every
+// slot before the older, specific one is ever reached.
+func TestFindRelatedSummaries_PrefersSpecificSharedEntityOverHub(t *testing.T) {
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, `{"summary": "unused", "key_facts": [], "entities_touched": []}`, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-find-related-specificity"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	store := func(period string, entities []EntityUpdate) {
+		t.Helper()
+		if err := runner.storeSummary(ctx, storeSummaryInput{
+			scope:  scope,
+			level:  "daily",
+			period: period,
+			output: ConsolidationOutput{
+				Summary:         "period " + period,
+				EntitiesTouched: entities,
+			},
+			actor: systemActor,
+		}); err != nil {
+			t.Fatalf("store %s: %v", period, err)
+		}
+	}
+
+	user := EntityUpdate{ID: "person:user", Kind: "person", Name: "User"}
+	wellsFargo := EntityUpdate{ID: "organization:wells-fargo", Kind: "organization", Name: "Wells Fargo"}
+
+	// The one genuinely related summary — oldest by far, sharing the rare
+	// entity (organization:wells-fargo) with the triggering one below.
+	store("2023-01-01", []EntityUpdate{user, wellsFargo})
+	// Six newer summaries, all sharing only the hub entity (person:user) —
+	// enough to fill maxRelatedSummariesForContradictionCheck (5) on
+	// recency alone and crowd out the real match above.
+	for i, period := range []string{"2023-06-01", "2023-06-02", "2023-06-03", "2023-06-04", "2023-06-05", "2023-06-06"} {
+		store(period, []EntityUpdate{user})
+		_ = i
+	}
+	// The triggering ("new") summary.
+	store("2023-06-10", []EntityUpdate{user, wellsFargo})
+
+	var newID, relatedID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `select id from summaries where period = '2023-06-10' and scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&newID); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `select id from summaries where period = '2023-01-01' and scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&relatedID)
+	}); err != nil {
+		t.Fatalf("load seeded ids: %v", err)
+	}
+
+	found, err := runner.findRelatedSummaries(ctx, scope, newID, []string{"person:user", "organization:wells-fargo"})
+	if err != nil {
+		t.Fatalf("findRelatedSummaries: %v", err)
+	}
+	for _, f := range found {
+		if f.id == relatedID {
+			return // found it — specificity ranking worked
+		}
+	}
+	t.Errorf("findRelatedSummaries() = %+v, want it to include the old, specific-entity-sharing summary %q despite 6 newer hub-only summaries", found, relatedID)
+}
+
+// TestFindRelatedSummaries_ExcludesSupersededIncludesCorrection is a real
+// regression test for the "current" filter bug found alongside the
+// specificity one above: "supersedes is null" is backwards (see
+// findRelatedSummaries' own doc comment) — it returns exactly the
+// stale, corrected-away summary and excludes its own correction. This
+// fails without the fix: the pre-fix query would return the superseded
+// v1, not the current v2.
+func TestFindRelatedSummaries_ExcludesSupersededIncludesCorrection(t *testing.T) {
+	contradictionJSON := `{"contradictions": [{"old_fact": "irrelevant", "replacement": "irrelevant"}], "corrected_prose": "corrected"}`
+	groundingJSON := `{"grounded": [true]}`
+	runner, db := testRunner(t, contradictionJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-find-related-supersession"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summary_key_facts where summary_id in (select id from summaries where scope_kind = $1 and scope_owner = $2)`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	wellsFargo := EntityUpdate{ID: "organization:wells-fargo", Kind: "organization", Name: "Wells Fargo"}
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2023-01-01",
+		output: ConsolidationOutput{
+			Summary:         "original",
+			KeyFacts:        []KeyFactOutput{{Fact: "irrelevant"}},
+			EntitiesTouched: []EntityUpdate{wellsFargo},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed v1: %v", err)
+	}
+	var v1ID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select id from summaries where period = '2023-01-01' and scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&v1ID)
+	}); err != nil {
+		t.Fatalf("load v1 id: %v", err)
+	}
+
+	// Correct v1 into v2 — the same mechanism checkCrossPeriodContradictions
+	// itself uses, so v1 ends up genuinely superseded.
+	if err := runner.Correct(ctx, scope, v1ID, ConsolidationOutput{
+		Summary:         "corrected",
+		KeyFacts:        []KeyFactOutput{{Fact: "irrelevant"}},
+		EntitiesTouched: []EntityUpdate{wellsFargo},
+	}, "test correction", systemActor, ""); err != nil {
+		t.Fatalf("Correct: %v", err)
+	}
+	var v2ID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select id from summaries where supersedes = $1 and scope_kind = $2 and scope_owner = $3`, v1ID, scope.Kind, scope.Owner).Scan(&v2ID)
+	}); err != nil {
+		t.Fatalf("load v2 id: %v", err)
+	}
+
+	// A later, unrelated-period triggering summary sharing the same entity.
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2023-02-01",
+		output: ConsolidationOutput{
+			Summary:         "new",
+			EntitiesTouched: []EntityUpdate{wellsFargo},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed triggering summary: %v", err)
+	}
+	var newID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select id from summaries where period = '2023-02-01' and scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&newID)
+	}); err != nil {
+		t.Fatalf("load triggering id: %v", err)
+	}
+
+	found, err := runner.findRelatedSummaries(ctx, scope, newID, []string{"organization:wells-fargo"})
+	if err != nil {
+		t.Fatalf("findRelatedSummaries: %v", err)
+	}
+	if len(found) != 1 || found[0].id != v2ID {
+		t.Errorf("findRelatedSummaries() = %+v, want exactly the correction (v2, %q), not the superseded original (v1, %q)", found, v2ID, v1ID)
+	}
+}
+
 // TestCheckCrossPeriodContradictions_AppliesCorrection is Phase C
 // sub-problem 2's core real behavior: a new period's fact that the LLM
 // identifies as contradicting an older, different period's fact about a
