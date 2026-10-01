@@ -5,6 +5,7 @@ import {
   __resetVscodeMock,
   __setActiveTextEditor,
   __setTabGroups,
+  __triggerProgressCancellation,
   applyEdit,
   executeCommand,
   registerTextDocumentContentProvider,
@@ -253,5 +254,56 @@ describe('registerInlineEdit', () => {
     await command();
 
     expect(tabGroupsClose).toHaveBeenCalledOnce();
+  });
+
+  it('aborts the in-flight request and shows no error when the user cancels the progress notification (review finding A12)', async () => {
+    __setActiveTextEditor(fakeEditor('const x = 1;'));
+    showInputBox.mockResolvedValue('make it a let');
+
+    let capturedSignal: AbortSignal | undefined;
+    vi.mocked(streamChat).mockImplementation(
+      (_client, opts) =>
+        new Promise((_resolve, reject) => {
+          capturedSignal = opts.signal;
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+    const command = setUpCommand();
+
+    const run = command();
+    await vi.waitFor(() => expect(streamChat).toHaveBeenCalled());
+    __triggerProgressCancellation();
+    await run;
+
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(showErrorMessage).not.toHaveBeenCalled();
+    expect(applyEdit).not.toHaveBeenCalled();
+  });
+
+  it('aborts a still-in-flight request when the command is re-triggered before it finishes (review finding A12)', async () => {
+    __setActiveTextEditor(fakeEditor('const x = 1;'));
+    showInputBox.mockResolvedValue('make it a let');
+
+    let firstSignal: AbortSignal | undefined;
+    vi.mocked(streamChat).mockImplementationOnce(
+      (_client, opts) =>
+        new Promise((_resolve, reject) => {
+          firstSignal = opts.signal;
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+    const command = setUpCommand();
+
+    const firstRun = command();
+    await vi.waitFor(() => expect(streamChat).toHaveBeenCalledTimes(1));
+
+    vi.mocked(streamChat).mockResolvedValueOnce('let x = 1;');
+    const secondRun = command();
+
+    await Promise.all([firstRun, secondRun]);
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(showErrorMessage).not.toHaveBeenCalled();
+    expect(streamChat).toHaveBeenCalledTimes(2);
   });
 });

@@ -11,7 +11,14 @@ export function registerInlineEdit(context: vscode.ExtensionContext): vscode.Dis
   const { registration: providerRegistration, set: setVirtualDoc, delete: deleteVirtualDoc } =
     createVirtualDiffProvider(DIFF_SCHEME);
 
+  // Only one inline edit request should ever be in flight at a time —
+  // re-triggering the command (e.g. a stray second keybind press) before
+  // the first request finishes used to start a second concurrent request
+  // with no supersede/abort of the first (review finding A12).
+  let inFlight: AbortController | undefined;
+
   const command = vscode.commands.registerCommand('hupi.inlineEdit', async () => {
+    inFlight?.abort();
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
       return;
@@ -58,19 +65,34 @@ export function registerInlineEdit(context: vscode.ExtensionContext): vscode.Dis
       },
     ];
 
+    const controller = new AbortController();
+    inFlight = controller;
     let rewritten = '';
     try {
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'HUPI: generating edit...' },
-        async () => {
-          rewritten = await streamChat(client, { model: cfg.model, messages, onDelta: () => {} });
+        { location: vscode.ProgressLocation.Notification, title: 'HUPI: generating edit...', cancellable: true },
+        async (_progress, token) => {
+          token.onCancellationRequested(() => controller.abort());
+          rewritten = await streamChat(client, {
+            model: cfg.model,
+            messages,
+            signal: controller.signal,
+            onDelta: () => {},
+          });
         },
       );
     } catch (err) {
+      if (controller.signal.aborted) {
+        return;
+      }
       vscode.window.showErrorMessage(
         `HUPI request failed: ${(err as Error).message}. Check hupi.baseUrl and your API key (HUPI: Set API Key) or sign-in (HUPI: Sign In).`,
       );
       return;
+    } finally {
+      if (inFlight === controller) {
+        inFlight = undefined;
+      }
     }
     rewritten = stripCodeFences(rewritten);
 

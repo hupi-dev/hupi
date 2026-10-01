@@ -4,6 +4,7 @@ import {
   __getRegisteredCommand,
   __resetVscodeMock,
   __setTextDocuments,
+  __triggerProgressCancellation,
   applyEdit,
   createWebviewPanel,
   executeCommand,
@@ -318,5 +319,59 @@ describe('registerMultiFileEdit', () => {
 
     expect(applyEdit).not.toHaveBeenCalled();
     expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it('aborts the in-flight request and shows no error when the user cancels the progress notification (review finding A12)', async () => {
+    const docA = fakeDoc('a.ts', 'const a = 1;');
+    const command = setUpCommand([docA]);
+    showQuickPick.mockResolvedValue([{ label: 'a.ts', doc: docA }]);
+    showInputBox.mockResolvedValue('rename a to x');
+
+    let capturedSignal: AbortSignal | undefined;
+    vi.mocked(chat).mockImplementation(
+      (_client, opts) =>
+        new Promise((_resolve, reject) => {
+          capturedSignal = opts.signal;
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+
+    const run = command();
+    await vi.waitFor(() => expect(chat).toHaveBeenCalled());
+    __triggerProgressCancellation();
+    await run;
+
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(showErrorMessage).not.toHaveBeenCalled();
+    expect(createWebviewPanel).not.toHaveBeenCalled();
+  });
+
+  it('aborts a still-in-flight request when the command is re-triggered before it finishes (review finding A12)', async () => {
+    const docA = fakeDoc('a.ts', 'const a = 1;');
+    const command = setUpCommand([docA]);
+    showQuickPick.mockResolvedValue([{ label: 'a.ts', doc: docA }]);
+    showInputBox.mockResolvedValue('rename a to x');
+
+    let firstSignal: AbortSignal | undefined;
+    vi.mocked(chat).mockImplementationOnce(
+      (_client, opts) =>
+        new Promise((_resolve, reject) => {
+          firstSignal = opts.signal;
+          opts.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+
+    const firstRun = command();
+    await vi.waitFor(() => expect(chat).toHaveBeenCalledTimes(1));
+
+    vi.mocked(chat).mockResolvedValueOnce('---FILE: a.ts---\nconst x = 1;\n---END---');
+    createWebviewPanel.mockReturnValue(fakeWebviewPanel().panel);
+    const secondRun = command();
+
+    await Promise.all([firstRun, secondRun]);
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(showErrorMessage).not.toHaveBeenCalled();
+    expect(chat).toHaveBeenCalledTimes(2);
   });
 });

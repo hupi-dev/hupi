@@ -63,6 +63,16 @@ export function __setTabGroups(groups: { tabs: unknown[] }[]): void {
   tabGroupsAllValue = groups;
 }
 
+// withProgress's default mock implementation (below) hands the task a fake
+// CancellationToken whose onCancellationRequested just stashes the listener
+// here, so a test can simulate the user clicking "Cancel" on the progress
+// notification via __triggerProgressCancellation() instead of only being
+// able to simulate an abort originating from the command itself.
+let progressCancellationListener: (() => void) | undefined;
+export function __triggerProgressCancellation(): void {
+  progressCancellationListener?.();
+}
+
 export const window = {
   get activeTextEditor() {
     return activeTextEditorValue;
@@ -302,9 +312,15 @@ export function __resetVscodeMock(): void {
   executeCommand.mockClear();
   createChatParticipant.mockClear();
 
+  progressCancellationListener = undefined;
   withProgress.mockReset().mockImplementation(async (_options: unknown, task: (...args: any[]) => unknown) => {
     const fakeProgress = { report() {} };
-    const fakeCancellationToken = { onCancellationRequested: () => new Disposable() };
+    const fakeCancellationToken = {
+      onCancellationRequested: (listener: () => void) => {
+        progressCancellationListener = listener;
+        return new Disposable();
+      },
+    };
     return task(fakeProgress, fakeCancellationToken);
   });
 }

@@ -58,7 +58,14 @@ export function parseFileBlocks(text: string): { path: string; content: string }
 export function registerMultiFileEdit(context: vscode.ExtensionContext): vscode.Disposable[] {
   const diffProvider = createVirtualDiffProvider(DIFF_SCHEME);
 
+  // Only one multi-file edit request should ever be in flight at a time —
+  // re-triggering the command before the first request finishes used to
+  // start a second concurrent request with no supersede/abort of the
+  // first (review finding A12).
+  let inFlight: AbortController | undefined;
+
   const command = vscode.commands.registerCommand('hupi.multiFileEdit', async () => {
+    inFlight?.abort();
     const openDocs = (vscode.workspace.textDocuments as vscode.TextDocument[]).filter(
       (d) => d.uri.scheme === 'file',
     );
@@ -115,19 +122,33 @@ export function registerMultiFileEdit(context: vscode.ExtensionContext): vscode.
       { role: 'user', content: `Instruction: ${instruction}\n\nFiles:\n\n${fileBlocks}` },
     ];
 
+    const controller = new AbortController();
+    inFlight = controller;
     let responseText = '';
     try {
       await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'HUPI: generating multi-file edit...' },
-        async () => {
-          responseText = await chat(client, { model: cfg.model, messages });
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'HUPI: generating multi-file edit...',
+          cancellable: true,
+        },
+        async (_progress, token) => {
+          token.onCancellationRequested(() => controller.abort());
+          responseText = await chat(client, { model: cfg.model, messages, signal: controller.signal });
         },
       );
     } catch (err) {
+      if (controller.signal.aborted) {
+        return;
+      }
       vscode.window.showErrorMessage(
         `HUPI request failed: ${(err as Error).message}. Check hupi.baseUrl and your API key (HUPI: Set API Key) or sign-in (HUPI: Sign In).`,
       );
       return;
+    } finally {
+      if (inFlight === controller) {
+        inFlight = undefined;
+      }
     }
 
     const selectedByPath = new Map(selected.map((s) => [s.path, s.doc]));
