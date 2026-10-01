@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"hupi/internal/audit"
@@ -87,6 +88,40 @@ func New(db *sql.DB, keys *crypto.KeyStore) *Runner {
 // reset to in_progress, since key_rotations is live progress, not
 // history (schema/0010's comment).
 func (r *Runner) Start(ctx context.Context, scope identity.Scope, actor string) (fromVersion, toVersion int, err error) {
+	// A real, confirmed race (docs/CODEBASE_SURVEY_AND_REVIEW.md finding
+	// A8): everything below — the Status check, CreateNextVersion, and
+	// the final upsert — used to run with no lock tying them together.
+	// KeyStore.CreateNextVersion is already race-safe on its own (ON
+	// CONFLICT + reload, see its own doc comment) for the DEK itself, but
+	// two overlapping Start calls could still each compute a different
+	// fromVersion/toVersion pair from a stale read and race to overwrite
+	// key_rotations' single progress row with whichever one wrote last —
+	// potentially clobbering a rotation another process already started
+	// migrating, leaving real, already-migrated rows on a key version
+	// neither the surviving row's from_version nor to_version names.
+	// pg_advisory_lock is server-wide (blocks any other session taking
+	// the same key, not just this process), held on a dedicated
+	// connection for this whole function so no other Start call for the
+	// same scope can even begin its own Status check until this one
+	// finishes and unlocks.
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("rotate: acquire connection for start lock: %w", err)
+	}
+	defer conn.Close()
+	lockKey := scope.Kind + ":" + scope.Owner
+	if _, err := conn.ExecContext(ctx, `select pg_advisory_lock(hashtext($1))`, lockKey); err != nil {
+		return 0, 0, fmt.Errorf("rotate: acquire start lock for %s:%s: %w", scope.Kind, scope.Owner, err)
+	}
+	defer func() {
+		// Deliberately a fresh context, not ctx — an unlock must still run
+		// even if ctx was already cancelled, or this lock leaks for the
+		// rest of the connection's lifetime in the pool.
+		if _, unlockErr := conn.ExecContext(context.Background(), `select pg_advisory_unlock(hashtext($1))`, lockKey); unlockErr != nil {
+			slog.Error("rotate: failed to release start lock", "scope_kind", scope.Kind, "scope_owner", scope.Owner, "error", unlockErr)
+		}
+	}()
+
 	existing, ok, err := r.Status(ctx, scope)
 	if err != nil {
 		return 0, 0, err
