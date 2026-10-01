@@ -116,9 +116,43 @@ func bm25AverageDocLength(docs []bm25Document) float64 {
 // which can go negative for a term appearing in more than half the
 // corpus — this form stays non-negative for any df <= corpusSize, the
 // same choice modern implementations (e.g. Lucene since v6) made for the
-// same reason.
+// same reason. Uses the standard bm25B length-normalization weight — see
+// bm25ScoreNoLengthNorm for why key-fact ranking deliberately doesn't.
 func bm25Score(doc bm25Document, queryTerms []string, docFreq map[string]int, corpusSize int, avgDocLen float64) float64 {
-	if avgDocLen == 0 {
+	return bm25ScoreWithB(doc, queryTerms, docFreq, corpusSize, avgDocLen, bm25B)
+}
+
+// bm25ScoreNoLengthNorm is bm25Score with length normalization disabled
+// (b=0) — used for ranking a summary's own key facts (factScores,
+// internal/store/retrieve.go), not summaries/episodes/entities. BM25's
+// length normalization exists to stop a long, topically-diffuse document
+// from matching a query term "by chance" among lots of unrelated content
+// — a real concern for a full episode or summary, but key facts are
+// already short, single-topic, atomic statements by construction (that's
+// the point of extracting them), so length differences between them are
+// just incidental phrasing, not a dilution signal. Real, measured
+// regression without this: the carefully-verified fix for gpt4_45189cb4
+// (rankKeyFacts' own doc comment — the NFL-playoffs fact vs. an unrelated
+// climate fact vs. a scavenger-hunt fact, each sharing exactly one query
+// term) depends on those three facts tying lexically so RRF's semantic
+// signal can break the tie correctly; with standard length normalization,
+// the longer NFL sentence scored lower than the shorter scavenger-hunt
+// one purely from its length, even though both match exactly one term —
+// breaking that tie the wrong way before semantic ranking ever got a
+// chance to weigh in. b=0 restores the tie (confirmed against the same
+// fixture) while still applying real IDF weighting — exactly what
+// 5809eb10 ("what year did construction begin," see factScores' own doc
+// comment) needed and flat word-overlap counting didn't have at all.
+func bm25ScoreNoLengthNorm(doc bm25Document, queryTerms []string, docFreq map[string]int, corpusSize int) float64 {
+	return bm25ScoreWithB(doc, queryTerms, docFreq, corpusSize, 0, 0)
+}
+
+func bm25ScoreWithB(doc bm25Document, queryTerms []string, docFreq map[string]int, corpusSize int, avgDocLen float64, b float64) float64 {
+	// b == 0 (bm25ScoreNoLengthNorm) never touches avgDocLen at all, so
+	// an empty/zero-length corpus can't divide by zero there — only the
+	// standard, length-normalized path (b == bm25B) needs the original
+	// guard.
+	if b != 0 && avgDocLen == 0 {
 		return 0
 	}
 	var score float64
@@ -133,7 +167,11 @@ func bm25Score(doc bm25Document, queryTerms []string, docFreq map[string]int, co
 		}
 		idf := math.Log(1 + (float64(corpusSize)-float64(df)+0.5)/(float64(df)+0.5))
 		numerator := float64(tf) * (bm25K1 + 1)
-		denominator := float64(tf) + bm25K1*(1-bm25B+bm25B*float64(doc.docLength)/avgDocLen)
+		lengthNorm := 1.0
+		if b != 0 {
+			lengthNorm = 1 - b + b*float64(doc.docLength)/avgDocLen
+		}
+		denominator := float64(tf) + bm25K1*lengthNorm
 		score += idf * numerator / denominator
 	}
 	return score

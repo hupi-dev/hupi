@@ -610,6 +610,48 @@ func TestRankKeyFacts_KillSwitchForcesLexical(t *testing.T) {
 	}
 }
 
+// TestFactScoresWeightsRareTermsOverCommonOnes_5809eb10 is a real
+// regression test for 5809eb10 (LongMemEval single-session-assistant,
+// "what year did the construction of the house begin"): the previous
+// flat distinct-term-overlap count gave a fact merely repeating the
+// case's own generic, widely-shared identifying words ("Bajimaya",
+// "Reward Homes Pty Ltd", "case" — present in most of this real scope's
+// 62 facts about the one case) a higher score (7) than the one fact
+// that actually names the answer, "The construction of the house began
+// in 2014" (score 3) — real-measured directly against the decrypted
+// facts for this scope's real summary. factScores now uses BM25 (IDF
+// weighting), under which the answer fact's rare terms ("house",
+// "began") outscore the case-identifying fact's common ones. This
+// fixture is a representative subset of the real 62-fact pool, not all
+// of it — see rankKeyFacts' own doc comment for why the semantic
+// (embedding) side of the fused ranking still doesn't fully resolve this
+// specific case end to end, a separate, distinct gap this test doesn't
+// claim to fix.
+func TestFactScoresWeightsRareTermsOverCommonOnes_5809eb10(t *testing.T) {
+	const caseDescriptionIdx = 0
+	const answerIdx = 1
+	facts := []string{
+		"The case of Bajimaya v Reward Homes Pty Ltd [2021] NSWCATAP 297 involves a dispute over the construction of a new home in New South Wales, Australia.",
+		"The construction of the house began in 2014.",
+		"The contract between Mr. Bajimaya and Reward Homes Pty Ltd was signed in 2015.",
+		"The case discussed is Bajimaya v Reward Homes Pty Ltd [2021] NSWCATAP 297.",
+		"The assistant was asked to provide the best conclusion title for the conclusion paragraph about Bajimaya v Reward Homes Pty Ltd.",
+		"The assistant provided three meta title options related to Bajimaya v Reward Homes Pty Ltd and legal considerations in residential construction.",
+	}
+	queryTerms := tokenize("I'm looking back at our previous conversation about the Bajimaya v Reward Homes Pty Ltd case. Can you remind me what year the construction of the house began?")
+
+	scores := factScores(facts, queryTerms)
+	if scores[answerIdx] <= scores[caseDescriptionIdx] {
+		t.Errorf("factScores()[answer] = %.4f, want it to outscore the generic case-description fact (%.4f) — a fact's rare, distinguishing terms should count for more than another fact's common, widely-shared ones",
+			scores[answerIdx], scores[caseDescriptionIdx])
+	}
+
+	best := mostRelevantFactIndex(facts, queryTerms)
+	if best != answerIdx {
+		t.Errorf("mostRelevantFactIndex() = %d, want %d (the fact naming the actual answer, not the generic case description)", best, answerIdx)
+	}
+}
+
 // TestCenteredExcerptPrefersDenserClusterOverFirstOccurrence is a real
 // regression test (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): the real
 // `60bf93ed` case had one query term ("backpack") appear early in a
