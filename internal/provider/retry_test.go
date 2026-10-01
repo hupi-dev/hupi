@@ -3,6 +3,7 @@ package provider
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestOpenAICompat_ChatCompletion_RetriesOn429 reproduces the real
@@ -234,5 +236,67 @@ func TestSendWithRetry_NonIdempotentStillRetriesWhenRequestNeverFullySent(t *tes
 	}
 	if status != http.StatusOK || string(body) != "ok" {
 		t.Errorf("status=%d body=%q, want 200/\"ok\"", status, string(body))
+	}
+}
+
+// TestSendWithRetry_CancellationDuringBackoffIsWrappedWithProviderName and
+// TestConnectWithRetry_CancellationDuringBackoffIsWrappedWithProviderName
+// are the real regression tests for review finding C3: every other error
+// path in sendWithRetry/connectWithRetry wraps the underlying error with
+// "provider %s: ...", but the context-cancellation path inside the
+// retry-backoff select returned bare ctx.Err() — the one error a caller
+// logging just the error string would see with no indication of which
+// provider it came from, unlike every other failure from the same
+// function.
+func TestSendWithRetry_CancellationDuringBackoffIsWrappedWithProviderName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A very long Retry-After so the backoff timer never fires first —
+		// the test depends on the context cancelling before retryDelay
+		// elapses, not a race between the two.
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	buildReq := func() (*http.Request, error) {
+		return http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(`{}`))
+	}
+	_, _, err := sendWithRetry(ctx, http.DefaultClient, "my-provider", true, buildReq)
+	if err == nil {
+		t.Fatal("expected an error once the context was cancelled during backoff")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to still satisfy errors.Is(err, context.DeadlineExceeded)", err)
+	}
+	if !strings.Contains(err.Error(), "my-provider") {
+		t.Errorf("err = %q, want it to name the provider (\"my-provider\"), like every other error path in sendWithRetry", err.Error())
+	}
+}
+
+func TestConnectWithRetry_CancellationDuringBackoffIsWrappedWithProviderName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	buildReq := func() (*http.Request, error) {
+		return http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(`{}`))
+	}
+	_, err := connectWithRetry(ctx, http.DefaultClient, "my-provider", false, buildReq)
+	if err == nil {
+		t.Fatal("expected an error once the context was cancelled during backoff")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to still satisfy errors.Is(err, context.DeadlineExceeded)", err)
+	}
+	if !strings.Contains(err.Error(), "my-provider") {
+		t.Errorf("err = %q, want it to name the provider (\"my-provider\"), like every other error path in connectWithRetry", err.Error())
 	}
 }
