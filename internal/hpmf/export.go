@@ -20,11 +20,33 @@ import (
 // single-scope export or "scopes/<kind>-<owner>" for one scope within a
 // whole-deployment export (see ScopeManifest.Dir's doc comment); the
 // caller decides which, this function doesn't care. Logs one `export`
-// audit_log entry per call — a scope's entire history leaving the live
-// store is significant enough to record even when nothing about the
-// live data itself changes (docs/GAP_CLOSURE_PLAN.md §4.2).
+// audit_log entry per phase (episodes, summaries, entities) — a real,
+// confirmed bug this used to have (docs/CODEBASE_SURVEY_AND_REVIEW.md
+// finding A10): a single combined entry written only after all three
+// phases finished meant a crash partway through left real, decrypted
+// data already written to local disk — a scope's entire history leaving
+// the live store, exactly the event docs/GAP_CLOSURE_PLAN.md §4.2 calls
+// significant enough to always record — with zero audit trail for any
+// of it. True atomicity between a filesystem write and a Postgres audit
+// row isn't achievable (they're two different systems), but auditing
+// each phase immediately after its own files are written, the same
+// pattern internal/reembed uses for its own batches, closes the gap for
+// every phase that actually completed rather than deferring all of them
+// to a single end-of-run entry that might never be reached.
 func ExportScope(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scope identity.Scope, dir, actor string) (ScopeManifest, error) {
 	m := ScopeManifest{ScopeKind: scope.Kind, ScopeOwner: scope.Owner, Dir: dir}
+
+	logPhase := func(phase string, count int) error {
+		return dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+			return audit.Write(ctx, tx, audit.Entry{
+				EventType:      audit.EventExport,
+				Actor:          actor,
+				ActingScope:    scope,
+				WorkspaceScope: scope,
+				Detail:         map[string]any{"phase": phase, "count": count},
+			})
+		})
+	}
 
 	// Each row resolves its own decrypting key by its own key_version
 	// column below (keys.GetVersion), not one encryptor for the whole
@@ -33,26 +55,20 @@ func ExportScope(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scope i
 	if err := exportEpisodes(ctx, db, keys, scope, dir, &m); err != nil {
 		return ScopeManifest{}, err
 	}
+	if err := logPhase("episodes", m.EpisodeCount); err != nil {
+		return ScopeManifest{}, fmt.Errorf("hpmf: audit log write for episode export of %s:%s: %w", scope.Kind, scope.Owner, err)
+	}
 	if err := exportSummaries(ctx, db, keys, scope, dir, &m); err != nil {
 		return ScopeManifest{}, err
+	}
+	if err := logPhase("summaries", m.SummaryCount); err != nil {
+		return ScopeManifest{}, fmt.Errorf("hpmf: audit log write for summary export of %s:%s: %w", scope.Kind, scope.Owner, err)
 	}
 	if err := exportEntities(ctx, db, keys, scope, dir, &m); err != nil {
 		return ScopeManifest{}, err
 	}
-
-	auditErr := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
-		return audit.Write(ctx, tx, audit.Entry{
-			EventType:      audit.EventExport,
-			Actor:          actor,
-			ActingScope:    scope,
-			WorkspaceScope: scope,
-			Detail: map[string]any{
-				"episode_count": m.EpisodeCount, "summary_count": m.SummaryCount, "entity_count": m.EntityCount,
-			},
-		})
-	})
-	if auditErr != nil {
-		return ScopeManifest{}, fmt.Errorf("hpmf: audit log write for export of %s:%s: %w", scope.Kind, scope.Owner, auditErr)
+	if err := logPhase("entities", m.EntityCount); err != nil {
+		return ScopeManifest{}, fmt.Errorf("hpmf: audit log write for entity export of %s:%s: %w", scope.Kind, scope.Owner, err)
 	}
 	return m, nil
 }
