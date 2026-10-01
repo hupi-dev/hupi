@@ -19,6 +19,7 @@ import (
 	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
@@ -419,6 +420,16 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	queryVector := pgfmt.VectorLiteral(embedResp.Vectors[0])
 
 	queryTerms := tokenize(query)
+	if len(queryTerms) == 0 && keywordSearchEnabled() {
+		// Reaching here means stage 1 passed and the embedding call above
+		// already ran — a real, paid cost — but every keyword-search call
+		// site below gates on len(queryTerms) > 0 too, so none of them
+		// will run this turn. Counted once here, not at each of those
+		// call sites, so this metric reflects turns, not redundant
+		// per-mechanism skips of the same underlying cause (review
+		// finding B13).
+		metrics.KeywordSearchSkippedNoTermsTotal.Inc()
+	}
 
 	// docs/LONGMEMEVAL_ACCURACY_PLAN.md category 1: a recommendation-
 	// seeking question ("what should I bake for..." months after the

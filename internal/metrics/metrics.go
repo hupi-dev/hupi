@@ -90,6 +90,23 @@ var (
 		Name: "hupi_rollup_runs_total",
 		Help: `Weekly/monthly/yearly rollup runs, by outcome: "ok" or "error".`,
 	}, []string{"result"})
+
+	// KeywordSearchSkippedNoTermsTotal closes a real observability gap
+	// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding B13): a near-empty or
+	// punctuation-only query (e.g. "???") can pass stage 1 (a trailing
+	// "?" alone is enough, by design — see stage1QuestionSignal's own
+	// doc comment) and reach vector search, paying a real embedding
+	// call, while tokenize(query) — which BM25/keyword search depends on
+	// — finds zero real terms. That silent "keyword search never even
+	// ran this turn" case was indistinguishable from "it ran and found
+	// nothing," with nothing in the result or logs to tell them apart.
+	// Scoped to specifically this cause, not keywordSearchEnabled()'s
+	// own admin opt-out, which an admin already knows about from their
+	// own config.
+	KeywordSearchSkippedNoTermsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "hupi_keyword_search_skipped_no_terms_total",
+		Help: "Retrieval turns where keyword search was silently skipped because the query tokenized to zero real search terms (e.g. punctuation-only), despite passing stage 1 and reaching vector search.",
+	})
 )
 
 // InstrumentHandler wraps h to record HTTPRequestsTotal/HTTPRequestDuration
