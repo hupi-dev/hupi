@@ -20,6 +20,8 @@ request-to-response in full call-chain detail.
 ```
 cmd/
   hupi/                  gateway server — long-lived, serves the HTTP API
+  hupi-demo/             gateway server — long-lived, the public hosted anonymous demo (guest sessions, its own listen address, capped usage so a bug here can't affect a real deployment)
+  hupi-demo-sweep/       cron job — delete expired demo guest sessions and their data
   hupi-consolidate/      cron job — nightly consolidation + calendar-boundary rollups, once per active scope
   hupi-trace/            CLI — decrypt and print one episode's retrieval trace
   hupi-correct/          CLI — write a superseding, corrected summary version
@@ -31,6 +33,11 @@ cmd/
   hupi-export/           CLI — write an age-encrypted HPMF snapshot, one scope or -all
   hupi-import/           CLI — load an HPMF snapshot back into Postgres, fresh or -merge
   hupi-rotate-key/       CLI — online, resumable per-scope key rotation (start/continue/status/prune)
+  hupi-reembed/          CLI — online, resumable per-scope re-embedding after an embedding-provider change
+  hupi-bench/            CLI — LoCoMo/LongMemEval benchmark harness: replays a benchmark conversation through the real gateway + real consolidation, writes predictions in each benchmark's own scoring-input shape (see bench/ below, docs/BENCHMARKS.md)
+  hupi-ingest-turns/     CLI — EvalMem adapter tool: replay a flat turn list into a fresh scope, then consolidate (see docs/EVALMEM_INTEGRATION_PLAN.md)
+  hupi-export-memory/    CLI — EvalMem adapter tool: dump a scope's entire decrypted memory (every entity/summary+key-facts/relationship) for external diagnostics
+  hupi-answer-question/  CLI — EvalMem adapter tool: answer one question against an already-ingested scope, in native (real retrieval) or oracle (hand-fed context) mode
 
 internal/
   identity/              Scope, Identity, Ref — pure data types, zero dependencies
@@ -45,12 +52,16 @@ internal/
   consolidation/          the nightly rollup engine (Runner)
   hpmf/                   HPMF read/write (export/import) + age packaging — MEMORY_FORMAT.md's implementation
   rotate/                 online, resumable per-scope key rotation (Start, Continue, Status, Prune)
+  reembed/                online, resumable per-scope re-embedding after an embedding-provider change (Runner: Status, Continue, LogRun) — used by cmd/hupi-reembed
   selfcheck/              probe runner used by cmd/hupi-selfcheck
   bootstrap/              startup wiring: config, DB connection, key store
+  demo/                   anonymous guest-session lifecycle (create/resolve/sweep) backing the public hosted demo — used by cmd/hupi-demo, cmd/hupi-demo-sweep
+  metrics/                every Prometheus metric HUPI exposes at /metrics, plus an http.HandlerFunc-wrapping helper — used by cmd/hupi, cmd/hupi-demo, internal/gateway
 
 schema/                   numbered SQL migrations, applied in order 0001 -> 0011
                           migrate.sh — POSIX-sh idempotent runner used by the Docker image/Kubernetes migrate Job (install.sh's bash equivalent is for bare-metal; kept as two separate implementations on purpose, see migrate.sh's own comment)
 docs/                      this file, and everything else under docs/
+bench/                     LoCoMo/LongMemEval benchmark data-fetch scripts, each benchmark's own unmodified upstream scoring code, the EvalMem Python adapter, and archived run results — the non-Go scaffolding cmd/hupi-bench's predictions need to actually get scored; see docs/BENCHMARKS.md and docs/EVALMEM_INTEGRATION_PLAN.md
 
 Dockerfile                 one image, all 11 binaries — gateway is the default ENTRYPOINT, everything else runs via a `command:` override
 deploy/k8s/                 plain Kubernetes manifests, numbered in apply order
@@ -80,22 +91,33 @@ store      -> identity, provider, crypto, dbscope, pgfmt, gateway, audit
 consolidation -> identity, provider, crypto, dbscope, pgfmt, audit
 hpmf       -> identity, crypto, dbscope, pgfmt, audit   (+ filippo.io/age)
 rotate     -> identity, crypto, dbscope, audit
+reembed    -> identity, crypto, dbscope, pgfmt, audit, provider, consolidation (EmbedderIdentity, EpisodeEmbedImportanceThreshold, Episode/EntityEmbedText)
 
 selfcheck  -> gateway, provider
 
 bootstrap  -> identity, crypto, provider   (+ blank-imports the pgx driver)
 
-cmd/hupi              -> bootstrap, gateway, store, auth
-cmd/hupi-consolidate  -> bootstrap, consolidation, identity
-cmd/hupi-trace        -> bootstrap, store, identity
-cmd/hupi-correct      -> bootstrap, consolidation, identity
-cmd/hupi-selfcheck    -> bootstrap, store, selfcheck
-cmd/hupi-admin        -> bootstrap, auth, audit, identity
-cmd/hupi-admin-ui     -> bootstrap, auth, audit, identity
-cmd/hupi-audit        -> bootstrap
-cmd/hupi-export       -> bootstrap, hpmf, auth, identity   (+ filippo.io/age)
-cmd/hupi-import       -> bootstrap, hpmf, auth, identity   (+ filippo.io/age)
-cmd/hupi-rotate-key   -> bootstrap, rotate, identity
+demo       -> identity, auth, dbscope
+metrics    (no internal deps — only prometheus/client_golang + net/http)
+
+cmd/hupi               -> bootstrap, gateway, store, auth, metrics
+cmd/hupi-demo          -> bootstrap, auth, consolidation, demo, gateway, metrics, store
+cmd/hupi-demo-sweep    -> bootstrap, auth, demo
+cmd/hupi-consolidate   -> bootstrap, consolidation, identity
+cmd/hupi-trace         -> bootstrap, store, identity
+cmd/hupi-correct       -> bootstrap, consolidation, identity
+cmd/hupi-selfcheck     -> bootstrap, store, selfcheck
+cmd/hupi-admin         -> bootstrap, auth, audit, identity
+cmd/hupi-admin-ui      -> bootstrap, auth, audit, identity
+cmd/hupi-audit         -> bootstrap
+cmd/hupi-export        -> bootstrap, hpmf, auth, identity   (+ filippo.io/age)
+cmd/hupi-import        -> bootstrap, hpmf, auth, identity   (+ filippo.io/age)
+cmd/hupi-rotate-key    -> bootstrap, rotate, identity
+cmd/hupi-reembed       -> bootstrap, reembed, identity
+cmd/hupi-bench         -> bootstrap, auth, dbscope, gateway, identity, store   (+ shells out to the built hupi-consolidate binary)
+cmd/hupi-ingest-turns  -> bootstrap, auth, gateway, identity, store   (+ shells out to hupi-consolidate)
+cmd/hupi-export-memory -> bootstrap, identity, store
+cmd/hupi-answer-question -> bootstrap, gateway, identity, store
 ```
 
 Note `store` depends on `gateway` (for the `gateway.Episode`,
@@ -122,8 +144,11 @@ ever needing to know Postgres exists.
 | `consolidation` | Nightly rollup: episodes -> grounded summaries | `Runner` (`RunDaily`, `RunRollup`, `Correct`) |
 | `hpmf` | Portable memory format read/write (MEMORY_FORMAT.md) + age packaging | `ExportScope`, `ExportBundle`, `ImportScope`, `PackAndEncrypt`, `DecryptAndUnpack`, `Manifest` |
 | `rotate` | Online, resumable per-scope key rotation | `Runner` (`Start`, `Continue`, `Status`, `Prune`) |
+| `reembed` | Bulk re-embed a scope's summaries/high-importance episodes/entities after an embedding-provider change | `Runner` (`Status`, `Continue`, `LogRun`) |
 | `selfcheck` | Run probes against a live `Retriever` | `Probe`, `Result`, `Run` |
 | `bootstrap` | Read config, connect Postgres, build the `KeyStore` | `Deps`, `Load` |
+| `demo` | Anonymous guest-session lifecycle (create/resolve/sweep), capped usage — backs the public hosted demo | `Store` (`CreateSession`, `Resolve`, `ConsolidateNow`, `Sweep`), `IPRateLimiter` |
+| `metrics` | Every Prometheus metric HUPI exposes at `/metrics`, plus a handler-wrapping helper | `InstrumentHandler`, `RetrievalGateTotal`, `AuthResolveTotal`, `ProviderCallDuration`, `ProviderCallErrorsTotal`, `CaptureTotal`, `CaptureDuration`, `ConsolidationRunsTotal`, `ConsolidationDuration`, `GroundingFactsTotal`, `RollupRunsTotal` |
 
 ## 4. Cross-cutting concerns (these three show up in nearly every call chain)
 
@@ -173,8 +198,11 @@ exactly what `internal/store/rls_test.go` tests for.
 
 ## 5. Non-HTTP entry points, call chain by call chain
 
-The HTTP routes are covered in full in [API_REFERENCE.md](API_REFERENCE.md).
-The five other binaries, below.
+`cmd/hupi`'s own HTTP routes are covered in full in
+[API_REFERENCE.md](API_REFERENCE.md). The other binaries, below —
+including `cmd/hupi-demo`, which serves its own small HTTP surface via
+the same `gateway.Handler` but isn't walked route-by-route in
+API_REFERENCE.md, which is scoped to the main gateway.
 
 ### `cmd/hupi-consolidate` — nightly rollup
 
@@ -308,6 +336,149 @@ route list, the auth/exposure model, why named operators replaced a
 single shared token, and why this exists at all despite
 `TIER3_PLAN.md`'s original CLI-only non-goal.
 
+### `cmd/hupi-reembed` — online, resumable re-embedding
+
+Same shape as `cmd/hupi-rotate-key`, for a different trigger: the active
+embedding provider changed, so existing vectors aren't comparable to new
+ones.
+
+1. `bootstrap.Load(ctx)`.
+2. `reembed.Runner.Status(ctx, scope)` (`internal/reembed/reembed.go`) —
+   a live `COUNT` per table (`summaries`, `episodes`, `entities`) of rows
+   where `embedding is null or embedding_model is distinct from` the
+   active provider's identity; printed, no writes. Unlike
+   `internal/rotate`, there's no persisted cursor or `key_rotations`-style
+   status row — "needs re-embedding" is a self-correcting predicate, so a
+   crash/restart just re-runs the same query rather than needing to
+   resume from a saved position.
+3. Loop `reembed.Runner.Continue(ctx, scope, batchSize)` until `done`:
+   each call processes up to `batchSize` rows from whichever table has
+   work first (`summaries` -> `episodes` -> `entities`) — decrypt via
+   `crypto.KeyStore.GetVersion`, re-embed via `provider.Provider.Embed`,
+   write back `embedding`/`embedding_model` inside a `dbscope.Run`
+   transaction per batch. Episodes only count if
+   `type='interaction' and importance >= consolidation.EpisodeEmbedImportanceThreshold`
+   — one never meant to be embedded is simply out of scope, not pending.
+4. `reembed.Runner.LogRun(ctx, scope, actor, counts)` once, after the
+   loop finishes with any rows processed — one `audit.Entry`
+   (`internal/audit`). Unlike `internal/rotate` (which audits
+   automatically per step), this is the caller's own responsibility,
+   since there's no multi-step state machine to hang it off of.
+
+### `cmd/hupi-demo` — the public hosted demo
+
+A deliberately separate long-lived HTTP server (own binary, own listen
+address, own process) from `cmd/hupi` — so a bug in anonymous-demo
+handling can never affect a real self-hosted deployment.
+
+1. `bootstrap.Load(ctx)` + `VerifyEmbedding`; builds a real `store.New`,
+   `auth.New`, and `consolidation.New(...)`.
+2. `demo.New(deps.DB, authStore, runner, loadLimits())`
+   (`internal/demo/store.go`) plus a `demo.NewIPRateLimiter(...)` — the
+   in-memory per-IP limiter is a cheap casual-case guard; the real cost
+   control is `demo.Store`'s own DB-backed daily/per-session caps.
+3. `gateway.Handler{Auth: demoStore, Retriever: store, Capturer: store, ...}`
+   — `demo.Store` itself implements `gateway.Authenticator` (`Resolve`),
+   so a normal chat turn runs the same unmodified retrieval/injection/
+   capture path as a real deployment; nothing is mocked or short-circuited
+   in `gateway`/`store` for demo mode.
+4. Routes, each wrapped in `metrics.InstrumentHandler`: `POST
+   /demo/session` (`demo.Store.CreateSession`, gated by the IP limiter and
+   a daily session cap), `POST /v1/chat/completions` (the real handler),
+   `POST /demo/consolidate-now` (`demo.Store.ConsolidateNow` — runs a real
+   `consolidation.Runner.RunDaily`, gated by its own separate counter so
+   it can't become an unmetered LLM side channel), plus `GET
+   /healthz`/`/readyz`/`/metrics` (the last unwrapped, `promhttp.Handler()`
+   directly). CORS is restricted to a single configured origin
+   (`HUPI_DEMO_ALLOWED_ORIGIN`).
+
+Configured entirely by environment variables, no flags —
+`HUPI_DEMO_LISTEN_ADDR`, `HUPI_DEMO_ALLOWED_ORIGIN`,
+`HUPI_DEMO_SESSION_TTL`, `HUPI_DEMO_MAX_MESSAGES_PER_SESSION`,
+`HUPI_DEMO_MAX_CONSOLIDATE_PER_SESSION`, `HUPI_DEMO_MAX_SESSIONS_PER_DAY`,
+`HUPI_DEMO_MAX_SESSIONS_PER_IP_PER_HOUR`.
+
+### `cmd/hupi-demo-sweep` — expire demo sessions
+
+A cron job, same per-run shape as `cmd/hupi-consolidate`, not a
+long-lived process:
+
+1. `bootstrap.Load(ctx)`; `auth.New`; `demo.New(deps.DB, authStore, nil, demo.DefaultLimits)`
+   — `nil` for the `ConsolidationRunner`, since a sweep never consolidates
+   anything.
+2. `demoStore.Sweep(ctx, 24*time.Hour)` — deletes every guest session past
+   its own `expires_at`, plus a hard 24h backstop regardless of
+   `expires_at` (a safety net against a TTL-logic bug leaving sessions
+   around forever).
+
+### `cmd/hupi-bench` — LoCoMo/LongMemEval benchmark harness
+
+Not part of a normal deployment — the tool behind the real,
+independently-reproducible numbers in [BENCHMARKS.md](BENCHMARKS.md).
+Drives a real `gateway.Handler` (same wiring pattern as
+`cmd/hupi-demo`/`cmd/hupi`) against a benchmark conversation, end to end:
+
+1. `bootstrap.Load` + `VerifyEmbedding`; loads the benchmark data
+   (`loadLoCoMoAll`/`loadLongMemEvalAll`, `cmd/hupi-bench/locomo.go`/
+   `longmemeval.go`) into one shared `benchConversation{id, sessions, qa}`
+   shape; `loadPriorAnswers` resumes from a prior `-out-file` so a
+   late-batch failure (a real past incident: a late 429 once discarded
+   ~31 already-consolidated conversations' work) doesn't lose completed
+   work.
+2. Per conversation: `resetScope` (raw scoped deletes) + `auth.Store.CreateUser`
+   provision a fresh, isolated scope; builds a `gateway.Handler` exactly
+   like a real deployment would.
+3. One of three modes (`cmd/hupi-bench/replay.go`): `-baseline` (skip
+   HUPI entirely, stuff raw transcripts into the answer model's context —
+   the no-memory control); `-answer-only` (skip replay/consolidation,
+   re-answer against an already-consolidated scope); or the real path —
+   replay every session via `HandleChatCompletions` with a backdated
+   `handler.Now`, then **shell out** to the real, separately-built
+   `hupi-consolidate` binary once per distinct fabricated date (rollup
+   logic lives only in that binary's own package, not in-process here).
+4. QA phase: real retrieval, captured via `gateway.Handler.OnRetrieve`
+   (so the diagnostic context dump is provably what the real answer saw,
+   not a second, possibly-different `Retrieve()` call) + a real answer
+   call using a dedicated concise/abstention-tuned system prompt. `X-Hupi-Capture: off`
+   during QA turns so diagnostic calls don't pollute real episode memory.
+5. Writes predictions in each benchmark's own native scoring-input shape
+   (`marshalLoCoMoPredictions`/`marshalLongMemEvalHypotheses`) — scored by
+   `bench/score_locomo.py`/`bench/score_longmemeval.sh`, each invoking
+   that benchmark's own unmodified upstream scoring code.
+
+### `cmd/hupi-ingest-turns`, `cmd/hupi-export-memory`, `cmd/hupi-answer-question` — EvalMem adapter tools
+
+Three small CLIs, not part of a normal deployment, that
+`bench/evalmem/hupi_adapter.py` shells out to — the Go-side half of
+HUPI's integration with [EvalMem](https://github.com/ZeyuuLiu/EvalMem),
+an external memory-diagnostic framework (see
+[EVALMEM_INTEGRATION_PLAN.md](EVALMEM_INTEGRATION_PLAN.md)). Each
+deliberately duplicates small pieces of `cmd/hupi-bench` (wire types,
+`sendChatTurn`, the QA system prompt) rather than importing it — a
+conscious "small tools don't cross-import" choice, not an oversight.
+
+- **`hupi-ingest-turns`** implements EvalMem's `ingest_conversation`:
+  reads a flat JSON array of turns from stdin (EvalMem's own flattened
+  LoCoMo shape), groups them back into sessions by `session_index`,
+  provisions a fresh scope (`user:evalmem-<sample-id>`), replays each
+  session with a backdated `handler.Now`, then — unless
+  `-skip-consolidate` — shells out to `hupi-consolidate -date <d>` per
+  distinct date, same pattern as `cmd/hupi-bench`. Prints a `run_ctx` JSON
+  blob to stdout for the Python adapter to pass into later calls.
+- **`hupi-export-memory`** implements `export_full_memory`: a thin CLI
+  wrapper around `store.Store.ExportMemory` (the actual logic lives in
+  `internal/store`, not here) — dumps a scope's entire decrypted memory
+  (every entity, every current summary + key facts, every relationship)
+  as JSON. Contrasts with `cmd/hupi-trace`: trace answers "what did this
+  one turn see," this answers "what does this scope know, full stop."
+- **`hupi-answer-question`** implements `retrieve_original`/
+  `generate_online_answer`/`generate_oracle_answer`: answers one question
+  against an already-ingested scope, either in native mode (a real
+  `HandleChatCompletions` call, context captured via `OnRetrieve`) or
+  oracle mode (`X-Hupi-Memory: off` so real retrieval never runs, with
+  hand-fed context injected as its own system message instead). Both
+  modes set `X-Hupi-Capture: off`.
+
 ## 6. Tier 3: the open-core build split
 
 Tier 3 (real end-user/team authentication, `/v1/team/...` routes, team
@@ -402,3 +573,4 @@ The full set of hooks, all following this pattern:
 | "What does this product do, for whom?" | [BUSINESS_PROCESS.md](BUSINESS_PROCESS.md) |
 | "How do I deploy this to Kubernetes?" | [INSTALL.md § Containerized deployment](INSTALL.md#containerized-deployment), [Dockerfile](../Dockerfile), [deploy/k8s/](../deploy/k8s/), [deploy/helm/hupi/](../deploy/helm/hupi/) |
 | "How do I use HUPI from inside VS Code?" | [VSCODE_EXTENSION.md](VSCODE_EXTENSION.md), [vscode-extension/](../vscode-extension/) |
+| "Where do the published LoCoMo/LongMemEval numbers come from, and can I reproduce them?" | [BENCHMARKS.md](BENCHMARKS.md), §5's `cmd/hupi-bench` entry above, [bench/](../bench/) |
