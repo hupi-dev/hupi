@@ -298,7 +298,7 @@ error** — the handler's only nil-preserving branch is `attrErr != nil`, so
 this specific failure mode silently reports every citation as "confirmed
 unused" to any caller building UI on top of `hupi_citations`.
 
-**A3. Switching the active embedding provider without re-embedding silently mixes incompatible vector spaces, with nothing catching it.**
+**A3. ✅ FIXED ([PR #20](https://github.com/hupi-dev/hupi/pull/20)) — Switching the active embedding provider without re-embedding silently mixes incompatible vector spaces, with nothing catching it.**
 `bootstrap.VerifyEmbedding` only checks vector *length* compatibility, not
 model *identity*; the retrieval nearest-neighbor queries
 (`internal/store/retrieve.go`, vector search over summaries/episodes/
@@ -503,7 +503,7 @@ just to pad the findings list:
 
 | Severity | Count |
 |---|---|
-| Likely real bugs | 13 (✅ 4 fixed — A1 PR #18, A2 PR #19, A4/A5 merged PR #17; 9 remaining) |
+| Likely real bugs | 13 (✅ 5 fixed — A1 PR #18, A2 PR #19, A3 PR #20, A4/A5 merged PR #17; 8 remaining) |
 | Plausible edge cases | 24 |
 | Minor / stylistic | 10 |
 | Confirmed clean | 7 areas |
