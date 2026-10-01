@@ -419,15 +419,43 @@ real source episode through the real model (3/3 trials) confirms "The
 construction began in 2014" is now extracted as its own fact. Reconsolidating
 the real scope with the fix moved the final predicted answer from a pure
 hallucination ("2020", matching nothing in the source) to a grounded
-"2015" — the fact now exists, correctly, in storage, but isn't yet
-winning fact-ranking for this specific query against the sibling 2015/2016
-facts also present in the same picked summary. This is a **separate,
-distinct gap** — the ranking mechanism (RRF fusion, PR #67) that fixed
-Category 2's similar-shaped problem doesn't automatically generalize to
-every busy-fact-list query shape; it has not been re-investigated for
-this specific case, and is recorded here as a known residual, not chased
-further in this round per this plan's own established discipline of not
-bundling a new, unverified fix into an already-shipped PR.
+"2015" — the fact now exists, correctly, in storage, but wasn't reaching
+the model's context at all (confirmed absent from the real assembled
+context via `-retrieved-context-out-file`).
+
+**Follow-up investigation found and fixed one real contributing cause**:
+direct measurement of this exact query against this real 62-fact summary
+found `factScores` (the lexical half of `rankKeyFacts`'s RRF fusion, see
+Category 2's own update above) gave the generic case-description fact a
+higher score (7) than the answer fact (3) purely because it repeated more
+of the question's own common, widely-shared vocabulary ("Bajimaya",
+"Reward Homes Pty Ltd", "case") — the answer fact's genuinely rare,
+distinguishing terms ("house", "began") counted no higher than any other
+shared word under the old flat overlap count. Fixed in
+[PR #75](https://github.com/hupi-dev/hupi/pull/75): `factScores` now uses
+BM25 (IDF-weighted, already relied on elsewhere in this file for
+summaries/episodes/entities) with length normalization disabled
+specifically for key facts (see that PR's own description for why).
+
+**Still not fully resolved, reported honestly**: even with that real
+lexical-scoring bug fixed, the final predicted answer for this exact
+scope/question is still "2015," not "2014." Direct measurement found two
+further, compounding factors, neither touched by PR #75: (1) this
+specific fact's real OpenAI `text-embedding-3-small` similarity to this
+query is measurably weaker (0.5456) than several longer, more
+generically-matching case-description facts (0.60-0.69), dragging down
+its fused RRF rank despite now having the strongest lexical score — the
+same class of real embedding-model limitation `rankKeyFacts`'s own doc
+comment already documents for a different case; and (2) `summaryDepthCap`
+(700 chars) still truncates the depth section before reaching this fact's
+now-improved-but-not-top-3 rank, because several longer, less-relevant
+facts ranked just above it consume the budget first. Both are real,
+distinct, deeper tuning questions (RRF fusion weighting, and the
+depth-budget/fact-length interaction) that would need their own dedicated
+investigation and re-verification against every already-tuned case (the
+same discipline that caught PR #75's own length-normalization regression
+risk against `gpt4_45189cb4` before it shipped) — recorded here as a
+known, deliberately not-further-chased residual, not glossed over.
 
 ## Category 5 (added 2026-10-01, round 2): `multi-session` — cross-scenario figure conflation at answer time
 
