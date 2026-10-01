@@ -178,6 +178,24 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 	go func() {
 		defer close(out)
 		defer resp.Body.Close()
+		// send is a select on ctx.Done() alongside the channel send itself —
+		// a real, confirmed goroutine/connection leak otherwise: an
+		// unconditional `out <- chunk` blocks forever the moment a caller
+		// stops draining the channel (client disconnect, request context
+		// cancelled mid-stream), since out is unbuffered and nothing is
+		// listening. With no ctx check, this goroutine — and the response
+		// body its deferred Close() never reaches — leaks permanently.
+		// Returning false here lets the read loop below stop scanning
+		// immediately too, instead of continuing to do pointless work for a
+		// caller that's already gone.
+		send := func(c StreamChunk) bool {
+			select {
+			case out <- c:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
@@ -187,7 +205,7 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if payload == "[DONE]" {
-				out <- StreamChunk{Done: true}
+				send(StreamChunk{Done: true})
 				return
 			}
 			var chunk struct {
@@ -199,15 +217,17 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 				Usage *Usage `json:"usage"`
 			}
 			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-				out <- StreamChunk{Err: fmt.Errorf("provider %s: decode stream chunk: %w", p.name, err)}
+				send(StreamChunk{Err: fmt.Errorf("provider %s: decode stream chunk: %w", p.name, err)})
 				return
 			}
 			if len(chunk.Choices) > 0 {
-				out <- StreamChunk{Delta: chunk.Choices[0].Delta.Content, Usage: chunk.Usage}
+				if !send(StreamChunk{Delta: chunk.Choices[0].Delta.Content, Usage: chunk.Usage}) {
+					return
+				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- StreamChunk{Err: fmt.Errorf("provider %s: reading stream: %w", p.name, err)}
+			send(StreamChunk{Err: fmt.Errorf("provider %s: reading stream: %w", p.name, err)})
 		}
 	}()
 	return out, nil
