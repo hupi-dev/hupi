@@ -10,6 +10,12 @@ const MAX_PREFIX_CHARS = 4000;
 const MAX_SUFFIX_CHARS = 1000;
 const MAX_COMPLETION_TOKENS = 256;
 const DEFAULT_DEBOUNCE_MS = 300;
+// Much shorter than hupiClient's DEFAULT_REQUEST_TIMEOUT_MS: a ghost-text
+// suggestion that hasn't come back in a few seconds is already useless by
+// the time it arrives (the user has kept typing), so there's no reason to
+// hold a request open anywhere near as long as an explicitly-invoked chat
+// or edit (finding B25).
+const COMPLETION_TIMEOUT_MS = 15_000;
 
 const SYSTEM_PROMPT =
   'You are a code completion engine embedded in an editor. Given the code ' +
@@ -95,6 +101,7 @@ export class HupiInlineCompletionProvider implements vscode.InlineCompletionItem
         model: completionModel,
         messages,
         signal: controller.signal,
+        timeoutMs: COMPLETION_TIMEOUT_MS,
         maxTokens: MAX_COMPLETION_TOKENS,
         temperature: 0.2,
         // Ghost text fires on every debounced typing pause — it has no
