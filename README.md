@@ -52,6 +52,8 @@ license.
 ```
 cmd/                  Go binaries — the gateway, cron jobs, and CLIs
   hupi/                 the gateway server itself (long-lived, serves the HTTP API)
+  hupi-demo/             the public hosted anonymous demo — its own long-lived server, own listen address, capped guest sessions
+  hupi-demo-sweep/       delete expired demo guest sessions (cron)
   hupi-admin-ui/         operator admin console — JSON API (Go) + React frontend
     web/                   the React admin console source (Vite + TypeScript + Tailwind)
   hupi-consolidate/      nightly consolidation + rollups (cron)
@@ -64,8 +66,13 @@ cmd/                  Go binaries — the gateway, cron jobs, and CLIs
   hupi-reembed/          CLI: online, resumable per-scope re-embedding after an embedding model change
   hupi-trace/            CLI: inspect one episode's retrieval trace
   hupi-correct/          CLI: write a corrected, superseding summary
+  hupi-bench/            CLI: LoCoMo/LongMemEval benchmark harness — see bench/ and docs/BENCHMARKS.md
+  hupi-ingest-turns/     CLI: EvalMem adapter — replay a flat turn list into a fresh scope + consolidate
+  hupi-export-memory/    CLI: EvalMem adapter — dump a scope's entire decrypted memory for diagnostics
+  hupi-answer-question/  CLI: EvalMem adapter — answer one question, native or oracle mode
 internal/             Go packages implementing the gateway, storage, crypto, etc.
 schema/               numbered Postgres migrations, applied in order
+bench/                LoCoMo/LongMemEval data-fetch scripts, each benchmark's own unmodified scoring code, the EvalMem adapter, and archived run results — see docs/BENCHMARKS.md
 deploy/k8s/           plain Kubernetes manifests
 deploy/helm/hupi/     the same, as a Helm chart
 site/                 marketing/landing website (Astro + Tailwind) — see site/README.md
@@ -124,6 +131,7 @@ Kubernetes/Helm.
 | [docs/VSCODE_EXTENSION.md](docs/VSCODE_EXTENSION.md) | The VS Code extension — chat sidebar and inline edit |
 | [docs/CODE_GUIDE.md](docs/CODE_GUIDE.md) | Project layout and package dependency graph |
 | [docs/MEMORY_FORMAT.md](docs/MEMORY_FORMAT.md) | The portable memory format (HPMF) |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Real, independently-reproducible LoCoMo/LongMemEval scores and how to reproduce them |
 
 ## Contributing
 
