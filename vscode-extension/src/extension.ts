@@ -16,7 +16,20 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const chatProvider = new HupiChatViewProvider(context, context.extensionUri);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(HupiChatViewProvider.viewType, chatProvider),
+    // retainContextWhenHidden (finding B27): without it, VS Code tears
+    // down and recreates the webview's DOM/JS state every time the user
+    // hides and reopens the sidebar — the extension host still holds the
+    // conversation history (HupiChatViewProvider's own `history` field),
+    // but the visible panel comes back blank, with no indication that the
+    // next message will still carry that context. Keeping the webview's
+    // page alive is a one-line fix that exactly matches live-chat
+    // rendering (citations, the file-context badge) with no risk of a
+    // separate replay mechanism drifting out of sync with it — the usual
+    // memory-overhead tradeoff is reasonable for one always-present
+    // single-instance sidebar view.
+    vscode.window.registerWebviewViewProvider(HupiChatViewProvider.viewType, chatProvider, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
   );
 
   context.subscriptions.push(registerChatParticipant(context));

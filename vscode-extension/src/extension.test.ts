@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import * as vscode from 'vscode';
-import { __resetVscodeMock } from './test/vscode-mock';
+import { __resetVscodeMock, registerWebviewViewProvider } from './test/vscode-mock';
 import { activate, deactivate } from './extension';
 
 function fakeContext(): vscode.ExtensionContext {
@@ -41,6 +41,21 @@ describe('activate', () => {
 
   it('does not throw when called', () => {
     expect(() => activate(fakeContext())).not.toThrow();
+  });
+
+  // Real regression test for review finding B27: without
+  // retainContextWhenHidden, VS Code tears down and recreates the chat
+  // sidebar's webview DOM/JS state every time the user hides and reopens
+  // it, even though the extension host still holds the conversation
+  // history — the panel just comes back blank.
+  it('registers the chat webview view provider with retainContextWhenHidden (finding B27)', () => {
+    activate(fakeContext());
+
+    expect(registerWebviewViewProvider).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ webviewOptions: { retainContextWhenHidden: true } }),
+    );
   });
 });
 
