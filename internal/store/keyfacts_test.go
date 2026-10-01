@@ -348,3 +348,90 @@ func TestWriteKeyFactsOrdersEntireListNotJustTheWinner(t *testing.T) {
 		}
 	}
 }
+
+// TestGuaranteeBudgetPerSummary_FewPicksStaysGenerous confirms the
+// common case (1-3 picked summaries) is effectively unaffected by the
+// fair-share cap — most real facts are well under it.
+func TestGuaranteeBudgetPerSummary_FewPicksStaysGenerous(t *testing.T) {
+	t.Setenv("HUPI_CONTEXT_CHAR_BUDGET", "2000")
+	for _, n := range []int{1, 2, 3} {
+		got := guaranteeBudgetPerSummary(n)
+		if got < 300 {
+			t.Errorf("guaranteeBudgetPerSummary(%d) = %d, want a generous share (>=300) when few summaries are picked", n, got)
+		}
+	}
+}
+
+// TestGuaranteeBudgetPerSummary_ManyPicksStillRespectsFloor is a real
+// regression test (docs/CONSOLIDATION_COMPLETENESS_PLAN.md /
+// docs/MEMORY_SCENARIOS.md scenario D): a real production case
+// (gpt4_e072b769, "how many weeks ago did I start using Ibotta") had 9
+// summaries picked for one generic question, and the correct summary —
+// lowest fused score of the 9 — never got its guarantee line written at
+// all under the default 2000-char budget, because nothing capped how
+// much the other 8 picks' guarantee lines could cost first. Confirms
+// the per-summary share shrinks as more summaries compete, but never
+// below guaranteeMinPerSummary — enough room for a real short fact
+// ("The user has just downloaded Ibotta, a cashback app." is 55 chars)
+// regardless of how many summaries are picked.
+func TestGuaranteeBudgetPerSummary_ManyPicksStillRespectsFloor(t *testing.T) {
+	t.Setenv("HUPI_CONTEXT_CHAR_BUDGET", "2000")
+	got := guaranteeBudgetPerSummary(9)
+	if got != guaranteeMinPerSummary {
+		t.Errorf("guaranteeBudgetPerSummary(9) = %d, want the floor %d — 9 picks against a 2000-char budget should hit the minimum, not divide down to near-zero", got, guaranteeMinPerSummary)
+	}
+	if got < 55 {
+		t.Errorf("guaranteeBudgetPerSummary(9) = %d, want enough room for a real short fact (55 chars)", got)
+	}
+}
+
+// TestGuaranteeBudgetPerSummary_ZeroPicksReturnsZero is a defensive
+// boundary check — fusedSearchSummaries never calls this with an empty
+// picks list in practice (it returns early), but the function shouldn't
+// divide by zero if it ever did.
+func TestGuaranteeBudgetPerSummary_ZeroPicksReturnsZero(t *testing.T) {
+	if got := guaranteeBudgetPerSummary(0); got != 0 {
+		t.Errorf("guaranteeBudgetPerSummary(0) = %d, want 0", got)
+	}
+}
+
+// TestCenteredExcerptShortTextReturnedUnchanged confirms the common
+// case — text already under the cap — is a no-op, same as hardTruncate.
+func TestCenteredExcerptShortTextReturnedUnchanged(t *testing.T) {
+	text := "short text"
+	if got := centeredExcerpt(text, []string{"short"}, 100); got != text {
+		t.Errorf("centeredExcerpt() = %q, want unchanged %q", got, text)
+	}
+}
+
+// TestCenteredExcerptFallsBackToHeadTruncateWithoutAMatch confirms the
+// no-query-term-found case degrades to the old hardTruncate behavior
+// rather than returning nothing.
+func TestCenteredExcerptFallsBackToHeadTruncateWithoutAMatch(t *testing.T) {
+	text := strings.Repeat("x", 500)
+	got := centeredExcerpt(text, []string{"nomatch"}, 50)
+	want := hardTruncate(text, 50)
+	if got != want {
+		t.Errorf("centeredExcerpt() = %q, want the same as hardTruncate() = %q", got, want)
+	}
+}
+
+// TestCenteredExcerptPrefersDenserClusterOverFirstOccurrence is a real
+// regression test (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): the real
+// `60bf93ed` case had one query term ("backpack") appear early in a
+// passing, less relevant remark, while the passage that actually
+// answered the question sat near a denser cluster of several query
+// terms together, later in the text. An earlier version of this
+// function centered on the *first* occurrence of any term and missed
+// the detail entirely — real-verified that scoring by cluster density
+// instead fixes it.
+func TestCenteredExcerptPrefersDenserClusterOverFirstOccurrence(t *testing.T) {
+	text := "the backpack is nice. " +
+		strings.Repeat("filler words with no query terms at all. ", 10) +
+		"the laptop backpack was bought in january for the trip."
+	queryTerms := []string{"laptop", "backpack", "bought"}
+	got := centeredExcerpt(text, queryTerms, 60)
+	if !strings.Contains(got, "bought") {
+		t.Errorf("centeredExcerpt() = %q, want it centered on the denser cluster containing %q", got, "bought")
+	}
+}

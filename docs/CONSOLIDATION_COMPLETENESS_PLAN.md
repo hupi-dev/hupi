@@ -1300,6 +1300,127 @@ better-understood.
   the `guaranteedFact` fix solves the real mechanism at the
   already-shipped default budget, with no budget-size tradeoff.
 
+- **A real, confirmed regression from the above, found and fixed after
+  PR #15 merged — cross-summary guarantee-line budget starvation
+  (`docs/MEMORY_SCENARIOS.md` scenario D).** Re-running the same real
+  8-conversation sample post-merge: `gpt4_e072b769` ("how many weeks ago
+  did I start using Ibotta"), previously a confirmed exact-gold-match
+  fix, now consistently wrong. Root cause: 9 summaries get picked for
+  this generic question; `fusedSearchSummaries`' pass 1 writes every
+  picked summary's `guaranteedFact` line, highest-relevance first, with
+  no per-summary cap — the Ibotta summary, lowest-fused of the 9, never
+  got its guarantee line written before the global budget ran out.
+  Confirmed via a budget override that the fact was present and correct
+  the whole time, just unreachable in write order. The `guaranteedFact`
+  fix itself is what exposed this: picking a genuinely relevant fact on
+  a tie (correct) is sometimes longer than the arbitrary `facts[0]`
+  fallback it replaced, shifting cumulative guarantee-line cost enough
+  to push Ibotta's past the cutoff where it used to just barely fit.
+
+  **Fix**: `guaranteeBudgetPerSummary` caps each picked summary's whole
+  guarantee line to a fair, N-aware share of the budget
+  (`internal/store/retrieve.go`). Two further real mistakes were found
+  and fixed while building and re-verifying this, both the same
+  category of error (measuring the wrong thing's cost): the first
+  version capped only the fact text, not the `"related memory (summary
+  <id>, dated ..., ... match): "` prefix — and this real benchmark's own
+  summary IDs run ~130-160 characters, so 9 prefixes alone still
+  exceeded the budget regardless of the cap. Fixed by reserving the
+  real, measured prefix cost per summary before capping the fact
+  (`guaranteeMinFactChars` floors the fact's own share regardless of
+  prefix length). The second: `truncateToBudget`'s own
+  `"...[truncated to fit context budget]"` marker (37 chars), fine once
+  at the final whole-context cut, was being repeated once per picked
+  summary — 9 repeats of that overhead alone still blew the budget even
+  after the prefix fix. Fixed with a new `hardTruncate` (same cap, no
+  repeated marker) used specifically for this per-summary case.
+
+  **Real re-verification**: 4/4 correct on the isolated Ibotta question,
+  and stable across 4 full re-runs of the whole 8-conversation sample —
+  `gpt4_45189cb4` (sports-order) unaffected (still 4/4 correct),
+  confirming the fix doesn't trade one failure for another the way the
+  first attempt did. `go build`/`go vet`/`go test ./... -count=1` clean
+  across all 20 packages; 3 new unit tests in
+  `internal/store/keyfacts_test.go` cover the few-picks (unaffected) and
+  many-picks (floor-respecting) cases.
+
+  **A second, separate issue found during this re-verification — ✅ also
+  now fixed, three layers deep, each only visible once the previous one
+  was addressed**: `60bf93ed` ("how many days did my backpack take to
+  arrive") had also been consistently wrong since PR #15 merged —
+  confirmed present in the very first post-merge rerun, independent of
+  the guarantee-line starvation fix above. The same "context assembly is
+  naive tail-truncation, not actually budget-aware" gap Phase B's own
+  follow-up item 1 already named, recurring at two further layers:
+
+  1. **One summary's own depth section, uncapped, consumed almost the
+     whole 2000-char budget by itself.** This picked summary legitimately
+     had **120 key facts** (another LongMemEval `_abs` haystack artifact,
+     cramming many sessions onto one calendar day) — `depthText`'s facts
+     were deliberately uncapped ("20+ of them, each individually cheap"),
+     true at 20, false at 120. Fixed: `summaryDepthCap`
+     (`internal/store/retrieve.go`) bounds the whole depth block (facts +
+     prose together) at the write site, not inside `depthText` itself
+     (keeping that function's own "build the complete picture" contract
+     and existing unit test intact). Safe to reintroduce now, where an
+     earlier, similarly-shaped cap was tried and reverted for the
+     charity-events case: that reversion predated `writeKeyFacts`'
+     relevance ranking, so a combined cap back then cut into facts in
+     raw, arbitrary order; now a tail cut only ever drops the
+     least-relevant ones.
+  2. **Freeing that budget just let the next-biggest uncapped thing fill
+     it instead.** `vectorSearchEpisodes`/`keywordSearchEpisodes` write
+     each matched episode's full USER/ASSISTANT exchange with no cap at
+     all — the first-ranked episode's own full text consumed the
+     newly-freed room before a different, lower-ranked episode (or, as
+     it turned out, a later part of the *same* episode) ever got a
+     chance. Fixed: `episodeExchangeCap` bounds each episode entry too.
+  3. **A plain head-truncate per episode still wasn't enough.**
+     `hupi-trace` on the one real episode this question matched showed
+     it was an entire multi-turn session, not a single exchange — the
+     actual needed detail ("I bought it from Amazon on 1/15") sat
+     partway through a *later* turn, thousands of characters into that
+     one episode's own text, far beyond what any reasonable head-
+     truncate could reach without defeating the point of capping at
+     all. Fixed: `centeredExcerpt` keeps a window centered on the
+     *densest cluster* of matched query terms instead of always keeping
+     the text's start. A first version centered on the first matched
+     term's position alone and still missed the detail — it landed on
+     an earlier, sparser, less-relevant "backpack" mention; scoring
+     every candidate position by how many other query-term occurrences
+     fall near it correctly favored the denser, actually-relevant
+     passage instead (which also uniquely contained "bought," a real
+     distinguishing query term the sparser mention lacked).
+
+  **Real re-verification**: 5/5 correct, stable across 4 full re-runs of
+  the whole 8-conversation sample. `gpt4_45189cb4`, `gpt4_e072b769`, and
+  `b46e15ed` (itself newly, consistently correct across these same runs)
+  all unaffected. `go build`/`go vet`/`go test ./... -count=1` clean;
+  3 new unit tests for `centeredExcerpt` in
+  `internal/store/keyfacts_test.go` cover the short-text no-op,
+  no-match fallback, and the real dense-cluster-vs-first-occurrence
+  regression.
+
+  Episodes, entities, and graph content still have no fully unified
+  cross-section budget fairness — this fixed the two concrete mechanisms
+  a real case exposed, not a general rewrite of context assembly — but
+  the residual is now smaller and more specifically scoped than before.
+
+  **Two other apparent "regressions" checked and ruled out as real model
+  variance, not bugs**: `852ce960` (Wells Fargo) and `89527b6b`
+  (dinosaur color) were also inconsistent across today's runs — but
+  checking every run since the PR #15 merge (12 runs each, including the
+  very first, before any further fix) shows both were *already*
+  inconsistent from the start (852ce960: 3/12 correct; 89527b6b: 2/12
+  correct), not freshly broken by anything built today. 852ce960 in
+  particular is a live, real instance of Gap 3's own acknowledged
+  non-goal — two genuine, unresolved conflicting pre-approval amounts
+  sit side by side in that scope's real data, and the model picks
+  between them inconsistently, exactly the class of problem a fully
+  general cross-fact contradiction system (explicitly out of scope) would
+  address. Confirmed via direct grep across every saved prediction file
+  from today, not assumed.
+
 ## Non-goals
 
 - A general-purpose "detect and resolve any factual contradiction"
