@@ -1,0 +1,14 @@
+-- docs/CODEBASE_SURVEY_AND_REVIEW.md finding B23: audit_log had no index
+-- on target_ref, so "every event about entity X" — a natural query over
+-- an append-only, ever-growing table — was a full scan.
+--
+-- An expression index on target_ref->>'id', not a GIN index over the
+-- whole jsonb document: every real lookup (see internal/audit.Query's
+-- new TargetID filter) is an exact match on the id field alone, never a
+-- structural/containment query over kind or scope — a plain btree on the
+-- one field actually queried is smaller and faster than a GIN index built
+-- for a query shape nothing here uses. Partial (where target_ref is not
+-- null) since plenty of real events (admin_provision, admin_ui_view) have
+-- no target at all and would otherwise bloat the index with always-null
+-- entries indexing nothing useful.
+create index audit_log_target_ref_id_idx on audit_log ((target_ref->>'id')) where target_ref is not null;

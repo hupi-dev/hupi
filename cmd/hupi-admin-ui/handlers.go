@@ -258,6 +258,7 @@ func (s *server) auditQuery(w http.ResponseWriter, r *http.Request) {
 		ScopeOwner: q.Get("scope_owner"),
 		Actor:      q.Get("actor"),
 		EventType:  q.Get("event_type"),
+		TargetID:   q.Get("target_id"),
 		Limit:      limit,
 		Ascending:  true,
 	}

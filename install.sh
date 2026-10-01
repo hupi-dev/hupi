@@ -463,6 +463,7 @@ migration_probe() {
     0017_summaries_supersedes_unique.sql) echo "select (to_regclass('public.summaries_supersedes_unique_idx') is not null)" ;;
     0018_summary_key_facts_rls.sql)    echo "select coalesce((select relrowsecurity from pg_class where relname='summary_key_facts'), false)" ;;
     0019_entity_relationships_valid_date_order.sql) echo "select (select count(*) from pg_constraint where conname = 'entity_relationships_valid_date_order_check') > 0" ;;
+    0020_audit_log_target_ref_index.sql) echo "select (to_regclass('public.audit_log_target_ref_id_idx') is not null)" ;;
     *) die "no idempotency probe defined for migration $1 (add one to migration_probe)" ;;
   esac
 }
@@ -486,7 +487,8 @@ apply_all_migrations() {
            0007_audit_log.sql 0008_admin_operators.sql 0009_export_import_audit_events.sql \
            0010_key_rotation.sql 0011_key_rotation_audit_event.sql 0012_entity_embeddings.sql 0013_embedding_model_tracking.sql \
            0014_demo_sessions.sql 0015_entity_relationships.sql 0016_demo_sessions_decouple_cap_from_cleanup.sql \
-           0017_summaries_supersedes_unique.sql 0018_summary_key_facts_rls.sql 0019_entity_relationships_valid_date_order.sql; do
+           0017_summaries_supersedes_unique.sql 0018_summary_key_facts_rls.sql 0019_entity_relationships_valid_date_order.sql \
+           0020_audit_log_target_ref_index.sql; do
     apply_migration "$f"
   done
 }

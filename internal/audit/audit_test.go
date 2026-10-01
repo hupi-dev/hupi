@@ -71,6 +71,76 @@ func TestLogStandaloneAndQueryRoundTrip(t *testing.T) {
 	}
 }
 
+// TestQueryFilter_TargetID is the real regression test for review
+// finding B23: audit_log had no way to query "every event about entity
+// X" at all, let alone an indexed one. Confirms the new TargetID filter
+// matches events referencing a given target and excludes everything
+// else, including another event with a different target and one with no
+// target at all.
+func TestQueryFilter_TargetID(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	actor := fmt.Sprintf("user:audit-test-target-%d", time.Now().UnixNano())
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: actor}
+	targetID := fmt.Sprintf("entity:audit-test-target-%d", time.Now().UnixNano())
+
+	withTarget := Entry{
+		EventType:      EventCapture,
+		Actor:          actor,
+		ActingScope:    scope,
+		WorkspaceScope: scope,
+		TargetRef:      &identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: targetID},
+	}
+	if err := LogStandalone(ctx, db, withTarget); err != nil {
+		t.Fatalf("LogStandalone (with target): %v", err)
+	}
+
+	otherTarget := Entry{
+		EventType:      EventCapture,
+		Actor:          actor,
+		ActingScope:    scope,
+		WorkspaceScope: scope,
+		TargetRef:      &identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: targetID + "-other"},
+	}
+	if err := LogStandalone(ctx, db, otherTarget); err != nil {
+		t.Fatalf("LogStandalone (other target): %v", err)
+	}
+
+	noTarget := Entry{
+		EventType:      EventCapture,
+		Actor:          actor,
+		ActingScope:    scope,
+		WorkspaceScope: scope,
+	}
+	if err := LogStandalone(ctx, db, noTarget); err != nil {
+		t.Fatalf("LogStandalone (no target): %v", err)
+	}
+
+	got, err := Query(ctx, db, QueryFilter{Actor: actor, TargetID: targetID, Limit: 10})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Query with TargetID=%q returned %d rows, want exactly 1", targetID, len(got))
+	}
+	if got[0].TargetRef == "" {
+		t.Error("matched row has an empty TargetRef")
+	}
+
+	// The whole point of B23: this filter must be served by an index, not
+	// a full scan over an append-only, ever-growing table.
+	var indexExists bool
+	if err := db.QueryRowContext(ctx,
+		`select exists(select 1 from pg_indexes where tablename = 'audit_log' and indexname = 'audit_log_target_ref_id_idx')`,
+	).Scan(&indexExists); err != nil {
+		t.Fatalf("check for target_ref index: %v", err)
+	}
+	if !indexExists {
+		t.Error("expected audit_log_target_ref_id_idx to exist (schema/0020_audit_log_target_ref_index.sql)")
+	}
+}
+
 func TestQueryLimitZeroReturnsNoRows(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
