@@ -99,24 +99,41 @@ func ImportScope(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, dir str
 	}
 
 	if err := importEntities(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
-		return stats, err
+		return stats, wrapPartialImportFailure(err, targetScope, merge)
 	}
 	if err := logPhase("entities", stats.EntitiesImported, stats.EntitiesSkipped, nil); err != nil {
-		return stats, fmt.Errorf("hpmf: audit log write for entity import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err)
+		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for entity import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
 	}
 	if err := importSummaries(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
-		return stats, err
+		return stats, wrapPartialImportFailure(err, targetScope, merge)
 	}
 	if err := logPhase("summaries", stats.SummariesImported, stats.SummariesSkipped, map[string]any{"dangling_supersedes": stats.SummariesWithDanglingSupersedes}); err != nil {
-		return stats, fmt.Errorf("hpmf: audit log write for summary import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err)
+		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for summary import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
 	}
 	if err := importEpisodes(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
-		return stats, err
+		return stats, wrapPartialImportFailure(err, targetScope, merge)
 	}
 	if err := logPhase("episodes", stats.EpisodesImported, stats.EpisodesSkipped, nil); err != nil {
-		return stats, fmt.Errorf("hpmf: audit log write for episode import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err)
+		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for episode import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
 	}
 	return stats, nil
+}
+
+// wrapPartialImportFailure appends a hint pointing at -merge to any error
+// ImportScope returns after its upfront scopeIsEmpty check has already
+// passed (review finding C6). Each phase (and, within importSummaries,
+// each period file) commits in its own transaction, so a failure at any
+// of these call sites can easily leave real, already-committed data in
+// targetScope even though the whole import ultimately failed — without
+// this, a non-merge retry would only discover it needs -merge after a
+// second round trip, hitting the "already has data" check above from
+// scratch. Only applies when merge is false: a merge import failing
+// doesn't change what flag a retry needs.
+func wrapPartialImportFailure(err error, targetScope identity.Scope, merge bool) error {
+	if err == nil || merge {
+		return err
+	}
+	return fmt.Errorf("%w (if an earlier phase already committed data to %s:%s, retry with -merge to continue)", err, targetScope.Kind, targetScope.Owner)
 }
 
 func scopeIsEmpty(ctx context.Context, db *sql.DB, scope identity.Scope) (bool, error) {
