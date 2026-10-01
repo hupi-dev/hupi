@@ -135,14 +135,63 @@ type relatedSummary struct {
 // (summaries.entities_touched is a stored, queryable column; see
 // docs/CONSOLIDATION_COMPLETENESS_PLAN.md Phase C sub-problem 2 for why
 // this needed no migration), just never queried this way before.
+//
+// Two real bugs, found by direct investigation of a live failure
+// (852ce960, two genuinely conflicting Wells Fargo pre-approval amounts
+// that never got compared): this query's "current" filter and its
+// ranking were both wrong.
+//
+//  1. "current" meant "supersedes is null" — but that's backwards, the
+//     same mistake internal/store/retrieve.go's vectorSearchSummaries
+//     doc comment already documents for exactly this reason: a
+//     correction (Runner.Correct) writes a brand-new row whose *own*
+//     supersedes points backward at the row it replaces, and the
+//     replaced row's own supersedes column stays null forever. Filtering
+//     on "supersedes is null" returns exactly the stale, corrected-away
+//     summaries and excludes every correction ever made — confirmed live
+//     via repeated "applying contradiction correction failed... already
+//     superseded" log lines, each one a wasted LLM call re-checking a row
+//     that should never have been a candidate again, while its real
+//     correction (the summary that should be checked) was never
+//     considered. "Current" is now the same definition used everywhere
+//     else in this codebase: no newer row's supersedes points at this
+//     one.
+//  2. Ranking by recency alone (`order by created_at desc`) lets a hub
+//     entity dominate the bounded candidate list: entitiesTouched often
+//     includes a near-universal entity like person:user (present in the
+//     large majority of a real scope's summaries), so the
+//     maxRelatedSummariesForContradictionCheck most-recent summaries
+//     sharing *any* entity are almost always ones that only share the hub
+//     — crowding out a summary sharing a genuinely rare, specific entity
+//     (organization:wells-fargo, present in only 2 of 34 real summaries)
+//     that's actually far more likely to be the real contradiction.
+//     Candidates are now ranked by entity specificity first (the sum of
+//     1/frequency, across the scope's own current summaries, of each
+//     shared entity — a summary sharing only the hub scores low, one
+//     sharing a rare entity scores high), recency only as the tiebreak.
 func (r *Runner) findRelatedSummaries(ctx context.Context, scope identity.Scope, excludeID string, entitiesTouched []string) ([]relatedSummary, error) {
 	var out []relatedSummary
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-			select id, level, period from summaries
-			where entities_touched && $1::text[] and supersedes is null
-			  and id != $2 and scope_kind = $3 and scope_owner = $4
-			order by created_at desc
+			with current_summaries as (
+				select id, level, period, entities_touched, created_at from summaries s
+				where scope_kind = $3 and scope_owner = $4
+				  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+			),
+			entity_freq as (
+				select e, count(*)::float as freq from current_summaries, unnest(entities_touched) as e group by e
+			),
+			candidates as (
+				select cs.id, cs.level, cs.period, cs.created_at,
+					(select coalesce(sum(1.0 / ef.freq), 0)
+					 from unnest(cs.entities_touched) as shared
+					 join entity_freq ef on ef.e = shared
+					 where shared = any($1::text[])) as specificity
+				from current_summaries cs
+				where cs.entities_touched && $1::text[] and cs.id != $2
+			)
+			select id, level, period from candidates
+			order by specificity desc, created_at desc
 			limit $5
 		`, pgfmt.TextArray(entitiesTouched), excludeID, scope.Kind, scope.Owner, maxRelatedSummariesForContradictionCheck)
 		if err != nil {

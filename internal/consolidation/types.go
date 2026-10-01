@@ -13,7 +13,7 @@ import "encoding/json"
 // resolve a source's relative date phrasing ("yesterday", "last week")
 // against something concrete instead of leaving it unresolved in the
 // stored summary. docs/BENCHMARK_IMPROVEMENT_PLAN.md step 5: the
-// query-time qaConcisenessPrompt fix (docs/BENCHMARKS.md §3) already
+// query-time qaprompt.Concise fix (docs/BENCHMARKS.md §3) already
 // tells the answer model to always respond with absolute dates, but
 // that can't recover information a summary never resolved to begin
 // with — this is the consolidation-time half of that same problem.
