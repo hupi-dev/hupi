@@ -193,13 +193,27 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		return err
 	}
 
-	// Phase D item 4 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): only a
-	// genuine re-consolidation (not a day's first-ever summary) can leave
-	// an already-existing rollup stale — nothing existed to be stale
-	// before this day had a summary at all.
-	if existingCurrentID != "" {
-		r.refreshRollupsCovering(ctx, scope, "daily", period)
-	}
+	// Phase D item 4 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): always
+	// called, not just on a genuine re-consolidation — a real, confirmed
+	// gap this used to have (docs/CODEBASE_SURVEY_AND_REVIEW.md finding
+	// A7): gating this on existingCurrentID != "" assumed a day's
+	// first-ever summary could never leave an existing rollup stale,
+	// since "nothing existed to be stale before this day had a summary at
+	// all." That reasoning misses a day backfilled out of order (a late
+	// import, a manual `-date` re-run, episodes captured late) *after*
+	// its week's rollup already ran once with this day as a real gap —
+	// weeklyRollup (cmd/hupi-consolidate/rollup.go) always writes the
+	// full 7-day calendar template into source_summary_periods
+	// regardless of which days had a summary at the time, so this day's
+	// period is already listed on that existing rollup even though it
+	// contributed nothing to it yet. refreshRollupsCovering's own query
+	// finds exactly that row via source_summary_periods, and
+	// rollupIsStale correctly flags it stale (this summary's created_at
+	// postdates the rollup's) — the only thing stopping that from ever
+	// running was this guard. refreshRollupsCovering is cheap to call
+	// unconditionally: its own query finds zero rows, and does nothing
+	// further, whenever no rollup actually covers this period yet.
+	r.refreshRollupsCovering(ctx, scope, "daily", period)
 
 	// Phase C sub-problem 2 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
 	// best-effort, after the day's own summary is durably stored — see
