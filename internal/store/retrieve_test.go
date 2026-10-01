@@ -110,9 +110,9 @@ func insertKeyFact(t *testing.T, s *Store, scope identity.Scope, summaryID, fact
 	}
 	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			insert into summary_key_facts (summary_id, fact, grounded, key_version)
-			values ($1, $2, $3, $4)
-		`, summaryID, factCT, grounded, keyVersion)
+			insert into summary_key_facts (summary_id, fact, grounded, key_version, scope_kind, scope_owner)
+			values ($1, $2, $3, $4, $5, $6)
+		`, summaryID, factCT, grounded, keyVersion, scope.Kind, scope.Owner)
 		return err
 	})
 	if err != nil {
