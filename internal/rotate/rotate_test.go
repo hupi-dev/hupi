@@ -367,3 +367,77 @@ func TestRotate_StartIsIdempotentWhileInProgress(t *testing.T) {
 		t.Errorf("current version = %d after calling Start twice, want it to still be %d (not a third version)", current, to1)
 	}
 }
+
+// TestRotate_ConcurrentStartsAgreeOnOneRotation is a real regression test
+// (docs/CODEBASE_SURVEY_AND_REVIEW.md finding A8): Start's own Status
+// check, CreateNextVersion call, and final key_rotations upsert used to
+// run with no lock tying them together, so two overlapping Start calls
+// for a scope with no existing rotation could each compute a different
+// from/to pair and race to overwrite key_rotations' single row with
+// whichever wrote last — potentially clobbering a rotation another
+// process already started migrating, leaving real rows on a key version
+// neither the surviving row's from_version nor to_version names.
+//
+// Many goroutines call Start simultaneously (released off one barrier
+// channel to maximize overlap) for the same freshly-seeded scope; every
+// one of them must agree on exactly the same (from, to) pair, exactly
+// one key_rotations row must exist afterward, and the scope's current
+// key version must be exactly that rotation's to_version — not a
+// further, orphaned version from a second, uncoordinated Start winning
+// a race.
+func TestRotate_ConcurrentStartsAgreeOnOneRotation(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-rotate-concurrent-start"}
+	t.Cleanup(func() { cleanup(t, db, scope) })
+
+	seed(t, ctx, db, keys, scope, 1, "concurrent-start")
+	r := New(db, keys)
+
+	const n = 20
+	type result struct {
+		from, to int
+		err      error
+	}
+	results := make(chan result, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func() {
+			<-start
+			from, to, err := r.Start(ctx, scope, "test")
+			results <- result{from, to, err}
+		}()
+	}
+	close(start) // release every goroutine at once, maximizing real overlap
+
+	var first result
+	for i := 0; i < n; i++ {
+		res := <-results
+		if res.err != nil {
+			t.Fatalf("Start() call %d: %v", i, res.err)
+		}
+		if i == 0 {
+			first = res
+			continue
+		}
+		if res.from != first.from || res.to != first.to {
+			t.Errorf("Start() call %d = %d->%d, want every concurrent caller to agree on the same rotation %d->%d", i, res.from, res.to, first.from, first.to)
+		}
+	}
+
+	var rowCount int
+	if err := db.QueryRowContext(ctx, `select count(*) from key_rotations where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&rowCount); err != nil {
+		t.Fatalf("count key_rotations rows: %v", err)
+	}
+	if rowCount != 1 {
+		t.Errorf("key_rotations rows = %d, want exactly 1", rowCount)
+	}
+
+	current, err := keys.CurrentVersion(ctx, scope)
+	if err != nil {
+		t.Fatalf("CurrentVersion: %v", err)
+	}
+	if current != first.to {
+		t.Errorf("current version = %d, want exactly %d (the one agreed rotation's to_version) — a higher value means an uncoordinated second Start created an orphaned extra version", current, first.to)
+	}
+}
