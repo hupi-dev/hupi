@@ -9,6 +9,13 @@ metadata:
   name: hupi-consolidate
 spec:
   schedule: "0 3 * * *" # daily 03:00
+  # A run genuinely overlapping its own next trigger would still be safe
+  # (RunDaily supersedes rather than forking — internal/consolidation's
+  # own doc comment), but there's no reason to rely on that rather than
+  # just preventing it outright: K8s's own default (Allow) would let a
+  # slow day's job keep running right into the next trigger, doubling
+  # real LLM call volume for that overlap window for no benefit.
+  concurrencyPolicy: Forbid
   jobTemplate:
     spec:
       backoffLimit: 1
@@ -29,6 +36,13 @@ spec:
                 - name: providers-config
                   mountPath: /app/config
                   readOnly: true
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1"
+                  memory: "512Mi"
           volumes:
             - name: providers-config
               configMap:

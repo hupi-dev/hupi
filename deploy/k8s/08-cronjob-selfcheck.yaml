@@ -8,6 +8,10 @@ metadata:
   name: hupi-selfcheck
 spec:
   schedule: "0 6 * * 1" # Monday 06:00
+  # Same reasoning as 09-cronjob-consolidate.yaml's own comment: no
+  # benefit to two overlapping runs, and K8s's own default (Allow) has no
+  # reason to be relied on here either.
+  concurrencyPolicy: Forbid
   jobTemplate:
     spec:
       backoffLimit: 0
@@ -40,6 +44,13 @@ spec:
                 # real regression.
                 - name: HUPI_ENABLE_KEYWORD_SEARCH
                   value: "true"
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1"
+                  memory: "512Mi"
           volumes:
             - name: providers-config
               configMap:
