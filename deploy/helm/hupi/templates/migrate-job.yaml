@@ -25,4 +25,6 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "hupi.adminDBSecretName" . }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
 {{- end }}

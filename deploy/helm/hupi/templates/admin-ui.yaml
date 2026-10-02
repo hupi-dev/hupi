@@ -41,6 +41,8 @@ spec:
             - name: providers-config
               mountPath: /app/config
               readOnly: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: providers-config
           configMap:
