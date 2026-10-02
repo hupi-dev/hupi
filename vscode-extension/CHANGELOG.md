@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.14
+
+- Added file/image attachments to the dedicated HUPI sidebar — a 📎
+  button next to the input, plus drag-and-drop directly onto it, closing
+  the gap 0.1.13 left open (`@hupi`-only for that first pass). Read
+  client-side in the webview via the browser's File/FileReader API,
+  base64-encoded there, and forwarded to the same additive `attachments`
+  field `@hupi` already uses — no change to the gateway wire format.
+  Attached files show as removable chips above the input before sending,
+  and as a note on the sent message afterward. Same 8 MB client-side cap
+  and warning-note-on-extraction-failure behavior as `@hupi`.
+
 ## 0.1.13
 
 - Added file/image attachments to `@hupi` (VS Code's native Chat view):
