@@ -273,7 +273,58 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 	if err := r.embedEntities(ctx, scope, missingIDs); err != nil {
 		slog.Warn("consolidation: backfill entity embeddings failed", "period", period, "error", err)
 	}
+
+	// Keeps scope_corpus_size current for internal/store/retrieve.go's
+	// keywordSearchTierForScope — best-effort and last, same posture as
+	// embedHighImportanceEpisodes/entitiesMissingEmbeddings above: a
+	// transient failure here shouldn't register as a failed consolidation
+	// run, since this scope's summary is already durably stored. Only
+	// reached when len(sources) > 0 (the early return above), matching
+	// the plan's reasoning that a day with no new episodes doesn't change
+	// a scope's corpus size.
+	if err := r.updateScopeCorpusSize(ctx, scope); err != nil {
+		slog.Warn("consolidation: update scope corpus size failed", "period", period, "error", err)
+	}
 	return nil
+}
+
+// updateScopeCorpusSize records scope's current episode/summary counts into
+// scope_corpus_size, the signal internal/store/retrieve.go's
+// keywordSearchTierForScope reads to decide how much a retrieval call lets
+// BM25 keyword search cost for this scope — see that table's own migration
+// (schema/0022_scope_corpus_size.sql) for why raw counts, not a precomputed
+// tier. Counts current summaries only (not exists a newer one that
+// supersedes it), matching every other "current" query in this package.
+func (r *Runner) updateScopeCorpusSize(ctx context.Context, scope identity.Scope) error {
+	var episodeCount, summaryCount int
+	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `
+			select count(*) from episodes
+			where type = 'interaction' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&episodeCount); err != nil {
+			return fmt.Errorf("count episodes: %w", err)
+		}
+		if err := tx.QueryRowContext(ctx, `
+			select count(*) from summaries s
+			where scope_kind = $1 and scope_owner = $2
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		`, scope.Kind, scope.Owner).Scan(&summaryCount); err != nil {
+			return fmt.Errorf("count summaries: %w", err)
+		}
+		_, err := tx.ExecContext(ctx, `
+			insert into scope_corpus_size (scope_kind, scope_owner, episode_count, summary_count, updated_at)
+			values ($1, $2, $3, $4, now())
+			on conflict (scope_kind, scope_owner) do update
+				set episode_count = excluded.episode_count,
+				    summary_count = excluded.summary_count,
+				    updated_at = excluded.updated_at
+		`, scope.Kind, scope.Owner, episodeCount, summaryCount)
+		if err != nil {
+			return fmt.Errorf("upsert scope corpus size: %w", err)
+		}
+		return nil
+	})
+	return err
 }
 
 // entitiesMissingEmbeddings returns every entity in scope that doesn't

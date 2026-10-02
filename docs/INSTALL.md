@@ -256,6 +256,26 @@ to reach episodes consolidation never deemed important enough to embed.
 export HUPI_ENABLE_KEYWORD_SEARCH=false   # opt out; any other value (or unset) leaves it on
 ```
 
+This switch is now the coarsest of three settings — HUPI also governs
+keyword search per scope, based on that scope's own real corpus size (a
+deployment serving many users doesn't have to turn keyword search off
+globally just because a handful of scopes have grown large). Once a
+scope's combined episode+summary count passes `HUPI_KEYWORD_SEARCH_NARROW_THRESHOLD`
+(default 500), summary keyword search narrows itself to summaries that
+share an already-known entity with the query — cheaper, and arguably more
+precise — falling back to the full scan whenever no entity matched, so
+recall is never silently dropped. Past `HUPI_KEYWORD_SEARCH_DISABLE_THRESHOLD`
+(default 3,000) keyword search is skipped entirely for that scope,
+vector-only. Both defaults are reasoned starting points, not yet
+calibrated against real traffic — `hupi_keyword_search_tier_total` (the
+`/metrics` endpoint) reports the real, deployment-wide tier distribution
+to calibrate them against:
+
+```bash
+export HUPI_KEYWORD_SEARCH_NARROW_THRESHOLD=500     # optional override
+export HUPI_KEYWORD_SEARCH_DISABLE_THRESHOLD=3000   # optional override
+```
+
 ### Recommended for cloud-model deployments: `HUPI_CONTEXT_CHAR_BUDGET`
 
 Retrieval caps the assembled context at `HUPI_CONTEXT_CHAR_BUDGET`

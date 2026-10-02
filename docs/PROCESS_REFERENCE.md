@@ -195,6 +195,23 @@ possessive into a spurious `"s"` token that scored a true negative
 identically to a real near-miss). No stemming — exact-token overlap is
 the whole point of running this alongside vector search.
 
+**Per-scope governance.** BM25 has no database index — every stored field
+is encrypted at rest, so it decrypts and scores the entire in-scope
+corpus on every call, unlike vector search's HNSW-indexed lookups. Beyond
+the existing global `HUPI_ENABLE_KEYWORD_SEARCH` switch, each retrieval
+call also picks one of three tiers for the scope it's running in, based
+on that scope's own real corpus size (`scope_corpus_size`, refreshed once
+per day by consolidation for any scope with new episodes that day):
+**full** (today's unrestricted scan, below `keywordSearchNarrowThreshold`),
+**narrowed** (above that threshold: summary keyword search is narrowed to
+summaries whose `entities_touched` overlaps a stage-1-matched entity —
+falling back to a full scan when no entity matched, so a rare term with
+no entity anchor is never silently dropped), or **disabled** (above
+`keywordSearchDisableThreshold`: keyword search skipped entirely for that
+scope). `hupi_keyword_search_tier_total` (labeled `full`/`narrowed`/
+`disabled`, no scope-owner label) gives a real, deployment-wide
+distribution to calibrate both thresholds against.
+
 #### 2.2.5 Timeframe hard filter + temporal relevance boost
 
 `resolveQueryTimeframe` recognizes a small fixed set of relative-time
@@ -631,6 +648,8 @@ doc comment in source for the full, dated reasoning per rule.
 | `defaultMaxVectorResults` | 5 | `HUPI_MAX_VECTOR_RESULTS` | Reasoned |
 | `graphWalkMaxHops` / `-MaxResults` | 2 / 10 | `HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK` (off by default) | Measured: no benefit on either public benchmark |
 | `keywordSearchEnabled` | on | `HUPI_ENABLE_KEYWORD_SEARCH=false` | — |
+| `keywordSearchNarrowThreshold` | 500 (combined episode+summary count) | `HUPI_KEYWORD_SEARCH_NARROW_THRESHOLD` | Reasoned, not yet measured |
+| `keywordSearchDisableThreshold` | 3,000 (combined episode+summary count) | `HUPI_KEYWORD_SEARCH_DISABLE_THRESHOLD` | Reasoned, not yet measured |
 | `semanticFactRankingEnabled` | on | `HUPI_ENABLE_SEMANTIC_FACT_RANKING=false` | — |
 
 Every "measured" row's real numbers live inline in the relevant source
