@@ -10,6 +10,10 @@ metadata:
     {{- include "hupi.labels" . | nindent 4 }}
 spec:
   schedule: {{ .Values.selfcheck.schedule | quote }}
+  # Same reasoning as cronjob-consolidate.yaml's own comment: no benefit
+  # to two overlapping runs, and K8s's own default (Allow) has no reason
+  # to be relied on here either.
+  concurrencyPolicy: Forbid
   jobTemplate:
     spec:
       backoffLimit: 0
@@ -38,6 +42,8 @@ spec:
                   mountPath: /app/config/probes.yaml
                   subPath: probes.yaml
                   readOnly: true
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
           volumes:
             - name: providers-config
               configMap:

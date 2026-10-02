@@ -86,7 +86,23 @@ ingress:
   host: hupi.example.com
   annotations: {}
 
-resources: {}
+# Applied to every container this chart creates (gateway, both cronjobs,
+# admin UI) — real defaults, not an empty placeholder, so a fresh install
+# never ships with the scheduler holding no guarantee and no container
+# capped against a runaway neighbor. Sized for the gateway's own
+# request-shaped workload (short-lived, I/O-bound waiting on Postgres/the
+# LLM provider, not CPU-heavy) — the cronjobs run far less often and do
+# similar per-request work, so the same numbers are a reasonable shared
+# default rather than a dedicated value per workload. Override per
+# environment once you have real usage data; this is a safe starting
+# point, not a calibrated one.
+resources:
+  requests:
+    cpu: "250m"
+    memory: "256Mi"
+  limits:
+    cpu: "1"
+    memory: "512Mi"
 
 # Nightly consolidation + weekly/monthly/yearly rollups (no separate
 # schedule for rollups — cmd/hupi-consolidate computes those itself, see
