@@ -587,6 +587,7 @@ The full set of hooks, all following this pattern:
 |---|---|
 | "What happens when a chat request comes in?" | [API_REFERENCE.md](API_REFERENCE.md) |
 | "Why does retrieval behave this way?" | [ARCHITECTURE.md § Retrieval Engine](../ARCHITECTURE.md), [HOW_IT_WORKS.md §4](HOW_IT_WORKS.md) |
+| "What's the exact prompt text for grounding/consolidation/RRF/etc., and what's the real measured threshold behind a given number?" | [PROCESS_REFERENCE.md](PROCESS_REFERENCE.md) |
 | "What's the record schema (episode/summary/entity)?" | [MEMORY_FORMAT.md](MEMORY_FORMAT.md) |
 | "How are uploaded files/images turned into memory?" | [ARCHITECTURE.md § Attachments](../ARCHITECTURE.md), [HOW_IT_WORKS.md §3](HOW_IT_WORKS.md), `internal/ingest/`, `internal/gateway/attachments.go` |
 | "Is X actually implemented, or just designed?" | [DESIGN_VS_BUILT.md](DESIGN_VS_BUILT.md) |

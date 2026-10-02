@@ -290,16 +290,23 @@ already surface errors clearly). Inline Edit and Multi-File Edit are built
 on the same `streamChat`/`chat` helpers but, as detailed in Part 2, don't
 wire in cancellation the way the other two surfaces do.
 
-The `@hupi` chat participant also resolves `vscode.ChatRequest.references`
-(VS Code's native attach-file/image/drag-drop/`#file:` mechanism) into
-HUPI's `attachments` wire shape — `resolveAttachments`
-(`chatParticipant.ts`) reads each referenced file via
-`workspace.fs.readFile`, routes by extension to `"image"` or `"document"`,
-and skips (with a visible message) anything over an 8 MiB client-side cap
-mirroring the server's own. This is distinct from the always-on file-
-context attachment above: that one inlines the active editor's visible
-text automatically; this one only fires when the user explicitly attaches
-something, and is sent as a structured attachment, not inlined text.
+Both the `@hupi` chat participant and the dedicated sidebar now resolve
+user-attached files/images into HUPI's `attachments` wire shape, via two
+independent mechanisms that converge on the same shape. `@hupi` resolves
+`vscode.ChatRequest.references` (VS Code's native attach-file/image/
+drag-drop/`#file:` mechanism) — `resolveAttachments` (`chatParticipant.ts`)
+reads each referenced file via `workspace.fs.readFile`. The sidebar has no
+such native API to lean on (it's HUPI's own webview, not VS Code's Chat
+view), so it implements its own: a 📎 attach button plus drag-and-drop
+directly onto the input row, reading files client-side in the browser via
+`File`/`FileReader` (`src/webview/chat.ts`), forwarded to the extension
+host over the existing postMessage protocol. Both route by extension to
+`"image"` or `"document"` and skip (with a visible message) anything over
+an 8 MiB client-side cap mirroring the server's own. This is distinct from
+the always-on file-context attachment above: that one inlines the active
+editor's visible text automatically; attachments only fire when the user
+explicitly attaches something, and are sent as structured `attachments`,
+not inlined text.
 
 ---
 
