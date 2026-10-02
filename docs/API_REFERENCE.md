@@ -82,9 +82,25 @@ needed (Tier 1/2 mode).
   "messages": [{"role": "user", "content": "..."}],
   "stream": false,
   "temperature": 0.7,
-  "max_tokens": 1024
+  "max_tokens": 1024,
+  "attachments": [
+    {"type": "document", "filename": "resume.pdf", "content_type": "application/pdf", "data": "<base64>"},
+    {"type": "image", "filename": "vacation.jpg", "content_type": "image/jpeg", "data": "<base64>"}
+  ]
 }
 ```
+
+`attachments` is optional and additive — absent/`nil` is byte-for-byte
+unchanged behavior for every existing client. Each entry is `type:
+"document"|"image"`, raw bytes base64-encoded in `data`. A `document`
+(`.txt`/`.docx`/`.pdf`, sniffed from magic bytes, not from
+`filename`/`content_type`) is extracted to plain text; an `image`
+(`content_type` must be one of `image/png`, `image/jpeg`, `image/webp`,
+`image/gif`) is captioned by the configured vision provider. Both are
+merged, with a provenance marker, into the last user message's content
+before retrieval's query is built — see ARCHITECTURE.md § Attachments.
+Capped at 5 attachments per request and 8 MiB per attachment (checked
+after base64 decode, before any parsing/upstream call).
 
 **Optional header**: `X-Hupi-Memory: off` — bypasses retrieval entirely
 for this one request (not even the anchor is injected).
@@ -98,9 +114,16 @@ for this one request (not even the anchor is injected).
   "created": 1234567890,
   "model": "gpt-4.1",
   "choices": [{"index": 0, "message": {"role": "assistant", "content": "..."}, "finish_reason": "stop"}],
-  "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+  "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+  "hupi_attachment_warnings": ["resume.pdf: no extractable text (scanned/image-only PDF?)"]
 }
 ```
+
+`hupi_attachment_warnings` is only present when at least one attachment
+degraded (failed to extract/caption) rather than failing the whole
+request — same additive pattern as `hupi_citations`
+(`X-Hupi-Explain`). On a streamed response it appears only on the
+terminal chunk.
 
 If `"stream": true`, the response is `text/event-stream` — standard
 OpenAI-shaped `data: {...}` chunks, terminated by `data: [DONE]`.
@@ -110,22 +133,24 @@ OpenAI-shaped `data: {...}` chunks, terminated by `data: [DONE]`.
 | Code | When |
 |---|---|
 | 200 | Success (streaming or not) |
-| 400 | Malformed JSON body, or `messages` is empty |
+| 400 | Malformed JSON body, `messages` is empty, an invalid message `role`, or a malformed `attachments` entry (more than 5, over 8 MiB, bad base64, disallowed image MIME, or attachments present with no user message to attach them to) |
 | 401 | `HUPI_REQUIRE_AUTH=true` and the `Authorization` header is missing or the key is invalid |
 | 405 | Any method other than POST |
+| 413 | Request body exceeds the configured size limit (`HUPI_MAX_REQUEST_BODY_BYTES`, default 20 MiB) |
 | 500 | The response writer doesn't support streaming (should not happen in practice — `net/http`'s default writer does) |
 | 502 | The upstream LLM provider call itself failed |
 
 **Call chain**:
 
-1. `gateway.Handler.HandleChatCompletions` (`internal/gateway/handler.go:156`) — method check, then `h.resolveScope(r)`.
-2. `resolveScope` (`handler.go:264`) -> `resolveIdentity` (`handler.go:247`):
+1. `gateway.Handler.HandleChatCompletions` (`internal/gateway/handler.go:247`) — method check, then `h.resolveScope(r)`.
+2. `resolveScope` (`handler.go:410`) -> `resolveIdentity` (`handler.go:385`):
    - `h.Auth == nil` -> `identity.Identity{UserID: identity.DefaultUserID}`.
    - else: `bearerToken(r)` extracts the header; `h.Auth.Resolve(ctx, token)` -> `auth.Store.Resolve` (`internal/auth/auth.go:59`) — `SELECT user_id FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL`, then `SELECT team_id FROM team_members WHERE user_id = $1`.
    - `resolveScope` returns `identity.PrivateScope()` — both `actingUser` and `workspace` are this same value for the private route.
-3. `handleChatCompletionsScoped(w, r, scope, scope)` (`handler.go:194`):
-   1. Decode JSON into `chatCompletionRequest`; validate `messages` non-empty.
-   2. Unless `X-Hupi-Memory: off`: `h.Retriever.Retrieve(ctx, actingUser, workspace, messages)` — the concrete implementation is `store.Store.Retrieve` (`internal/store/retrieve.go:59`):
+3. `handleChatCompletionsScoped(w, r, scope, scope)` (`handler.go:261`):
+   1. Wraps `r.Body` in `http.MaxBytesReader(w, r.Body, maxRequestBodyBytes())` (`handler.go:31`) before decoding — an oversized body maps to `413`, distinct from the generic `400` a decode error otherwise gets.
+   2. Decode JSON into `chatCompletionRequest`; validate `messages` non-empty and every message's `role` is valid (`provider.Role.Valid()`).
+   3. Unless `X-Hupi-Memory: off`: `h.Retriever.Retrieve(ctx, actingUser, workspace, messages)` — the concrete implementation is `store.Store.Retrieve` (`internal/store/retrieve.go:59`) — **run against the original, unmerged messages**, so a turn's retrieval query doesn't balloon with a document's full extracted text:
       - `dbscope.Run(ctx, s.db, actingUser, workspace, fn)` (`internal/dbscope/dbscope.go`) — opens a transaction, sets 4 RLS session variables.
       - `buildAnchor(ctx, tx, actingUser, workspace)` — `SELECT` the `self_model` entity scoped to `actingUser` (decrypted via `s.keys.GetOrCreate(ctx, actingUser)` -> `crypto.KeyStore.GetOrCreate`, `internal/crypto/keystore.go`), and the latest `daily` summary's period scoped to `workspace`.
       - If the message is non-empty: `stage1EntityMatches` (`retrieve.go:293`) — a `SELECT` over `entities` scoped to `workspace`, matched by substring against the message text.
@@ -137,15 +162,20 @@ OpenAI-shaped `data: {...}` chunks, terminated by `data: [DONE]`.
       - A second `dbscope.Run(ctx, s.db, workspace, workspace, fn)`: `vectorSearchSummaries` and `vectorSearchEpisodes` (`retrieve.go:295`, `:347`) — `pgvector` cosine-distance queries, each decrypting matches above the similarity threshold.
       - This is `Store.retrieve` — the exported `Store.Retrieve` wrapping it then opens a third, separate `dbscope.Run(actingUser, workspace, fn)` to `audit.Write` a `retrieve` event (`event_type`, `actor = actingUser.Owner`, gate + ref count in `detail`) — best-effort, a failed audit write logs but doesn't fail the turn (docs/GAP_CLOSURE_PLAN.md §4.3).
       - Returns `gateway.RetrievalResult{Gate, ContextMessage, Refs}`.
-   3. If `ContextMessage` is non-empty, prepend it as a `system`-role message.
-   4. `resolveProvider(req.Model)` (`handler.go:309`) — `h.Registry.Named(model)` if it matches a configured profile name, else `h.Registry.Chat()` (`provider.Registry`, `internal/provider/registry.go`).
-   5. If `req.Stream`: `handleStream(...)` (`handler.go:449`), else `handleNonStream(...)` (`handler.go:392`).
+   4. If `ContextMessage` is non-empty, prepend it as a `system`-role message.
+   5. If `req.Attachments` is non-empty: `h.mergeAttachments(ctx, messages, req.Attachments)` (`internal/gateway/attachments.go`) — validates every attachment first (type, base64, size cap, image MIME allowlist; any failure here is the `400` above), then processes each concurrently:
+      - `document` -> `ingest.Extract` (`internal/ingest/ingest.go`) — sniffs magic bytes (`%PDF-`, a zip signature with a `word/document.xml` entry, else plain text/UTF-8 repair), dispatches to the matching extractor, under a 10s timeout with panic recovery (one malformed attachment can't crash the shared gateway process).
+      - `image` -> `h.Registry.Vision().(provider.VisionCapable).DescribeImage(ctx, provider.ImageInput{...}, instruction)` — **external network call** to `active_vision_provider` (falls back to `active_chat_provider` if unset), under a 20s timeout.
+      - Each result is appended to the **last user message's** content with a provenance marker (`[Attached file: resume.pdf]...[End of attached file: resume.pdf]` / `[Shared image: vacation.jpg]...`); a per-attachment extraction/captioning failure degrades to a placeholder marker plus an entry in the returned warnings list, never a failed request.
+      - Because this mutates the same `[]provider.Message` already threaded through the rest of the request, every step below (capture, embedding, consolidation) needs no further changes — file/image content is just more characters in the one captured input string.
+   6. `resolveProvider(req.Model)` (`handler.go:434`) — `h.Registry.Named(model)` if it matches a configured profile name, else `h.Registry.Chat()` (`provider.Registry`, `internal/provider/registry.go`).
+   7. If `req.Stream`: `handleStream(...)` (`handler.go:598`), else `handleNonStream(...)` (`handler.go:504`).
 4. **`handleNonStream`**:
    1. `target.ChatCompletion(ctx, provider.ChatRequest{...})` — **external network call** to the vendor API (`provider.OpenAICompat.ChatCompletion` or `provider.Anthropic.ChatCompletion`).
-   2. `buildEpisode(...)` (`handler.go:538`) — computes `estimateImportance` (`internal/gateway/importance.go`), `hashText` (`internal/gateway/hash.go`), a new id via `newEpisodeID` (`internal/gateway/id.go`).
+   2. `buildEpisode(...)` (`handler.go:723`) — computes `estimateImportance` (`internal/gateway/importance.go`), `hashText` (`internal/gateway/hash.go`), a new id via `newEpisodeID` (`internal/gateway/id.go`) — against the attachment-merged message content, so the captured episode (and everything consolidation later derives from it) includes the extracted/captioned text.
    3. `h.Capturer.Capture(ctx, scope, ep)` -> `store.Store.Capture` (`internal/store/capture.go:22`): resolves the scope's encryptor, encrypts `input_text`/`output_text`, `dbscope.Run(scope, scope)` -> `INSERT INTO episodes (...)`, then (same transaction) `audit.Write` a `capture` event — `actor = ep.ActorUserID` (the individual team member for a team-routed request, distinct from `scope` which is the team's shared workspace — see `handleChatCompletionsScoped` passing `actingUser.Owner` down as `actor`), `target_ref` = the new episode. **A capture failure here is logged, not surfaced to the client** — the answer still returns.
-   4. Encode and write the JSON response.
-5. **`handleStream`** (same steps 1-3, different transport): forwards each delta to the client via SSE as it arrives; buffers the full text; on stream end (or client disconnect / provider error, flagged as `truncated`), calls `Capture` the same way as above — the terminal `data: [DONE]` is deliberately held back until `Capture` returns, so "the turn is done" is signaled to the client only after the write attempt has happened, not before.
+   4. Encode and write the JSON response, including `hupi_attachment_warnings` if any attachment degraded.
+5. **`handleStream`** (same steps 1-3, different transport): forwards each delta to the client via SSE as it arrives; buffers the full text; on stream end (or client disconnect / provider error, flagged as `truncated`), calls `Capture` the same way as above — the terminal `data: [DONE]` is deliberately held back until `Capture` returns, so "the turn is done" is signaled to the client only after the write attempt has happened, not before. `hupi_attachment_warnings`, if any, rides on that terminal chunk.
 
 ---
 
@@ -208,7 +238,7 @@ user from losing, unlike a chat turn.
 
 | Route | Auth | Success | Client errors | Server/upstream errors |
 |---|---|---|---|---|
-| `POST /v1/chat/completions` | optional | 200 | 400, 401 | 500, 502 |
+| `POST /v1/chat/completions` | optional | 200 | 400, 401, 413 | 500, 502 |
 | `POST /v1/feedback` | optional | 201 | 400, 401 | 500 |
 
 (Team-scoped routes aren't part of this OSS build — see the note at the
@@ -216,14 +246,18 @@ top of this document.)
 
 ## External calls made per route
 
-Every route can make 0-3 outbound network calls, none of them wrapped in
+Every route can make 0-4 outbound network calls, none of them wrapped in
 an open database transaction (`docs/HARDENING_PLAN.md` D3):
 
 | Call | Made when | Provider role |
 |---|---|---|
+| Image captioning | Once per image attachment, concurrently | `active_vision_provider` (falls back to `active_chat_provider` if unset) |
 | Embedding | Stage-1 pre-check found any signal at all | `active_embedding_provider` |
 | Chat completion | Always (the point of the request) | `active_chat_provider`, or a named profile if `model` matched one |
 | — | (Consolidation's LLM/grounding calls happen entirely outside the HTTP path — see `docs/CODE_GUIDE.md §5`) | |
+
+(Document attachments — `.txt`/`.docx`/`.pdf` — make no network call at
+all; extraction via `internal/ingest` is pure local parsing.)
 
 ## Non-HTTP triggers
 

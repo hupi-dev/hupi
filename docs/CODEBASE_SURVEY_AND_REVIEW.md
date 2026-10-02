@@ -57,6 +57,19 @@ this pass re-checks the narrower shape it actually helps with before paying
 for its own extraction LLM call, and any failure anywhere in it degrades to
 no hint, never blocking the turn.
 
+Between context injection and the provider call, an optional `attachments`
+array (file/image content for this turn) is merged in: `mergeAttachments`
+(`internal/gateway/attachments.go`) converts each to plain text — document
+extraction via `internal/ingest` (`.txt`/`.docx`/`.pdf`), or an image
+caption via the configured vision provider — and appends it, provenance-
+marked, to the last user message's content, before retrieval's own query
+runs against the original messages. This is the one merge point both file
+types and images share; everything downstream (capture, consolidation,
+embedding, retrieval) is unmodified, since the merged text is just more
+characters in the one string those stages already handle. A per-attachment
+failure degrades to a placeholder marker rather than failing the turn,
+matching the same posture as the aggregation pass above.
+
 The provider call then happens two ways: non-streaming (`handleNonStream`,
 await the full response) or streaming (`handleStream`, SSE, draining a
 channel from the provider adapter). In both cases the response is captured
@@ -235,6 +248,18 @@ dimension mismatch at startup rather than as a `pgvector` write-path crash
 hours later. `selfcheck` runs hand-written probes against a live retriever
 and exits non-zero on any failure, surfaced purely through ordinary
 Kubernetes Job-failure alerting — no in-repo paging integration.
+`bootstrap.Load` also unconditionally registers `identity.DefaultUserID`
+in the `users` table (idempotent, every startup) — not just as part of
+the one-time legacy-wrapped-DEK migration path, which never fires on a
+genuinely fresh install and used to leave that row missing entirely,
+silently breaking `cmd/hupi-consolidate`'s scope discovery for it.
+
+Both adapters additionally implement `provider.VisionCapable`'s
+`DescribeImage` — a separate, narrow interface from `Provider` itself,
+used only to caption an image attachment (§2 above) before it's merged
+into a turn's captured text. `Registry.Vision()` is a fifth role, falling
+back to `Chat()` if `active_vision_provider` is unset in `providers.yaml`,
+the same fallback shape `Grounding()` already uses for `Consolidation()`.
 
 ## 9. Schema and migrations
 
@@ -264,6 +289,17 @@ debounced, and fail silently by design on error (the sidebar/participant
 already surface errors clearly). Inline Edit and Multi-File Edit are built
 on the same `streamChat`/`chat` helpers but, as detailed in Part 2, don't
 wire in cancellation the way the other two surfaces do.
+
+The `@hupi` chat participant also resolves `vscode.ChatRequest.references`
+(VS Code's native attach-file/image/drag-drop/`#file:` mechanism) into
+HUPI's `attachments` wire shape — `resolveAttachments`
+(`chatParticipant.ts`) reads each referenced file via
+`workspace.fs.readFile`, routes by extension to `"image"` or `"document"`,
+and skips (with a visible message) anything over an 8 MiB client-side cap
+mirroring the server's own. This is distinct from the always-on file-
+context attachment above: that one inlines the active editor's visible
+text automatically; this one only fires when the user explicitly attaches
+something, and is sent as a structured attachment, not inlined text.
 
 ---
 

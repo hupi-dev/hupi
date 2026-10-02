@@ -152,7 +152,10 @@ profile names, each with a real `api_base`, `api_key_env`, and `model`.
 These four roles can point at the same vendor or different ones — see
 [ARCHITECTURE.md § Provider abstraction](../ARCHITECTURE.md) for why
 `active_consolidation_provider` is deliberately kept separate and more
-stable than the one you chat with day to day.
+stable than the one you chat with day to day. A fifth role,
+`active_vision_provider`, is optional (falls back to `active_chat_provider`
+if unset) and only matters if you plan to send image attachments — see
+[ARCHITECTURE.md § Attachments](../ARCHITECTURE.md).
 
 **`active_embedding_provider` has a real constraint the other three
 don't**: every embedding column in the schema is a fixed `vector(1536)`,
