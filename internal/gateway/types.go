@@ -11,12 +11,28 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
+// chatAttachment is additive, optional file/image content attached to a
+// chat turn — see the file-ingestion design: converted to plain text
+// once, at ingest time (extracted document text, or a vision-model
+// caption), then merged into the last user message's content before
+// capture, so every downstream consumer (consolidation, embeddings,
+// retrieval) stays entirely string-typed with no changes required.
+// Type/ContentType/Filename are untrusted hints the gateway sniffs
+// against, not trusted alone — see internal/ingest's own dispatch.
+type chatAttachment struct {
+	Type        string `json:"type"` // "document" | "image"
+	Filename    string `json:"filename,omitempty"`
+	ContentType string `json:"content_type,omitempty"` // hint only; sniffed/verified server-side
+	Data        string `json:"data"`                   // base64-encoded raw bytes
+}
+
 type chatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Stream      bool          `json:"stream"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	MaxTokens   *int          `json:"max_tokens,omitempty"`
+	Model       string           `json:"model"`
+	Messages    []chatMessage    `json:"messages"`
+	Attachments []chatAttachment `json:"attachments,omitempty"` // new, additive — nil/absent is byte-for-byte unchanged behavior
+	Stream      bool             `json:"stream"`
+	Temperature *float64         `json:"temperature,omitempty"`
+	MaxTokens   *int             `json:"max_tokens,omitempty"`
 }
 
 type chatCompletionChoice struct {
@@ -43,6 +59,12 @@ type chatCompletionResponse struct {
 	// client simply never looks for, so its absence changes nothing for
 	// existing callers.
 	Citations []Citation `json:"hupi_citations,omitempty"`
+	// AttachmentWarnings carries a non-fatal note per attachment that
+	// didn't extract cleanly (e.g. "resume.pdf: no extractable text
+	// found — this PDF may be scanned/image-only") — same additive,
+	// omitempty pattern as Citations, only populated when at least one
+	// attachment produced a warning.
+	AttachmentWarnings []string `json:"hupi_attachment_warnings,omitempty"`
 }
 
 type chatCompletionChunkDelta struct {
@@ -80,4 +102,7 @@ type chatCompletionChunk struct {
 	// clients that stream instead of using the non-streamed response
 	// shape (docs/ANSWER_CITATIONS_PLAN.md).
 	Citations []Citation `json:"hupi_citations,omitempty"`
+	// AttachmentWarnings is only set on the terminal chunk, same
+	// additive pattern as Citations above.
+	AttachmentWarnings []string `json:"hupi_attachment_warnings,omitempty"`
 }

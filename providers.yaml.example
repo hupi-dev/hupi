@@ -12,6 +12,7 @@ active_chat_provider: work-openai               # what you talk to day to day
 active_consolidation_provider: personal-claude  # what writes your memory — change rarely, on purpose
 active_grounding_provider: groq-fast            # optional — omit this line to reuse the consolidation profile
 active_embedding_provider: local-ollama
+active_vision_provider: work-openai             # optional — omit to reuse active_chat_provider; used to caption image attachments
 
 providers:
   work-openai:
@@ -20,6 +21,7 @@ providers:
     api_base: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     model: gpt-4.1
+    vision_model: gpt-4.1       # optional — omit to reuse this profile's own model, if it's already vision-capable
 
   personal-claude:
     kind: anthropic
