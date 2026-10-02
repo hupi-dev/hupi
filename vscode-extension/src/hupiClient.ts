@@ -25,6 +25,31 @@ export interface ChatMessage {
   content: string;
 }
 
+// Mirrors internal/gateway/types.go's chatAttachment exactly — additive,
+// optional file/image content for a turn (internal/ingest extracts
+// document text; a vision-capable provider captions an image), merged
+// into the last user message's content server-side before capture. See
+// the file-ingestion design doc: this is never forwarded to the real
+// OpenAI/Anthropic API as-is, so it's a HUPI-only extension to the
+// request body, the same way hupi_citations is a HUPI-only extension to
+// the response.
+export interface ChatAttachment {
+  type: 'document' | 'image';
+  filename?: string;
+  content_type?: string;
+  /** Base64-encoded raw bytes. */
+  data: string;
+}
+
+// The OpenAI SDK's ChatCompletionCreateParams types are closed
+// interfaces with no index signature, so HUPI's own additive
+// `attachments` field (never part of the real OpenAI wire shape) needs
+// a cast to write, the same way HupiCitationsExtension needs one to
+// read — this is that cast's request-side counterpart.
+interface HupiAttachmentsExtension {
+  attachments?: ChatAttachment[];
+}
+
 // Mirrors internal/gateway/handler.go's Citation/identity.Ref exactly —
 // one entry per memory (summary/entity/episode) that fed an answer, with
 // the exact snippet that was injected into context for it. `used` is
@@ -50,6 +75,14 @@ export interface Citation {
 // shared shape, used at both read sites below.
 interface HupiCitationsExtension {
   hupi_citations?: Citation[];
+}
+
+// Same cast-to-read pattern as HupiCitationsExtension, for the other
+// additive response field: a non-fatal note per attachment that didn't
+// extract/caption cleanly (internal/gateway/types.go's
+// chatCompletionResponse.AttachmentWarnings).
+interface HupiAttachmentWarningsExtension {
+  hupi_attachment_warnings?: string[];
 }
 
 /**
@@ -107,6 +140,14 @@ export interface StreamChatOptions {
    *  server actually included citations (X-Hupi-Explain was set and the
    *  server does not just come back empty). */
   onCitations?: (citations: Citation[]) => void;
+  /** File/image content for this turn — see ChatAttachment's own doc
+   *  comment. Omitted/undefined is byte-for-byte unchanged behavior. */
+  attachments?: ChatAttachment[];
+  /** Called at most once, after streaming completes, only when at least
+   *  one attachment didn't extract/caption cleanly (see
+   *  internal/gateway/attachments.go) — e.g. a scanned/image-only PDF,
+   *  or a vision provider timeout. Never called for a clean turn. */
+  onAttachmentWarnings?: (warnings: string[]) => void;
 }
 
 /**
@@ -116,18 +157,17 @@ export interface StreamChatOptions {
  * onDelta calls and use the return value.
  */
 export async function streamChat(client: OpenAI, opts: StreamChatOptions): Promise<string> {
-  const stream = await client.chat.completions.create(
-    {
-      model: opts.model,
-      messages: opts.messages,
-      stream: true,
-    },
-    {
-      signal: opts.signal,
-      timeout: opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-      headers: opts.explain ? { 'X-Hupi-Explain': opts.explain } : undefined,
-    },
-  );
+  const body: OpenAI.ChatCompletionCreateParamsStreaming & HupiAttachmentsExtension = {
+    model: opts.model,
+    messages: opts.messages,
+    stream: true,
+    attachments: opts.attachments,
+  };
+  const stream = await client.chat.completions.create(body, {
+    signal: opts.signal,
+    timeout: opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    headers: opts.explain ? { 'X-Hupi-Explain': opts.explain } : undefined,
+  });
 
   let full = '';
   for await (const chunk of stream) {
@@ -141,6 +181,10 @@ export async function streamChat(client: OpenAI, opts: StreamChatOptions): Promi
     const citations = (chunk as unknown as HupiCitationsExtension).hupi_citations;
     if (citations && citations.length > 0) {
       opts.onCitations?.(citations);
+    }
+    const warnings = (chunk as unknown as HupiAttachmentWarningsExtension).hupi_attachment_warnings;
+    if (warnings && warnings.length > 0) {
+      opts.onAttachmentWarnings?.(warnings);
     }
   }
   return full;
@@ -163,21 +207,29 @@ export interface ChatOptions {
    *  opt-outs, ARCHITECTURE.md § Capture) for a request that shouldn't be
    *  retrieved-from or written to memory at all. */
   headers?: Record<string, string>;
+  /** File/image content for this turn — see ChatAttachment's own doc
+   *  comment. Not used by today's callers (multi-file edit, inline
+   *  completions), but plumbed through for API symmetry with
+   *  StreamChatOptions. */
+  attachments?: ChatAttachment[];
 }
 
 /** Non-streamed variant — used by multi-file edit (needs the whole
  *  response parsed at once anyway) and inline completions (a single short
  *  ghost-text suggestion, no incremental rendering to do). */
 export async function chat(client: OpenAI, opts: ChatOptions): Promise<string> {
-  const res = await client.chat.completions.create(
-    {
-      model: opts.model,
-      messages: opts.messages,
-      stream: false,
-      max_tokens: opts.maxTokens,
-      temperature: opts.temperature,
-    },
-    { signal: opts.signal, timeout: opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, headers: opts.headers },
-  );
+  const body: OpenAI.ChatCompletionCreateParamsNonStreaming & HupiAttachmentsExtension = {
+    model: opts.model,
+    messages: opts.messages,
+    stream: false,
+    max_tokens: opts.maxTokens,
+    temperature: opts.temperature,
+    attachments: opts.attachments,
+  };
+  const res = await client.chat.completions.create(body, {
+    signal: opts.signal,
+    timeout: opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    headers: opts.headers,
+  });
   return res.choices[0]?.message?.content ?? '';
 }

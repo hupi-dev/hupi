@@ -1,8 +1,93 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
-import { createClient, streamChat, type ChatMessage, type Citation } from './hupiClient';
+import { createClient, streamChat, type ChatAttachment, type ChatMessage, type Citation } from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
 import { currentFileContext } from './chatViewProvider';
+
+// Mirrors internal/gateway/attachments.go's maxAttachmentBytes exactly —
+// rejecting an oversized file here, with a friendly message, is cheaper
+// than letting the server reject the whole request with a 400 after a
+// real network round trip.
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+
+// Extensions routed as `type: "image"` (captioned by a vision-capable
+// provider server-side, internal/gateway/attachments.go's
+// describeImageAttachment) — mirrors
+// internal/gateway/attachments.go's allowedImageMIME. Anything else
+// readable as a file is sent as `type: "document"` and left to
+// internal/ingest's own format sniffing/graceful-degradation (a
+// genuinely unsupported binary surfaces as a warning, not a hard
+// failure) — no extension allowlist needed on this side for documents.
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+
+// VS Code's native Chat view lets a user attach a file (drag-and-drop,
+// the attach-file picker, or a "#file:" mention) — these show up in
+// ChatRequest.references, not in the prompt text itself. This resolves
+// the subset of references that point at a real file on disk into
+// HUPI's attachments wire shape; references VS Code uses for other
+// things (a code selection, a workspace symbol, a bare string) are not
+// file Uris and are silently left alone — they're not this extension's
+// concern, and the participant's own prompt-text handling above already
+// covers them where relevant.
+function referenceFileUri(value: unknown): vscode.Uri | undefined {
+  if (value instanceof vscode.Uri) {
+    return value;
+  }
+  if (value && typeof value === 'object' && 'uri' in (value as Record<string, unknown>)) {
+    const maybeUri = (value as { uri: unknown }).uri;
+    if (maybeUri instanceof vscode.Uri) {
+      return maybeUri;
+    }
+  }
+  return undefined;
+}
+
+interface ResolvedAttachments {
+  attachments: ChatAttachment[];
+  /** Filenames skipped for exceeding MAX_ATTACHMENT_BYTES — surfaced to
+   *  the user so a silently-dropped attachment isn't mysterious. */
+  tooLarge: string[];
+}
+
+async function resolveAttachments(references: readonly vscode.ChatPromptReference[]): Promise<ResolvedAttachments> {
+  const attachments: ChatAttachment[] = [];
+  const tooLarge: string[] = [];
+  for (const ref of references) {
+    const uri = referenceFileUri(ref.value);
+    if (!uri) {
+      continue;
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = await vscode.workspace.fs.readFile(uri);
+    } catch {
+      // Not a real readable file (e.g. a virtual/untitled document, or
+      // a reference whose Uri scheme isn't a filesystem) — not this
+      // resolver's concern, skip quietly.
+      continue;
+    }
+    const filename = path.basename(uri.fsPath);
+    if (bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+      tooLarge.push(filename);
+      continue;
+    }
+    const imageMime = IMAGE_MIME_BY_EXTENSION[path.extname(uri.fsPath).toLowerCase()];
+    attachments.push({
+      type: imageMime ? 'image' : 'document',
+      filename,
+      content_type: imageMime,
+      data: Buffer.from(bytes).toString('base64'),
+    });
+  }
+  return { attachments, tooLarge };
+}
 
 // Renders citations as plain markdown for VS Code's native chat view.
 // chatViewProvider.ts's own citations rendering lives in
@@ -87,6 +172,15 @@ async function handleChatRequest(
     stream.reference(fileContext.uri);
   }
 
+  // Files/images the user explicitly attached to this message (drag-
+  // and-drop, the attach-file picker, or a "#file:" mention) — distinct
+  // from fileContext above, which is the currently-open editor's
+  // content, sent inline as plain text rather than as an attachment.
+  const { attachments, tooLarge } = await resolveAttachments(request.references);
+  if (tooLarge.length > 0) {
+    stream.markdown(`\n\n_Skipped ${tooLarge.map((f) => `\`${f}\``).join(', ')} — exceeds the attachment size limit._`);
+  }
+
   let cfg;
   try {
     cfg = await loadConfig(context);
@@ -115,6 +209,9 @@ async function handleChatRequest(
       onDelta: (delta) => stream.markdown(delta),
       explain: citationsEnabled ? (deepCitations ? 'deep' : 'on') : undefined,
       onCitations: (citations) => stream.markdown(citationsMarkdown(citations)),
+      attachments: attachments.length > 0 ? attachments : undefined,
+      onAttachmentWarnings: (warnings) =>
+        stream.markdown(`\n\n_${warnings.join('; ')}_`),
     });
   } catch (err) {
     if (controller.signal.aborted) {

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.13
+
+- Added file/image attachments to `@hupi` (VS Code's native Chat view):
+  a file or image attached to a message (drag-and-drop, the attach-file
+  picker, or a `#file:` mention) is read from disk and sent as HUPI's
+  additive `attachments` field — the gateway extracts document text or
+  captions an image server-side and folds it into retrievable memory,
+  the same as the rest of the turn. Requires a HUPI gateway with
+  attachment-ingestion support; an older gateway simply ignores the
+  field (it's additive) and nothing changes. An attachment over 8 MB is
+  skipped client-side with an inline note; a file the server couldn't
+  extract/caption cleanly surfaces as a warning note under the answer.
+  The dedicated HUPI sidebar doesn't have attach-file UI yet — `@hupi`
+  only for this first pass, see docs/VSCODE_EXTENSION.md.
+
 ## 0.1.12
 
 - Added citations: the chat sidebar and `@hupi` now show a "Sources"
