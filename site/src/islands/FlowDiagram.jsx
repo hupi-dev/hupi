@@ -5,7 +5,7 @@ const STEPS = [
     key: 'capture',
     label: 'Capture',
     detail:
-      "Every conversation turn is durably recorded the moment the AI replies — encrypted, by default, forever, until you deliberately delete it.",
+      "Every conversation turn — plus any file or image you attach, extracted to text or captioned first — is durably recorded the moment the AI replies, encrypted by default, forever, until you deliberately delete it.",
   },
   {
     key: 'consolidate',
