@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_REQUEST_TIMEOUT_MS, chat, resolveBaseUrl, streamChat, type ChatMessage } from './hupiClient';
+import { DEFAULT_REQUEST_TIMEOUT_MS, chat, resolveBaseUrl, streamChat, type ChatAttachment, type ChatMessage } from './hupiClient';
 
 describe('resolveBaseUrl', () => {
   it('resolves the private route when no teamId is set', () => {
@@ -168,6 +168,65 @@ describe('streamChat', () => {
 
     expect(onCitations).not.toHaveBeenCalled();
   });
+
+  it('sends attachments on the request body when provided, and omits the field otherwise', async () => {
+    const create = vi.fn().mockResolvedValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { choices: [{ delta: { content: 'hi' } }] };
+      },
+    });
+    const client = { chat: { completions: { create } } };
+    const attachment: ChatAttachment = { type: 'document', filename: 'notes.txt', data: 'aGVsbG8=' };
+
+    await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+      attachments: [attachment],
+    });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ attachments: [attachment] }), expect.anything());
+
+    create.mockClear();
+    await streamChat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {} });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ attachments: undefined }), expect.anything());
+  });
+
+  it('calls onAttachmentWarnings once with the terminal chunk’s hupi_attachment_warnings, and not for chunks without it', async () => {
+    const create = vi.fn().mockResolvedValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { choices: [{ delta: { content: 'Hel' } }] };
+        yield {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          hupi_attachment_warnings: ['scan.pdf: no extractable text found'],
+        };
+      },
+    });
+    const client = { chat: { completions: { create } } };
+    const seen: string[][] = [];
+
+    await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+      onAttachmentWarnings: (w) => seen.push(w),
+    });
+
+    expect(seen).toEqual([['scan.pdf: no extractable text found']]);
+  });
+
+  it('never calls onAttachmentWarnings when the server never included hupi_attachment_warnings', async () => {
+    const client = fakeStreamClient(['a']);
+    const onAttachmentWarnings = vi.fn();
+
+    await streamChat(client as any, {
+      model: '',
+      messages: [{ role: 'user', content: 'hi' }],
+      onDelta: () => {},
+      onAttachmentWarnings,
+    });
+
+    expect(onAttachmentWarnings).not.toHaveBeenCalled();
+  });
 });
 
 describe('chat', () => {
@@ -224,5 +283,18 @@ describe('chat', () => {
     create.mockClear();
     await chat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }], timeoutMs: 15_000 });
     expect(create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeout: 15_000 }));
+  });
+
+  it('sends attachments on the request body when provided, and omits the field otherwise', async () => {
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: { content: 'hello' } }] });
+    const client = { chat: { completions: { create } } };
+    const attachment: ChatAttachment = { type: 'image', filename: 'photo.png', content_type: 'image/png', data: 'aGVsbG8=' };
+
+    await chat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }], attachments: [attachment] });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ attachments: [attachment] }), expect.anything());
+
+    create.mockClear();
+    await chat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }] });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ attachments: undefined }), expect.anything());
   });
 });

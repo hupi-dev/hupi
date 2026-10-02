@@ -134,6 +134,38 @@ export function __setTextDocuments(docs: unknown[]): void {
   textDocumentsValue = docs;
 }
 
+// ---- workspace.fs.readFile -------------------------------------------
+
+// Keyed by Uri.toString() — real workspace.fs.readFile resolves against
+// the real filesystem, which a unit test has no business touching; this
+// lets a test declare "this fake file exists with these bytes" instead.
+// A path with no entry here rejects, matching the real API's own
+// behavior for a file that doesn't exist (chatParticipant.ts's
+// resolveAttachments relies on exactly this to skip non-file
+// references).
+let fakeFiles = new Map<string, Uint8Array>();
+// Accepts anything Uri-shaped (just needs .toString()), not specifically
+// this file's own Uri class — a test file's `import * as vscode from
+// 'vscode'` type-checks against the real @types/vscode ambient
+// declarations regardless of this module's runtime alias (see this
+// file's header comment), so `vscode.Uri.file(...)` in a test is
+// statically the *real* Uri type even though it's this mock at
+// runtime. Typing these two functions structurally avoids every call
+// site needing an `as unknown as ...` cast to bridge that gap.
+interface UriLike {
+  toString(): string;
+}
+export function __setFileContents(uri: UriLike, bytes: Uint8Array): void {
+  fakeFiles.set(uri.toString(), bytes);
+}
+async function readFile(uri: UriLike): Promise<Uint8Array> {
+  const bytes = fakeFiles.get(uri.toString());
+  if (!bytes) {
+    throw new Error(`ENOENT: fake file not found, ${uri.toString()}`);
+  }
+  return bytes;
+}
+
 export const workspace = {
   getConfiguration,
   asRelativePath,
@@ -142,6 +174,7 @@ export const workspace = {
   get textDocuments() {
     return textDocumentsValue;
   },
+  fs: { readFile },
 };
 
 // ---- env.* ---------------------------------------------------------------
@@ -172,6 +205,13 @@ export class Uri {
   static joinPath(base: Uri, ...segments: string[]): Uri {
     const joined = [base.path.replace(/\/+$/, ''), ...segments].join('/');
     return new Uri(base.scheme, joined, `${base.scheme}:${joined}`);
+  }
+
+  /** Real vscode.Uri's own fsPath is the filesystem-native form of
+   *  .path (Windows backslashes, etc.) — this mock only runs tests on
+   *  POSIX, so they're identical here. */
+  get fsPath(): string {
+    return this.path;
   }
 
   toString(): string {
@@ -294,6 +334,7 @@ export function __resetVscodeMock(): void {
   activeTextEditorValue = undefined;
   tabGroupsAllValue = [];
   textDocumentsValue = [];
+  fakeFiles = new Map();
   registeredCommands.clear();
 
   showInputBox.mockReset().mockResolvedValue(undefined);

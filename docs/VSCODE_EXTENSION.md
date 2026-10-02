@@ -86,6 +86,24 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
   on, at the cost of one extra real LLM call per answer. A gateway
   without citation support simply omits the field — nothing breaks,
   there's just no Sources list.
+- **File/image attachments** (`@hupi` only for now — see below) — a file
+  or image attached to a message via VS Code's own native Chat view
+  (drag-and-drop, the attach-file picker, or a `#file:` mention) is read
+  from disk, base64-encoded, and sent as HUPI's additive `attachments`
+  field (ARCHITECTURE.md § Attachments). The gateway extracts document
+  text (`.txt`/`.docx`/`.pdf`) or captions an image once, server-side,
+  and folds it into the same captured/retrievable memory as the rest of
+  the turn — the extension does no extraction or captioning itself,
+  just reads the file and forwards its bytes. An attachment over 8 MB is
+  skipped client-side with an inline note rather than sent (mirrors the
+  gateway's own per-attachment cap); a file the server couldn't
+  extract/caption cleanly (e.g. a scanned PDF) surfaces as a warning
+  note under the answer, same posture as a citation. **Sidebar support
+  is a known gap**: the dedicated HUPI sidebar (`chatViewProvider.ts`)
+  has no attach-file UI yet — unlike `@hupi`, it doesn't get this for
+  free from a native VS Code API, and would need its own drag-and-drop/
+  file-picker UI in the webview, deliberately left for a follow-up
+  rather than bundled into this first pass.
 
 **Explicitly out of scope for v1** (a scope decision, not an oversight):
 

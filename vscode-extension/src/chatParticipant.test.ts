@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { __resetVscodeMock, __setActiveTextEditor, __setConfig, createChatParticipant } from './test/vscode-mock';
+import { __resetVscodeMock, __setActiveTextEditor, __setConfig, __setFileContents, createChatParticipant } from './test/vscode-mock';
 
 vi.mock('./hupiClient', () => ({
   createClient: vi.fn(),
@@ -25,8 +25,12 @@ const fakeCfg = { baseUrl: 'http://localhost:8787', model: '', teamId: '', apiKe
 // must be captured at call time, not read back from .mock.calls afterward.
 let messageSnapshots: { role: string; content: string }[][] = [];
 let explainSnapshots: (StreamChatOptions['explain'] | undefined)[] = [];
+let attachmentSnapshots: (StreamChatOptions['attachments'] | undefined)[] = [];
 function lastMessages(): { role: string; content: string }[] {
   return messageSnapshots[messageSnapshots.length - 1];
+}
+function lastAttachments(): StreamChatOptions['attachments'] | undefined {
+  return attachmentSnapshots[attachmentSnapshots.length - 1];
 }
 type StreamChatImpl = (client: never, opts: StreamChatOptions) => Promise<string>;
 
@@ -34,6 +38,7 @@ function mockStreamChat(impl: StreamChatImpl) {
   return vi.mocked(streamChat).mockImplementation((client, opts) => {
     messageSnapshots.push(opts.messages.map((m) => ({ role: m.role, content: m.content })));
     explainSnapshots.push(opts.explain);
+    attachmentSnapshots.push(opts.attachments);
     return impl(client as never, opts);
   });
 }
@@ -41,6 +46,7 @@ function mockStreamChatOnce(impl: StreamChatImpl) {
   return vi.mocked(streamChat).mockImplementationOnce((client, opts) => {
     messageSnapshots.push(opts.messages.map((m) => ({ role: m.role, content: m.content })));
     explainSnapshots.push(opts.explain);
+    attachmentSnapshots.push(opts.attachments);
     return impl(client as never, opts);
   });
 }
@@ -49,6 +55,7 @@ beforeEach(() => {
   __resetVscodeMock();
   messageSnapshots = [];
   explainSnapshots = [];
+  attachmentSnapshots = [];
   vi.mocked(loadConfig).mockReset().mockResolvedValue(fakeCfg);
   vi.mocked(createClient).mockReset().mockReturnValue({} as never);
   vi.mocked(streamChat).mockReset();
@@ -69,8 +76,8 @@ function fakeCancellationToken() {
   };
 }
 
-function fakeRequest(prompt: string): vscode.ChatRequest {
-  return { prompt } as unknown as vscode.ChatRequest;
+function fakeRequest(prompt: string, references: unknown[] = []): vscode.ChatRequest {
+  return { prompt, references } as unknown as vscode.ChatRequest;
 }
 
 function fakeStream() {
@@ -331,5 +338,98 @@ describe('registerChatParticipant', () => {
     expect(chunks[1]).toContain('summary');
     expect(chunks[1]).toContain('source text');
     expect(chunks[1]).toContain('✓ used');
+  });
+});
+
+describe('attachments', () => {
+  it('resolves a file reference into a document attachment', async () => {
+    mockStreamChat(async () => 'ok');
+    const uri = vscode.Uri.file('/workspace/resume.txt');
+    __setFileContents(uri, Buffer.from('Senior Go engineer, 5 years experience.'));
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream } = fakeStream();
+
+    await handler(fakeRequest('check my resume', [{ id: 'file', value: uri }]), { history: [] }, stream, token);
+
+    expect(lastAttachments()).toEqual([
+      { type: 'document', filename: 'resume.txt', content_type: undefined, data: Buffer.from('Senior Go engineer, 5 years experience.').toString('base64') },
+    ]);
+  });
+
+  it('resolves an image-extension file reference into an image attachment with the right content_type', async () => {
+    mockStreamChat(async () => 'ok');
+    const uri = vscode.Uri.file('/workspace/photo.png');
+    __setFileContents(uri, Buffer.from('fake-png-bytes'));
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream } = fakeStream();
+
+    await handler(fakeRequest('what is this?', [{ id: 'file', value: uri }]), { history: [] }, stream, token);
+
+    expect(lastAttachments()).toEqual([
+      { type: 'image', filename: 'photo.png', content_type: 'image/png', data: Buffer.from('fake-png-bytes').toString('base64') },
+    ]);
+  });
+
+  it('ignores references that are not file Uris (e.g. a code selection or bare string)', async () => {
+    mockStreamChat(async () => 'ok');
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream } = fakeStream();
+
+    await handler(
+      fakeRequest('hi', [
+        { id: 'selection', value: 'some bare string value' },
+        { id: 'symbol', value: { name: 'not a uri or location' } },
+      ]),
+      { history: [] },
+      stream,
+      token,
+    );
+
+    expect(lastAttachments()).toBeUndefined();
+  });
+
+  it('sends attachments: undefined (not an empty array) when there are no file references', async () => {
+    mockStreamChat(async () => 'ok');
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream } = fakeStream();
+
+    await handler(fakeRequest('hi'), { history: [] }, stream, token);
+
+    expect(lastAttachments()).toBeUndefined();
+  });
+
+  it('skips an oversized file and surfaces a warning in the response, without including it as an attachment', async () => {
+    mockStreamChat(async () => 'ok');
+    const uri = vscode.Uri.file('/workspace/huge.pdf');
+    __setFileContents(uri, new Uint8Array(8 * 1024 * 1024 + 1));
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream, chunks } = fakeStream();
+
+    await handler(fakeRequest('read this', [{ id: 'file', value: uri }]), { history: [] }, stream, token);
+
+    expect(lastAttachments()).toBeUndefined();
+    expect(chunks.some((c) => c.includes('huge.pdf') && c.includes('size limit'))).toBe(true);
+  });
+
+  it('renders attachment warnings returned by the server as markdown', async () => {
+    mockStreamChat(async (_client, opts) => {
+      opts.onDelta('here you go');
+      opts.onAttachmentWarnings?.(['scan.pdf: no extractable text found — this PDF may be scanned/image-only']);
+      return 'here you go';
+    });
+    const uri = vscode.Uri.file('/workspace/scan.pdf');
+    __setFileContents(uri, Buffer.from('%PDF-fake'));
+    const handler = registerAndGetHandler();
+    const { token } = fakeCancellationToken();
+    const { stream, chunks } = fakeStream();
+
+    await handler(fakeRequest('read this', [{ id: 'file', value: uri }]), { history: [] }, stream, token);
+
+    expect(chunks.some((c) => c.includes('no extractable text found'))).toBe(true);
   });
 });
