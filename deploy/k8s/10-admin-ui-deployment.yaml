@@ -40,6 +40,13 @@ spec:
             - name: providers-config
               mountPath: /app/config
               readOnly: true
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
       volumes:
         - name: providers-config
           configMap:
