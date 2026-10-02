@@ -119,12 +119,13 @@ func configPath() string {
 // provider.ProfileConfig/provider.Config so the YAML tags don't leak into
 // a package that has nothing to do with config file parsing.
 type rawProviderProfile struct {
-	Kind       string `yaml:"kind"`
-	Vendor     string `yaml:"vendor"`
-	BaseURL    string `yaml:"api_base"`
-	APIKeyEnv  string `yaml:"api_key_env"`
-	Model      string `yaml:"model"`
-	APIVersion string `yaml:"api_version"`
+	Kind        string `yaml:"kind"`
+	Vendor      string `yaml:"vendor"`
+	BaseURL     string `yaml:"api_base"`
+	APIKeyEnv   string `yaml:"api_key_env"`
+	Model       string `yaml:"model"`
+	APIVersion  string `yaml:"api_version"`
+	VisionModel string `yaml:"vision_model"` // optional, defaults to this profile's own model
 }
 
 type rawConfig struct {
@@ -132,6 +133,7 @@ type rawConfig struct {
 	ActiveConsolidationProvider string                        `yaml:"active_consolidation_provider"`
 	ActiveGroundingProvider     string                        `yaml:"active_grounding_provider"` // optional, defaults to consolidation's profile
 	ActiveEmbeddingProvider     string                        `yaml:"active_embedding_provider"`
+	ActiveVisionProvider        string                        `yaml:"active_vision_provider"` // optional, defaults to chat's profile
 	Providers                   map[string]rawProviderProfile `yaml:"providers"`
 }
 
@@ -150,6 +152,7 @@ func loadRegistry(path string) (*provider.Registry, error) {
 		ActiveConsolidationProvider: raw.ActiveConsolidationProvider,
 		ActiveGroundingProvider:     raw.ActiveGroundingProvider,
 		ActiveEmbeddingProvider:     raw.ActiveEmbeddingProvider,
+		ActiveVisionProvider:        raw.ActiveVisionProvider,
 		Providers:                   make(map[string]provider.ProfileConfig, len(raw.Providers)),
 	}
 	for name, p := range raw.Providers {
@@ -158,12 +161,13 @@ func loadRegistry(path string) (*provider.Registry, error) {
 			apiKey = os.Getenv(p.APIKeyEnv)
 		}
 		cfg.Providers[name] = provider.ProfileConfig{
-			Kind:       provider.Kind(p.Kind),
-			Vendor:     p.Vendor,
-			BaseURL:    p.BaseURL,
-			APIKey:     apiKey,
-			Model:      p.Model,
-			APIVersion: p.APIVersion,
+			Kind:        provider.Kind(p.Kind),
+			Vendor:      p.Vendor,
+			BaseURL:     p.BaseURL,
+			APIKey:      apiKey,
+			Model:       p.Model,
+			APIVersion:  p.APIVersion,
+			VisionModel: p.VisionModel,
 		}
 	}
 	return provider.NewRegistry(cfg)

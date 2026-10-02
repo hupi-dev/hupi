@@ -45,9 +45,10 @@ internal/
   crypto/                field encryption (Encryptor) + per-scope key management (KeyStore)
   dbscope/                RLS-aware scoped transaction helper (Querier, Run, SetSession)
   audit/                  single audit_log writer (Write, LogStandalone) used by store/consolidation/CLI tools
-  provider/               LLM vendor abstraction: Provider interface, OpenAICompat, Anthropic, Registry
+  provider/               LLM vendor abstraction: Provider interface, OpenAICompat, Anthropic, Registry, VisionCapable (image captioning)
+  ingest/                 pure-function file-attachment text extraction (Extract: .txt/.docx/.pdf -> plain text) — no DB/network, a leaf package like crypto/pgfmt
   auth/                   scope provisioning + operator credentials (this repo); real API-key resolution is the Tier 3 extension — see §6
-  gateway/                HTTP surface: Handler, request/response types, Retriever/Capturer/Authenticator interfaces
+  gateway/                HTTP surface: Handler, request/response types, Retriever/Capturer/Authenticator interfaces; attachments.go merges file/image attachments into the captured turn
   store/                  Postgres+pgvector implementation of Capturer/Retriever/Trace
   consolidation/          the nightly rollup engine (Runner)
   hpmf/                   HPMF read/write (export/import) + age packaging — MEMORY_FORMAT.md's implementation
@@ -81,11 +82,12 @@ shares.
 identity   (no deps)
 pgfmt      (no deps)
 provider   (no internal deps — only stdlib + net/http)
+ingest     (no internal deps — only stdlib + github.com/ledongthuc/pdf)
 
 crypto     -> identity
 dbscope    -> identity
 audit      -> identity, dbscope
-gateway    -> identity, provider
+gateway    -> identity, provider, ingest
 
 auth       -> identity, crypto
 store      -> identity, provider, crypto, dbscope, pgfmt, gateway, audit
@@ -138,16 +140,17 @@ ever needing to know Postgres exists.
 | `crypto` | AES-256-GCM field encryption; one or more keys per scope (versioned for rotation) | `Encryptor`, `KeyStore` (`GetOrCreate` = current version, `GetVersion` = a specific one, `CurrentVersion`, `CreateNextVersion`, `Evict`), `GenerateDEK`, `WrapDEK`/`UnwrapDEK`, `ErrKeyVersionNotFound` (sentinel a caller can `errors.Is` against to detect, and recover from, a version pruned out from under a concurrent reader — see `reembed.decryptWithRetry` below) |
 | `dbscope` | Open a transaction with RLS session variables set correctly | `Querier`, `SetSession`, `Run` |
 | `audit` | Single writer for every `audit_log` row, any event type, plus the read side | `Entry`, `Write`, `LogStandalone`, `Event*` constants, `Query`, `QueryFilter` (`TargetID` included, matched against `target_ref->>'id'` via a partial expression index, `schema/0020_audit_log_target_ref_index.sql`) |
-| `provider` | One interface per vendor wire format, not per vendor | `Provider`, `OpenAICompat`, `Anthropic`, `Registry`, `Role` (`Valid()` — checked in `handleChatCompletionsScoped` alongside the existing empty-messages check, same `FeedbackRating.valid()` style) |
+| `provider` | One interface per vendor wire format, not per vendor | `Provider`, `OpenAICompat`, `Anthropic`, `Registry`, `Role` (`Valid()` — checked in `handleChatCompletionsScoped` alongside the existing empty-messages check, same `FeedbackRating.valid()` style), `VisionCapable` (`DescribeImage` — a separate, narrow interface both adapters implement for image-attachment captioning, not a change to `Provider`/`Message`/`ChatRequest` themselves), `ImageInput` |
+| `ingest` | Convert one uploaded file's raw bytes to plain text, once, at ingest time | `Extract` (dispatches on sniffed magic bytes — `.txt`/`.docx`/`.pdf` — never on caller-supplied filename/content-type alone), `Attachment`, `Result` (`Text` + an optional non-fatal `Warning`, e.g. a scanned/image-only PDF with no extractable text layer) |
 | `auth` | Scope provisioning + operator credentials (this repo); real end-user/team auth is a separate, commercially-licensed extension — see §6 | `Store` (`CreateUser`, `CreateTeam`, `ListUsers`, `ListTeams`, `CreateOperator`, `ResolveOperator`, `ListOperators`, `RevokeOperator`); `TeamAuthenticator` interface + `NewTeamAuthenticator` hook (nil unless the Tier 3 extension is present) |
-| `gateway` | The HTTP surface + the interfaces storage must implement | `Handler`, `Retriever`, `Capturer`, `Authenticator`, `Episode`, `RetrievalResult` |
+| `gateway` | The HTTP surface + the interfaces storage must implement | `Handler`, `Retriever`, `Capturer`, `Authenticator`, `Episode`, `RetrievalResult`; `mergeAttachments` (`attachments.go`) — merges file/image attachments into the last user message's content before capture, via `internal/ingest` for documents and `provider.VisionCapable.DescribeImage` for images |
 | `store` | Postgres+pgvector implementation of retrieval/capture/trace | `Store` (`Retrieve`, `Capture`, `Trace`) |
 | `consolidation` | Nightly rollup: episodes -> grounded summaries | `Runner` (`RunDaily`, `RunRollup`, `Correct`) |
 | `hpmf` | Portable memory format read/write (MEMORY_FORMAT.md) + age packaging | `ExportScope`, `ExportBundle`, `ImportScope`, `PackAndEncrypt`, `DecryptAndUnpack`, `Manifest` |
 | `rotate` | Online, resumable per-scope key rotation | `Runner` (`Start`, `Continue`, `Status`, `Prune`), `MaxBatchSize` (5000, enforced by `clampBatchSize` at the top of `Continue` — a caller-requested batch above the cap is silently capped, non-positive is coerced to 1) |
 | `reembed` | Bulk re-embed a scope's summaries/high-importance episodes/entities/grounded key facts after an embedding-provider change | `Runner` (`Status`, `Continue`, `LogRun`) |
 | `selfcheck` | Run probes against a live `Retriever` | `Probe`, `Result`, `Run` |
-| `bootstrap` | Read config, connect Postgres, build the `KeyStore` | `Deps`, `Load` |
+| `bootstrap` | Read config, connect Postgres, build the `KeyStore`; register `identity.DefaultUserID` in `users` on every startup (idempotent — `ensureDefaultUser`, not just the one-time legacy-DEK migration path) | `Deps`, `Load` |
 | `demo` | Anonymous guest-session lifecycle (create/resolve/sweep), capped usage — backs the public hosted demo | `Store` (`CreateSession`, `Resolve`, `ConsolidateNow`, `Sweep`), `IPRateLimiter` |
 | `metrics` | Every Prometheus metric HUPI exposes at `/metrics`, plus a handler-wrapping helper | `InstrumentHandler`, `RetrievalGateTotal`, `AuthResolveTotal`, `ProviderCallDuration`, `ProviderCallErrorsTotal`, `CaptureTotal`, `CaptureDuration`, `ConsolidationRunsTotal`, `ConsolidationDuration`, `GroundingFactsTotal`, `RollupRunsTotal` |
 
@@ -211,7 +214,7 @@ API_REFERENCE.md, which is scoped to the main gateway.
 ### `cmd/hupi-consolidate` — nightly rollup
 
 1. `bootstrap.Load(ctx)` — config, DB, `KeyStore`.
-2. `loadActiveScopes(ctx, deps.DB)` (`cmd/hupi-consolidate/main.go`) — `select id from users` + `select id from teams`, returns one `identity.Scope` per row.
+2. `loadActiveScopes(ctx, deps.DB)` (`cmd/hupi-consolidate/main.go`) — `select id from users` + `select id from teams`, returns one `identity.Scope` per row. Relies on `bootstrap.Load`'s `ensureDefaultUser` having already registered `identity.DefaultUserID` — otherwise a fresh Tier 1/2 install's default-user episodes would be captured but never discovered here, silently never consolidated.
 3. For each scope, `runner.RunDaily(ctx, scope, date)` (`internal/consolidation/runner.go`):
    1. `dbscope.Run` -> `loadDailyEpisodes` -> `scanEpisodeSources` — loads and decrypts the day's `type='interaction'` episodes for that scope.
    2. If zero episodes: return, no-op.
@@ -585,6 +588,7 @@ The full set of hooks, all following this pattern:
 | "What happens when a chat request comes in?" | [API_REFERENCE.md](API_REFERENCE.md) |
 | "Why does retrieval behave this way?" | [ARCHITECTURE.md § Retrieval Engine](../ARCHITECTURE.md), [HOW_IT_WORKS.md §4](HOW_IT_WORKS.md) |
 | "What's the record schema (episode/summary/entity)?" | [MEMORY_FORMAT.md](MEMORY_FORMAT.md) |
+| "How are uploaded files/images turned into memory?" | [ARCHITECTURE.md § Attachments](../ARCHITECTURE.md), [HOW_IT_WORKS.md §3](HOW_IT_WORKS.md), `internal/ingest/`, `internal/gateway/attachments.go` |
 | "Is X actually implemented, or just designed?" | [DESIGN_VS_BUILT.md](DESIGN_VS_BUILT.md) |
 | "How does the multi-tenant/team model work?" | [TIER3_PLAN.md](TIER3_PLAN.md) |
 | "Why isn't Tier 3's code in this repo, and how does the build still work?" | §6 above, [ARCHITECTURE.md § Licensing and the open-core split](../ARCHITECTURE.md) |

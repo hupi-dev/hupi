@@ -110,6 +110,31 @@ func TestPerEpisodeFactPromptCoversAssistantGeneratedContent(t *testing.T) {
 	}
 }
 
+// TestSummarySystemPromptAndPerEpisodeFactPromptCoverFileImageAttachmentProvenance
+// is the file-ingestion feature's own provenance regression test —
+// content merged in from a document/image attachment (internal/gateway/
+// attachments.go's "[Attached file: ...]"/"[Shared image: ...]"
+// markers) must be attributed to the file/image, the same discipline
+// already applied to assistant-authored content, not reported as a bare
+// claim indistinguishable from something the user typed.
+func TestSummarySystemPromptAndPerEpisodeFactPromptCoverFileImageAttachmentProvenance(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"summarySystemPrompt":  summarySystemPrompt,
+		"perEpisodeFactPrompt": perEpisodeFactPrompt,
+	} {
+		for _, want := range []string{
+			`"[Attached file: resume.pdf]"`,
+			`"[Shared image: vacation.jpg]"`,
+			"not something the user typed",
+			"tag's own filename",
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s missing expected file/image attachment provenance guidance: %q", name, want)
+			}
+		}
+	}
+}
+
 // TestSummarySystemPromptAndPerEpisodeFactPromptWarnAgainstUnsupportedTemporalFraming
 // is a real regression test for 852ce960's grounding-stage rejection:
 // direct, repeated testing against the real grounding model showed it
