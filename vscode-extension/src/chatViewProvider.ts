@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { createClient, streamChat, type ChatMessage, type Citation } from './hupiClient';
+import { createClient, streamChat, type ChatAttachment, type ChatMessage, type Citation } from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
 
@@ -8,14 +8,17 @@ import { promptSignInRequired } from './oidcAuth';
 // rather than a shared module import, since the webview side (src/webview/chat.ts)
 // is a separate esbuild bundle that must never import `vscode` — duplicating
 // these few lines is cheaper than wiring a shared non-vscode types module.
-// Citation itself (hupiClient.ts) has no `vscode` dependency, so it's
-// imported directly rather than re-duplicated field-by-field here.
-type FromWebview = { type: 'send'; text: string } | { type: 'clear' };
+// Citation/ChatAttachment themselves (hupiClient.ts) have no `vscode`
+// dependency, so they're imported directly rather than re-duplicated
+// field-by-field here — this file (unlike src/webview/chat.ts) is
+// extension-host code, so importing hupiClient.ts is fine.
+type FromWebview = { type: 'send'; text: string; attachments?: ChatAttachment[] } | { type: 'clear' };
 type ToWebview =
   | { type: 'userEcho'; text: string }
   | { type: 'fileContext'; relativePath: string }
   | { type: 'delta'; text: string }
   | { type: 'citations'; items: Citation[] }
+  | { type: 'attachmentWarnings'; warnings: string[] }
   | { type: 'done' }
   | { type: 'error'; message: string };
 
@@ -91,7 +94,7 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'send') {
         this.inFlight?.abort();
-        await this.handleSend(message.text, webviewView.webview);
+        await this.handleSend(message.text, message.attachments, webviewView.webview);
       }
     });
   }
@@ -100,7 +103,7 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     void webview.postMessage(message);
   }
 
-  private async handleSend(text: string, webview: vscode.Webview): Promise<void> {
+  private async handleSend(text: string, attachments: ChatAttachment[] | undefined, webview: vscode.Webview): Promise<void> {
     const trimmed = text.trim();
     if (trimmed === '') {
       return;
@@ -143,6 +146,8 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
         onDelta: (delta) => this.post(webview, { type: 'delta', text: delta }),
         explain: citationsEnabled ? (deepCitations ? 'deep' : 'on') : undefined,
         onCitations: (items) => this.post(webview, { type: 'citations', items }),
+        attachments: attachments && attachments.length > 0 ? attachments : undefined,
+        onAttachmentWarnings: (warnings) => this.post(webview, { type: 'attachmentWarnings', warnings }),
       });
       this.post(webview, { type: 'done' });
     } catch (err) {
@@ -253,7 +258,45 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     .citations li { margin-bottom: 3px; }
     .citations .used { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); }
     .citations .unused { opacity: 0.7; }
-    #inputRow { display: flex; border-top: 1px solid var(--hupi-border); padding: 8px; gap: 6px; flex-shrink: 0; }
+    .attachmentWarning {
+      margin-top: 8px; padding-top: 6px;
+      border-top: 1px solid var(--hupi-border);
+      font-size: 11px; font-style: italic;
+      color: var(--vscode-descriptionForeground);
+    }
+    .transientNote {
+      margin: 0 8px 6px; padding: 4px 8px;
+      font-size: 11.5px; color: var(--vscode-descriptionForeground);
+      background: var(--hupi-card-bg); border: 1px solid var(--hupi-border);
+      border-radius: 4px;
+    }
+    #attachmentChips {
+      display: none; flex-wrap: wrap; gap: 6px;
+      margin: 0 8px 6px; flex-shrink: 0;
+    }
+    .attachmentChip {
+      display: flex; align-items: center; gap: 4px;
+      background: var(--hupi-card-bg); border: 1px solid var(--hupi-border);
+      border-radius: 12px; padding: 2px 4px 2px 8px; font-size: 11.5px;
+      max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    }
+    .attachmentChipRemove {
+      background: transparent; border: none; color: var(--vscode-descriptionForeground);
+      cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 50%;
+    }
+    .attachmentChipRemove:hover { background: var(--vscode-toolbar-hoverBackground, var(--hupi-border)); }
+    #inputRow {
+      display: flex; align-items: flex-end;
+      border-top: 1px solid var(--hupi-border); padding: 8px; gap: 6px; flex-shrink: 0;
+    }
+    #inputRow.dragOver { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -2px; }
+    #attachBtn {
+      display: flex; align-items: center; justify-content: center;
+      background: transparent; color: var(--vscode-foreground);
+      border: 1px solid var(--hupi-border); border-radius: 4px;
+      width: 28px; height: 28px; flex-shrink: 0; cursor: pointer;
+    }
+    #attachBtn:hover { background: var(--vscode-toolbar-hoverBackground, var(--hupi-card-bg)); }
     #input {
       flex: 1; resize: none;
       background: var(--vscode-input-background); color: var(--vscode-input-foreground);
@@ -277,9 +320,14 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     </button>
   </div>
   <div id="log">
-    <div id="empty">Ask about your code, or anything HUPI already remembers from past conversations.</div>
+    <div id="empty">Ask about your code, or anything HUPI already remembers from past conversations. Attach a file or image with the 📎 button or by dragging it in.</div>
   </div>
+  <div id="attachmentChips"></div>
   <div id="inputRow">
+    <button id="attachBtn" type="button" title="Attach a file or image">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.5 6.5 7 12a2.5 2.5 0 1 1-3.5-3.5l6-6a1.5 1.5 0 1 1 2 2.2l-5.6 5.6a.5.5 0 1 1-.7-.7l5-5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <input id="fileInput" type="file" multiple style="display:none" />
     <textarea id="input" rows="2" placeholder="Ask HUPI... (Enter to send, Shift+Enter for newline)"></textarea>
     <button id="send">Send</button>
   </div>

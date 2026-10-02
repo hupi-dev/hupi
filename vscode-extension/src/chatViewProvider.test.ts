@@ -308,4 +308,44 @@ describe('HupiChatViewProvider', () => {
 
     expect(explainSnapshots).toEqual(['deep']);
   });
+
+  it('forwards attachments from the webview to streamChat', async () => {
+    mockStreamChat(async () => 'reply');
+    const { send } = makeProvider();
+
+    const attachments = [{ type: 'document' as const, filename: 'resume.pdf', data: 'base64data' }];
+    await send({ type: 'send', text: 'summarize this', attachments });
+
+    expect(vi.mocked(streamChat).mock.calls[0][1].attachments).toEqual(attachments);
+  });
+
+  it('omits attachments entirely when none are sent', async () => {
+    mockStreamChat(async () => 'reply');
+    const { send } = makeProvider();
+
+    await send({ type: 'send', text: 'hi' });
+
+    expect(vi.mocked(streamChat).mock.calls[0][1].attachments).toBeUndefined();
+  });
+
+  it('posts attachmentWarnings to the webview when the server reports a degraded attachment', async () => {
+    mockStreamChat(async (_client, opts) => {
+      opts.onDelta('answer');
+      opts.onAttachmentWarnings?.(['resume.pdf: no extractable text (scanned/image-only PDF?)']);
+      return 'answer';
+    });
+    const { posted, send } = makeProvider();
+
+    await send({
+      type: 'send',
+      text: 'summarize this',
+      attachments: [{ type: 'document', filename: 'resume.pdf', data: 'base64data' }],
+    });
+
+    expect(posted).toEqual([
+      { type: 'delta', text: 'answer' },
+      { type: 'attachmentWarnings', warnings: ['resume.pdf: no extractable text (scanned/image-only PDF?)'] },
+      { type: 'done' },
+    ]);
+  });
 });

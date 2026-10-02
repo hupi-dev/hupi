@@ -86,24 +86,30 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
   on, at the cost of one extra real LLM call per answer. A gateway
   without citation support simply omits the field — nothing breaks,
   there's just no Sources list.
-- **File/image attachments** (`@hupi` only for now — see below) — a file
-  or image attached to a message via VS Code's own native Chat view
-  (drag-and-drop, the attach-file picker, or a `#file:` mention) is read
-  from disk, base64-encoded, and sent as HUPI's additive `attachments`
-  field (ARCHITECTURE.md § Attachments). The gateway extracts document
-  text (`.txt`/`.docx`/`.pdf`) or captions an image once, server-side,
-  and folds it into the same captured/retrievable memory as the rest of
-  the turn — the extension does no extraction or captioning itself,
-  just reads the file and forwards its bytes. An attachment over 8 MB is
-  skipped client-side with an inline note rather than sent (mirrors the
-  gateway's own per-attachment cap); a file the server couldn't
-  extract/caption cleanly (e.g. a scanned PDF) surfaces as a warning
-  note under the answer, same posture as a citation. **Sidebar support
-  is a known gap**: the dedicated HUPI sidebar (`chatViewProvider.ts`)
-  has no attach-file UI yet — unlike `@hupi`, it doesn't get this for
-  free from a native VS Code API, and would need its own drag-and-drop/
-  file-picker UI in the webview, deliberately left for a follow-up
-  rather than bundled into this first pass.
+- **File/image attachments**, both the chat sidebar and `@hupi` — a file
+  or image attached to a message is read, base64-encoded, and sent as
+  HUPI's additive `attachments` field (ARCHITECTURE.md § Attachments).
+  The gateway extracts document text (`.txt`/`.docx`/`.pdf`) or captions
+  an image once, server-side, and folds it into the same
+  captured/retrievable memory as the rest of the turn — the extension
+  does no extraction or captioning itself, just reads the file and
+  forwards its bytes. An attachment over 8 MB is skipped client-side
+  with an inline note rather than sent (mirrors the gateway's own
+  per-attachment cap); a file the server couldn't extract/caption
+  cleanly (e.g. a scanned PDF) surfaces as a warning note under the
+  answer, same posture as a citation.
+  - **`@hupi`** (VS Code's own native Chat view) gets this for free from
+    a native VS Code API — drag-and-drop, the attach-file picker, or a
+    `#file:` mention.
+  - **The dedicated HUPI sidebar** has its own attach button (📎, next to
+    the input box) plus drag-and-drop directly onto the input row —
+    read client-side in the webview via the browser's own File/FileReader
+    API (`src/webview/chat.ts`), base64-encoded there, and forwarded to
+    the extension host over the existing postMessage protocol as part of
+    the `'send'` message. Attached files show as removable chips above
+    the input before sending, and as a `📎 attached: ...` note on the
+    sent message afterward, mirroring the existing active-file-context
+    badge.
 
 **Explicitly out of scope for v1** (a scope decision, not an oversight):
 
@@ -241,7 +247,9 @@ section for how a new version actually ships.
 
 - An activity bar icon opens the **Chat** panel — a message log plus an
   input box. Responses stream in and render as markdown (code blocks
-  included).
+  included). A 📎 button next to the input (or dragging a file straight
+  onto it) attaches a file or image for that turn — shown as a removable
+  chip before you send.
 - `@hupi <message>` also works from VS Code's own **Chat** view
   (`Ctrl+Alt+I`/`Cmd+Alt+I`), backed by the same gateway — useful
   alongside other chat participants/tools already living in that view.

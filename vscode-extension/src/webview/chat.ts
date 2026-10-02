@@ -20,13 +20,58 @@ interface Citation {
   used?: boolean;
 }
 
+// Mirrors hupiClient.ts's ChatAttachment exactly — duplicated rather than
+// imported for the same reason Citation/CitationRef are above: this file
+// must never import anything that pulls in the `openai` package or
+// `vscode`, since it's bundled separately for the webview's plain-browser
+// context (esbuild.mjs's webviewConfig).
+interface ChatAttachment {
+  type: 'document' | 'image';
+  filename?: string;
+  content_type?: string;
+  data: string;
+}
+
 type ToWebview =
   | { type: 'userEcho'; text: string }
   | { type: 'fileContext'; relativePath: string }
   | { type: 'delta'; text: string }
   | { type: 'citations'; items: Citation[] }
+  | { type: 'attachmentWarnings'; warnings: string[] }
   | { type: 'done' }
   | { type: 'error'; message: string };
+
+// Mirrors chatParticipant.ts's own MAX_ATTACHMENT_BYTES/IMAGE_MIME_BY_EXTENSION
+// exactly — same reasoning: rejecting an oversized file here, client-side,
+// with a friendly message, is cheaper than a real network round trip only
+// for the server to reject it with a 400.
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+
+function extensionOf(filename: string): string {
+  const i = filename.lastIndexOf('.');
+  return i === -1 ? '' : filename.slice(i).toLowerCase();
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // dataURL shape: "data:<mime>;base64,<data>" — only the part after
+      // the comma is the base64 payload HUPI's wire format wants.
+      const result = reader.result as string;
+      resolve(result.slice(result.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
 
 const vscode = acquireVsCodeApi();
 const log = document.getElementById('log') as HTMLDivElement;
@@ -34,17 +79,30 @@ const empty = document.getElementById('empty') as HTMLDivElement;
 const input = document.getElementById('input') as HTMLTextAreaElement;
 const sendButton = document.getElementById('send') as HTMLButtonElement;
 const newChatButton = document.getElementById('newChat') as HTMLButtonElement;
+const attachButton = document.getElementById('attachBtn') as HTMLButtonElement;
+const fileInput = document.getElementById('fileInput') as HTMLInputElement;
+const attachmentChips = document.getElementById('attachmentChips') as HTMLDivElement;
+const inputRow = document.getElementById('inputRow') as HTMLDivElement;
 
 let currentAssistantContent: HTMLDivElement | null = null;
 let currentAssistantRaw = '';
 // Held separately from currentAssistantRaw rather than folded into the
 // streamed markdown text: the 'done' handler's final render replaces
 // currentAssistantContent's whole innerHTML from currentAssistantRaw, so
-// anything appended earlier (e.g. during a 'citations' message, which
-// always arrives before 'done' — see hupiClient.ts's streamChat, whose
-// onCitations only ever fires on the terminal chunk) would just get
-// wiped out again by that re-render if it lived in the same string.
+// anything appended earlier (e.g. during a 'citations'/'attachmentWarnings'
+// message, which both always arrive before 'done' — see hupiClient.ts's
+// streamChat, whose onCitations/onAttachmentWarnings only ever fire on the
+// terminal chunk) would just get wiped out again by that re-render if it
+// lived in the same string.
 let currentCitations: Citation[] = [];
+let currentAttachmentWarnings: string[] = [];
+
+// Files the user has attached (attach button or drag-and-drop) for the
+// *next* message, cleared once that message is sent. Each entry keeps the
+// original filename separately from the wire-format ChatAttachment (which
+// has filename as an optional field) purely so the chip UI/remove-by-index
+// doesn't need to re-derive it.
+let pendingAttachments: { filename: string; attachment: ChatAttachment }[] = [];
 
 function escapeHtml(s: string): string {
   return s
@@ -66,6 +124,72 @@ function renderCitationsHtml(citations: Citation[]): string {
     })
     .join('');
   return `<div class="citations"><div class="citationsTitle">Sources</div><ul>${items}</ul></div>`;
+}
+
+function renderAttachmentWarningsHtml(warnings: string[]): string {
+  if (warnings.length === 0) {
+    return '';
+  }
+  return `<div class="attachmentWarning">${escapeHtml(warnings.join('; '))}</div>`;
+}
+
+/** Re-renders the pending-attachment chip row above the input from
+ *  pendingAttachments — called after every add/remove rather than
+ *  incrementally patched, since the list is always small (server caps at
+ *  5 per request) and this keeps add/remove/clear all going through one
+ *  code path. */
+function renderAttachmentChips(): void {
+  attachmentChips.innerHTML = '';
+  attachmentChips.style.display = pendingAttachments.length > 0 ? 'flex' : 'none';
+  pendingAttachments.forEach((p, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'attachmentChip';
+    const label = document.createElement('span');
+    label.textContent = (p.attachment.type === 'image' ? '🖼 ' : '📎 ') + p.filename;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'attachmentChipRemove';
+    remove.textContent = '×';
+    remove.title = `Remove ${p.filename}`;
+    remove.addEventListener('click', () => {
+      pendingAttachments.splice(i, 1);
+      renderAttachmentChips();
+    });
+    chip.append(label, remove);
+    attachmentChips.appendChild(chip);
+  });
+}
+
+/** Transient, auto-dismissing note above the input — used for a file
+ *  rejected client-side (too large) so it isn't a mysterious silent
+ *  no-op, without needing a whole chat-log error bubble for something
+ *  that isn't really a conversation turn. */
+function showTransientNote(text: string): void {
+  const note = document.createElement('div');
+  note.className = 'transientNote';
+  note.textContent = text;
+  inputRow.insertAdjacentElement('beforebegin', note);
+  setTimeout(() => note.remove(), 5000);
+}
+
+async function addFiles(files: FileList | File[]): Promise<void> {
+  for (const file of Array.from(files)) {
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      showTransientNote(`Skipped ${file.name} — exceeds the 8 MB attachment size limit.`);
+      continue;
+    }
+    const imageMime = IMAGE_MIME_BY_EXTENSION[extensionOf(file.name)];
+    try {
+      const data = await fileToBase64(file);
+      pendingAttachments.push({
+        filename: file.name,
+        attachment: { type: imageMime ? 'image' : 'document', filename: file.name, content_type: imageMime, data },
+      });
+    } catch {
+      showTransientNote(`Could not read ${file.name} — skipped.`);
+    }
+  }
+  renderAttachmentChips();
 }
 
 // Streaming deltas can arrive faster than every animation frame (bursts
@@ -131,12 +255,19 @@ function send(): void {
   if (text.trim() === '' || sendButton.disabled) {
     return;
   }
-  appendMessage(text, 'user');
+  const attachments = pendingAttachments.map((p) => p.attachment);
+  const userBubble = appendMessage(text, 'user');
+  if (pendingAttachments.length > 0) {
+    const names = pendingAttachments.map((p) => p.filename).join(', ');
+    userBubble.insertAdjacentHTML('beforeend', `<div class="fileContextBadge">📎 attached: ${escapeHtml(names)}</div>`);
+  }
   input.value = '';
+  pendingAttachments = [];
+  renderAttachmentChips();
   currentAssistantContent = appendMessage('', 'assistant');
   currentAssistantRaw = '';
   setStreaming(true);
-  vscode.postMessage({ type: 'send', text });
+  vscode.postMessage(attachments.length > 0 ? { type: 'send', text, attachments } : { type: 'send', text });
 }
 
 function newChat(): void {
@@ -145,6 +276,9 @@ function newChat(): void {
   currentAssistantContent = null;
   currentAssistantRaw = '';
   currentCitations = [];
+  currentAttachmentWarnings = [];
+  pendingAttachments = [];
+  renderAttachmentChips();
   setStreaming(false);
   vscode.postMessage({ type: 'clear' });
 }
@@ -155,6 +289,31 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     send();
+  }
+});
+
+attachButton.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files && fileInput.files.length > 0) {
+    void addFiles(fileInput.files);
+  }
+  fileInput.value = '';
+});
+
+// Drag-and-drop straight onto the input row — standard HTML5 DnD, works
+// the same inside a webview as any other browser context.
+inputRow.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  inputRow.classList.add('dragOver');
+});
+inputRow.addEventListener('dragleave', () => {
+  inputRow.classList.remove('dragOver');
+});
+inputRow.addEventListener('drop', (e) => {
+  e.preventDefault();
+  inputRow.classList.remove('dragOver');
+  if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+    void addFiles(e.dataTransfer.files);
   }
 });
 
@@ -184,6 +343,10 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       currentCitations = message.items;
       break;
     }
+    case 'attachmentWarnings': {
+      currentAttachmentWarnings = message.warnings;
+      break;
+    }
     case 'done': {
       // A render may still be scheduled for this frame with the final
       // text already in currentAssistantRaw — let it run rather than
@@ -193,11 +356,13 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       if (currentAssistantContent) {
         currentAssistantContent.innerHTML = marked.parse(currentAssistantRaw) as string;
         currentAssistantContent.insertAdjacentHTML('beforeend', renderCitationsHtml(currentCitations));
+        currentAssistantContent.insertAdjacentHTML('beforeend', renderAttachmentWarningsHtml(currentAttachmentWarnings));
         log.scrollTop = log.scrollHeight;
       }
       currentAssistantContent = null;
       currentAssistantRaw = '';
       currentCitations = [];
+      currentAttachmentWarnings = [];
       setStreaming(false);
       break;
     }
@@ -211,6 +376,7 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       currentAssistantContent = null;
       currentAssistantRaw = '';
       currentCitations = [];
+      currentAttachmentWarnings = [];
       setStreaming(false);
       break;
     }
