@@ -123,6 +123,22 @@ var (
 		Help: "Retrieval turns where keyword search was silently skipped because the query tokenized to zero real search terms (e.g. punctuation-only), despite passing stage 1 and reaching vector search.",
 	})
 
+	// KeywordSearchTierTotal is per-scope keyword-search governance's own
+	// observability (internal/store/retrieve.go's keywordSearchTierForScope)
+	// — BM25 has no database index, so it decrypts and live-scores the
+	// entire in-scope corpus on every call; "narrowed"/"disabled" exist
+	// specifically to bound that cost for a scope whose corpus has grown
+	// large. The two thresholds deciding "narrowed"/"disabled" are reasoned
+	// starting points, not yet calibrated against real traffic (same
+	// honest status as mmrLambda/clusterSimilarityThreshold) — this metric
+	// gives a real, deployment-wide tier distribution to calibrate them
+	// against later. Deliberately no scope-owner label, same
+	// privacy/cardinality rule as every other metric in this file.
+	KeywordSearchTierTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hupi_keyword_search_tier_total",
+		Help: `Retrieval turns by which keyword-search tier applied: "full", "narrowed", or "disabled".`,
+	}, []string{"tier"})
+
 	// AttachmentIngestTotal/AttachmentIngestDuration cover file/image
 	// attachment processing (internal/gateway/attachments.go) —
 	// deliberately no filename/content label, matching this file's own

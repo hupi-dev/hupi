@@ -454,6 +454,17 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	}
 
 	err = dbscope.Run(ctx, s.db, workspace, workspace, func(tx *sql.Tx) error {
+		// Per-scope keyword-search governance (internal/metrics'
+		// KeywordSearchTierTotal is this decision's own observability) —
+		// computed once per retrieve() call, not once per mechanism,
+		// since all three keyword-search call sites below share the same
+		// scope and should agree on the same tier for one turn.
+		tier, err := keywordSearchTierForScope(ctx, tx, workspace)
+		if err != nil {
+			return fmt.Errorf("determine keyword search tier: %w", err)
+		}
+		metrics.KeywordSearchTierTotal.WithLabelValues(tierLabel(tier)).Inc()
+
 		// Summaries fuse their vector and keyword rankings into one MMR
 		// selection (docs/BENCHMARK_IMPROVEMENT_PLAN.md step 4) — unlike
 		// episodes/entities below, which stay two independently-run
@@ -474,7 +485,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// see orderingSummarySimilarityThreshold's own doc comment for
 		// the real evidence this stage, not final-selection, was the
 		// actual bottleneck.
-		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, summarySimilarityThreshold, summaryMaxResults, query, now)
+		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, summarySimilarityThreshold, summaryMaxResults, query, now, tier, matchedEntityIDs)
 		if err != nil {
 			return fmt.Errorf("fused search summaries: %w", err)
 		}
@@ -497,7 +508,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// surfaced — the same "second chance, skip duplicates" shape
 		// vectorSearchEntities already uses for stage 1's own matches.
 		// Summaries are handled above instead, by fusedSearchSummaries.
-		if len(queryTerms) > 0 && keywordSearchEnabled() {
+		if len(queryTerms) > 0 && tier != keywordSearchDisabled {
 			episodeKeywordRefs, err := s.keywordSearchEpisodes(ctx, tx, workspace, queryTerms, refIDsOfKind(refs, identity.RefKindEpisode), &sb, &strongHit, &citations, query, now)
 			if err != nil {
 				return fmt.Errorf("keyword search episodes: %w", err)
@@ -833,7 +844,7 @@ func reciprocalRank(rank int) float64 {
 // separates a true positive from a same-topic near-miss in practice, on
 // top of that cutoff. Re-measure if the tokenizer's stopword list or the
 // BM25 k1/b constants ever change.
-func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time) ([]identity.Ref, error) {
+func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time, tier keywordSearchTier, matchedEntityIDs []string) ([]identity.Ref, error) {
 	type candidate struct {
 		id          string
 		text        string
@@ -911,14 +922,25 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// gotcha.
 	vecRows.Close()
 
-	if keywordSearchEnabled() && len(queryTerms) > 0 {
-		kwRows, err := q.QueryContext(ctx, `
+	if tier != keywordSearchDisabled && len(queryTerms) > 0 {
+		// keywordSearchNarrowed only narrows when stage 1 actually found an
+		// entity to narrow by (keywordSearchTier's own doc comment) — with
+		// no match, this falls through to the exact same unrestricted scan
+		// keywordSearchFull runs, rather than silently dropping recall.
+		narrow := tier == keywordSearchNarrowed && len(matchedEntityIDs) > 0
+		kwQuery := `
 			select id, summary, key_version, period
 			from summaries s
 			where summary is not null
 			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
 			  and scope_kind = $1 and scope_owner = $2
-		`, scope.Kind, scope.Owner)
+		`
+		kwArgs := []any{scope.Kind, scope.Owner}
+		if narrow {
+			kwQuery += " and entities_touched && $3::text[]"
+			kwArgs = append(kwArgs, pgfmt.TextArray(matchedEntityIDs))
+		}
+		kwRows, err := q.QueryContext(ctx, kwQuery, kwArgs...)
 		if err != nil {
 			return nil, err
 		}
@@ -2183,6 +2205,126 @@ func (s *Store) vectorSearchEpisodes(ctx context.Context, q dbscope.Querier, sco
 // effect on the next request rather than requiring a restart.
 func keywordSearchEnabled() bool {
 	return os.Getenv("HUPI_ENABLE_KEYWORD_SEARCH") != "false"
+}
+
+// keywordSearchTier governs how expensive a retrieval call lets BM25
+// keyword search be for one scope, based on that scope's own real
+// corpus size (internal/consolidation's updateScopeCorpusSize writes
+// scope_corpus_size once per day, per active scope) — BM25 has no
+// database index (every stored field is encrypted at rest), so it
+// decrypts and live-scores the entire in-scope corpus on every call, a
+// real, corpus-size-linear cost unlike vector search's own HNSW-indexed
+// lookups.
+type keywordSearchTier int
+
+const (
+	// keywordSearchFull is today's exact behavior — every keyword search
+	// scans its table's entire in-scope matching set, unrestricted.
+	keywordSearchFull keywordSearchTier = iota
+	// keywordSearchNarrowed only changes fusedSearchSummaries' own
+	// keyword half: when stage 1 already found a known entity in the
+	// query, the scan is narrowed to summaries whose (already-plaintext)
+	// entities_touched overlaps it — cheaper, and arguably more precise,
+	// not just faster. With no entity match to narrow by, this tier runs
+	// full BM25 anyway rather than silently dropping recall for the
+	// exact "rare term with no entity anchor" case BM25 exists to catch
+	// — see fusedSearchSummaries' own call site for exactly where that
+	// fallback happens. keywordSearchEpisodes/keywordSearchEntities have
+	// no entities_touched-equivalent plaintext column to narrow by
+	// safely, so this tier behaves identically to keywordSearchFull for
+	// both of them.
+	keywordSearchNarrowed
+	// keywordSearchDisabled skips keyword search entirely, across all
+	// three mechanisms — either because a scope's corpus has grown past
+	// keywordSearchDisableThreshold, or because the existing global
+	// HUPI_ENABLE_KEYWORD_SEARCH=false opt-out is set (that check always
+	// wins first, with no DB read, preserving today's zero-cost path for
+	// anyone already using it).
+	keywordSearchDisabled
+)
+
+// defaultKeywordSearchNarrowThreshold/-DisableThreshold are reasoned
+// starting points, not yet calibrated against real traffic — the same
+// honest status this file's own mmrLambda/clusterSimilarityThreshold
+// carry elsewhere. hupi_keyword_search_tier_total (internal/metrics)
+// exists specifically to give a real, deployment-wide tier distribution
+// to calibrate these against once there's real usage behind them.
+// Combined episode+summary count, not either alone — both tables pay the
+// same live-decrypt cost, so what matters is the total a keyword search
+// this scope might need to scan.
+const defaultKeywordSearchNarrowThreshold = 500
+const defaultKeywordSearchDisableThreshold = 3000
+
+func keywordSearchNarrowThreshold() int {
+	if v := os.Getenv("HUPI_KEYWORD_SEARCH_NARROW_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultKeywordSearchNarrowThreshold
+}
+
+func keywordSearchDisableThreshold() int {
+	if v := os.Getenv("HUPI_KEYWORD_SEARCH_DISABLE_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultKeywordSearchDisableThreshold
+}
+
+// keywordSearchTierForScope decides this call's keyword-search tier —
+// the existing global HUPI_ENABLE_KEYWORD_SEARCH=false switch always
+// wins first, with no DB read (today's exact zero-cost path for anyone
+// already using it); otherwise one point-lookup against
+// scope_corpus_size. A missing row (a brand-new scope with no
+// consolidation run yet) defaults to keywordSearchFull, not
+// keywordSearchDisabled — a scope with no recorded corpus size has
+// nothing expensive to protect against yet. A real query error also
+// falls back to keywordSearchFull rather than keywordSearchDisabled —
+// this package's established "never destroy information on an unclear
+// signal" posture (the same direction resolveQueryTimeframe's own
+// backoff-when-ambiguous rule and groundingCheck's safe-degrade both
+// take): a transient hiccup on this side-channel lookup shouldn't
+// silently cost a legitimate small scope its keyword search.
+func keywordSearchTierForScope(ctx context.Context, q dbscope.Querier, scope identity.Scope) (keywordSearchTier, error) {
+	if !keywordSearchEnabled() {
+		return keywordSearchDisabled, nil
+	}
+	var episodeCount, summaryCount int
+	err := q.QueryRowContext(ctx, `
+		select episode_count, summary_count from scope_corpus_size
+		where scope_kind = $1 and scope_owner = $2
+	`, scope.Kind, scope.Owner).Scan(&episodeCount, &summaryCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return keywordSearchFull, nil
+	}
+	if err != nil {
+		return keywordSearchFull, fmt.Errorf("load scope corpus size: %w", err)
+	}
+	total := episodeCount + summaryCount
+	switch {
+	case total > keywordSearchDisableThreshold():
+		return keywordSearchDisabled, nil
+	case total > keywordSearchNarrowThreshold():
+		return keywordSearchNarrowed, nil
+	default:
+		return keywordSearchFull, nil
+	}
+}
+
+// tierLabel is hupi_keyword_search_tier_total's own label value — a
+// fixed, bounded three-value enum-to-string mapping, never derived from
+// scope data, matching every other label in internal/metrics.
+func tierLabel(tier keywordSearchTier) string {
+	switch tier {
+	case keywordSearchNarrowed:
+		return "narrowed"
+	case keywordSearchDisabled:
+		return "disabled"
+	default:
+		return "full"
+	}
 }
 
 // graphWalkEnabled defaults to *disabled* (review finding B12) — the
