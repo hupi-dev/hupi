@@ -598,3 +598,4 @@ The full set of hooks, all following this pattern:
 | "How do I deploy this to Kubernetes?" | [INSTALL.md § Containerized deployment](INSTALL.md#containerized-deployment), [Dockerfile](../Dockerfile), [deploy/k8s/](../deploy/k8s/), [deploy/helm/hupi/](../deploy/helm/hupi/) |
 | "How do I use HUPI from inside VS Code?" | [VSCODE_EXTENSION.md](VSCODE_EXTENSION.md), [vscode-extension/](../vscode-extension/) |
 | "Where do the published LoCoMo/LongMemEval numbers come from, and can I reproduce them?" | [BENCHMARKS.md](BENCHMARKS.md), §5's `cmd/hupi-bench` entry above, [bench/](../bench/) |
+| "What's next if Postgres/pgvector itself becomes the bottleneck at scale?" | [SCALING_ROADMAP.md](SCALING_ROADMAP.md) |
