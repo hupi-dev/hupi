@@ -135,7 +135,7 @@ func (r *Runner) generateDailySummary(ctx context.Context, scope identity.Scope,
 
 	texts := make([]string, len(sources))
 	for i, s := range sources {
-		texts[i] = s.text
+		texts[i] = provider.TruncateForEmbedding(s.text)
 	}
 	embedResp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: texts})
 	if err != nil {

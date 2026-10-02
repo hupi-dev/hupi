@@ -304,7 +304,7 @@ func (r *Runner) reembedSummaryBatch(ctx context.Context, scope identity.Scope, 
 			return 0, fmt.Errorf("decrypt summary %s: %w", rr.id, err)
 		}
 		text := texts[0]
-		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{text}})
+		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(text)}})
 		if err != nil {
 			return 0, fmt.Errorf("embed summary %s: %w", rr.id, err)
 		}
@@ -363,7 +363,7 @@ func (r *Runner) reembedEpisodeBatch(ctx context.Context, scope identity.Scope, 
 			return 0, fmt.Errorf("decrypt episode %s: %w", rr.id, err)
 		}
 		input, output := texts[0], texts[1]
-		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{consolidation.EpisodeEmbedText(input, output)}})
+		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(consolidation.EpisodeEmbedText(input, output))}})
 		if err != nil {
 			return 0, fmt.Errorf("embed episode %s: %w", rr.id, err)
 		}
@@ -428,7 +428,7 @@ func (r *Runner) reembedEntityBatch(ctx context.Context, scope identity.Scope, m
 				return 0, fmt.Errorf("parse entity %s attributes: %w", rr.id, err)
 			}
 		}
-		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{consolidation.EntityEmbedText(rr.kind, rr.name, attrs)}})
+		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(consolidation.EntityEmbedText(rr.kind, rr.name, attrs))}})
 		if err != nil {
 			return 0, fmt.Errorf("embed entity %s: %w", rr.id, err)
 		}
@@ -502,7 +502,7 @@ func (r *Runner) reembedKeyFactBatch(ctx context.Context, scope identity.Scope, 
 		if err != nil {
 			return 0, fmt.Errorf("decrypt key fact %d: %w", rr.id, err)
 		}
-		texts[i] = decrypted[0]
+		texts[i] = provider.TruncateForEmbedding(decrypted[0])
 	}
 
 	resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: texts})
