@@ -184,11 +184,40 @@ func loadKeyStore(ctx context.Context, db *sql.DB) (*crypto.KeyStore, error) {
 		return nil, err
 	}
 
+	if err := ensureDefaultUser(ctx, db); err != nil {
+		return nil, fmt.Errorf("ensure default user: %w", err)
+	}
+
 	if err := migrateLegacyDEK(ctx, db, kek); err != nil {
 		return nil, fmt.Errorf("migrate legacy DEK: %w", err)
 	}
 
 	return crypto.NewKeyStore(db, kek), nil
+}
+
+// ensureDefaultUser registers identity.DefaultUserID in the users table —
+// idempotent (on conflict do nothing) and cheap enough to run on every
+// startup rather than gating it behind any one-time-migration check.
+//
+// Every pre-Tier-3 request/record uses this scope (identity.DefaultUserID's
+// own doc comment), but until this function existed, nothing ever inserted
+// the row for it on a genuinely fresh install — the only insert path was
+// buried inside migrateLegacyDEK's upgrade-from-legacy-wrapped-DEK-file
+// branch below, which only fires when HUPI_WRAPPED_DEK_PATH already points
+// at a real file (an upgrade scenario). A brand-new Tier 1/2 install has no
+// such file, so that branch returns early and the row was never created.
+//
+// cmd/hupi-consolidate's loadActiveScopes discovers which scopes to run
+// daily consolidation against by querying the users/teams tables directly,
+// so a missing row here meant a fresh install's default-user episodes were
+// captured but never consolidated — no summaries, key facts, or embeddings
+// ever produced, with no error anywhere to surface it.
+func ensureDefaultUser(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx,
+		`insert into users (id) values ($1) on conflict (id) do nothing`,
+		identity.DefaultUserID,
+	)
+	return err
 }
 
 // migrateLegacyDEK is a one-time, idempotent D7 migration: if
@@ -225,12 +254,8 @@ func migrateLegacyDEK(ctx context.Context, db *sql.DB, kek []byte) error {
 		return fmt.Errorf("legacy wrapped DEK from %s does not unwrap under HUPI_KEK: %w", path, err)
 	}
 
-	if _, err := db.ExecContext(ctx,
-		`insert into users (id) values ($1) on conflict (id) do nothing`,
-		identity.DefaultUserID,
-	); err != nil {
-		return fmt.Errorf("ensure default user exists: %w", err)
-	}
+	// ensureDefaultUser (called before this function in loadKeyStore)
+	// already guarantees the users row this scope_keys row references.
 	_, err = db.ExecContext(ctx, `
 		insert into scope_keys (scope_kind, scope_owner, version, wrapped_dek) values ($1, $2, 1, $3)
 		on conflict (scope_kind, scope_owner, version) do nothing
