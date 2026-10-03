@@ -163,6 +163,13 @@ export const api = {
       teams: orEmpty(b.teams),
       keys: orEmpty(b.keys),
     })),
+  // The credential hupi-dashboard's password login verifies against
+  // (Tier 3 only) — see cmd/hupi-admin-ui/handlers.go's setPassword.
+  setPassword: (id: string, password: string) =>
+    request<{ status: string }>(`/users/${encodeURIComponent(id)}/password`, {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
   issueKey: (userId: string) =>
     request<{ raw_key: string }>(`/users/${encodeURIComponent(userId)}/keys`, { method: "POST" }),
   revokeKey: (keyHash: string, userId: string) =>

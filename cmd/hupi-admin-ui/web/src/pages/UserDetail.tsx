@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { FormEvent, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, KeyRound } from "lucide-react";
 import { api, APIKey, Team } from "../lib/api";
@@ -8,6 +8,7 @@ import { Card, CardHeader, CardTitle } from "../components/Card";
 import { Table } from "../components/Table";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
+import { Field, TextInput } from "../components/Form";
 import { Modal } from "../components/Modal";
 import { ConfirmButton } from "../components/ConfirmButton";
 import { AsyncBoundary } from "../components/AsyncBoundary";
@@ -19,6 +20,22 @@ export function UserDetail() {
   const bundle = useAsync(() => api.getUser(id), [id]);
   const [newKey, setNewKey] = useState<string | null>(null);
   const [issuing, setIssuing] = useState(false);
+  const [password, setPasswordInput] = useState("");
+  const [settingPassword, setSettingPassword] = useState(false);
+
+  async function submitPassword(e: FormEvent) {
+    e.preventDefault();
+    setSettingPassword(true);
+    try {
+      await api.setPassword(id, password);
+      notify("success", "Dashboard password set.");
+      setPasswordInput("");
+    } catch (err) {
+      notify("error", err instanceof Error ? err.message : "Failed to set password.");
+    } finally {
+      setSettingPassword(false);
+    }
+  }
 
   async function issueKey() {
     setIssuing(true);
@@ -62,6 +79,30 @@ export function UserDetail() {
                 <dt className="text-slate-500">Created</dt>
                 <dd>{formatDate(bundle.data.user.CreatedAt)}</dd>
               </dl>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Dashboard password</CardTitle>
+              </CardHeader>
+              <p className="mb-3 text-sm text-slate-400">
+                Sets this user's password for hupi-dashboard's login screen (Tier 3 only) — no self-service reset,
+                set it again here whenever it needs to change.
+              </p>
+              <form onSubmit={submitPassword} className="flex items-end gap-3">
+                <Field label="New password" className="flex-1">
+                  <TextInput
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    autoComplete="new-password"
+                    required
+                  />
+                </Field>
+                <Button type="submit" disabled={settingPassword || password === ""}>
+                  {settingPassword ? "Setting…" : "Set password"}
+                </Button>
+              </form>
             </Card>
 
             <Card>
