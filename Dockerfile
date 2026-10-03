@@ -19,6 +19,18 @@ RUN npm ci
 COPY cmd/hupi-admin-ui/web/ ./
 RUN npm run build
 
+# ---- web-dashboard stage ----
+# Same reasoning as the web stage above, for cmd/hupi-dashboard/web (see
+# cmd/hupi-dashboard/assets.go) — a separate stage/directory because it's
+# a separate npm project with its own package.json, not a second build of
+# the admin-ui frontend.
+FROM node:20-alpine AS web-dashboard
+WORKDIR /src/cmd/hupi-dashboard/web
+COPY cmd/hupi-dashboard/web/package*.json ./
+RUN npm ci
+COPY cmd/hupi-dashboard/web/ ./
+RUN npm run build
+
 # ---- build stage ----
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
@@ -31,10 +43,12 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# Overwrites the placeholder cmd/hupi-admin-ui/web/dist/index.html
-# (committed so a plain `go build` never fails with a go:embed error) with
-# the real build from the web stage above.
+# Overwrites the placeholder cmd/hupi-admin-ui/web/dist/index.html and
+# cmd/hupi-dashboard/web/dist/index.html (each committed so a plain
+# `go build` never fails with a go:embed error) with the real builds from
+# the two web stages above.
 COPY --from=web /src/cmd/hupi-admin-ui/web/dist /src/cmd/hupi-admin-ui/web/dist
+COPY --from=web-dashboard /src/cmd/hupi-dashboard/web/dist /src/cmd/hupi-dashboard/web/dist
 
 # CGO_ENABLED=0: static binaries, no libc dependency on the runtime image
 # (Debian's, in the builder, isn't necessarily what the runtime stage
@@ -42,7 +56,7 @@ COPY --from=web /src/cmd/hupi-admin-ui/web/dist /src/cmd/hupi-admin-ui/web/dist
 # nothing here).
 RUN mkdir -p /out && \
     for cmd in hupi hupi-consolidate hupi-selfcheck hupi-trace hupi-correct \
-               hupi-admin hupi-admin-ui hupi-audit hupi-export hupi-import hupi-rotate-key hupi-reembed \
+               hupi-admin hupi-admin-ui hupi-dashboard hupi-audit hupi-export hupi-import hupi-rotate-key hupi-reembed \
                hupi-demo hupi-demo-sweep; do \
       CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "/out/$cmd" "./cmd/$cmd"; \
     done
@@ -69,5 +83,5 @@ USER hupi
 # inside the same container, which would make the gateway unreachable
 # from the Service/Ingress in front of it (docs/GAP_CLOSURE_PLAN.md §5) —
 # see deploy/k8s/deployment.yaml's HUPI_LISTEN_ADDR.
-EXPOSE 8787 8788
+EXPOSE 8787 8788 8790
 ENTRYPOINT ["hupi"]

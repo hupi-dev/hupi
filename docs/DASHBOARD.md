@@ -1,0 +1,168 @@
+# Dashboard
+
+`cmd/hupi-dashboard` is a read-only analytics surface over one scope's
+own memory: conversation volume, a theme word cloud, entity
+relationships, memory health, retrieval governance transparency, and a
+security posture panel. It answers the questions users actually ask about
+a memory system: what themes come up, how much history exists, whether
+keyword search is still running at full strength for this scope, and
+whether the deployment looks secure (key rotation status, recent
+export/import/correction events).
+
+## Tier 1/2 vs Tier 3
+
+Tier 1/2 (this OSS build) needs no login at all — every request resolves
+straight to `identity.DefaultScope`, the same zero-auth posture
+`cmd/hupi`'s own gateway already has when `h.Auth` is `nil` (see
+`internal/gateway/handler.go`'s `resolveIdentity`). There is only ever one
+scope to look at, so there is nothing a login screen would protect.
+
+Tier 3 is genuinely multi-tenant, so it adds real sign-in — password or
+OIDC SSO — via `hupi-t3`'s `cmd/hupi-dashboard/team.go` overlay, the same
+nil-by-default hook-var pattern `cmd/hupi-admin-ui/handlers.go` already
+uses for `mountTeamRoutes`:
+
+```go
+var mountDashboardAuthRoutes func(mux *http.ServeMux, s *server) // nil in OSS
+var resolveDashboardSession  func(r *http.Request) (identity.Scope, bool) // nil in OSS
+```
+
+When both are `nil`, `cmd/hupi-dashboard/auth.go`'s `requireDashboardSession`
+resolves every request to `identity.DefaultScope` with no header checked
+at all. The frontend is one bundle for both tiers — it tries
+`GET /api/whoami` unauthenticated first; a 401 (only possible on Tier 3)
+shows the login screen, success goes straight to the dashboard. This
+mirrors how `cmd/hupi-admin-ui`'s frontend already handles team-vs-solo
+differences purely from what the API returns, with no separate frontend
+build per tier.
+
+### Login mechanics (Tier 3 only)
+
+No cookies — the frontend holds an opaque bearer session token in
+`sessionStorage` and sends `Authorization: Bearer <token>` on every
+request, exactly how `cmd/hupi-admin-ui`'s frontend already holds its own
+Basic Auth credential. This is deliberate: a bearer token set by this
+SPA's own JavaScript is never auto-resent by the browser cross-site the
+way a cookie or Basic Auth credential would be, so none of
+`cmd/hupi-admin-ui`'s `Sec-Fetch-Site`-based CSRF mitigation is needed
+here at all.
+
+Two credential types converge on minting the same session token
+(`dashboard_sessions`, `schema/0023_dashboard_sessions.sql`):
+
+- **Password**: `POST /auth/login/password {username, password}` —
+  `username` is the user's own id (e.g. `user:alice`, not a separate
+  username field — `users` has none), bcrypt-verified via
+  `internal/auth.Store.VerifyPassword` against `users.password_hash`,
+  set only via `hupi-admin set-password -user <id>` (admin-driven, no
+  self-service reset, matching `create-user`/`create-key`/
+  `create-operator`'s existing admin-only provisioning model —
+  `set-password` itself lives in the **public** repo's `cmd/hupi-admin`
+  since the underlying operation needs nothing team-specific, unlike
+  `add-member`/`create-key`).
+- **OIDC/SSO**: `GET /auth/login/oidc/start` redirects into a genuine
+  Authorization Code + PKCE flow against the configured IdP;
+  `/auth/login/oidc/callback` completes it, then redirects back to `/`
+  with the minted session token in a one-time `?dashboard_token=...`
+  query param — `App.tsx`'s `consumeOidcCallbackToken` reads it, saves it,
+  and strips it from the URL on mount. The JWT *verification* half reuses
+  `internal/auth/oidc.go`'s existing issuer/audience/JWKS logic directly —
+  only the redirect/callback flow-initiation code is new, since that
+  package previously only verified an already-issued JWT passed as
+  `Authorization: Bearer`.
+
+### Workspace routing (Tier 3 only)
+
+`dashboard_sessions` is keyed on `user_id` alone, not a fixed
+`scope_kind`/`scope_owner` pair — which workspace a request actually
+reads is resolved fresh on every request, not baked in at login time. No
+`X-Hupi-Workspace` header means the signed-in user's own private scope;
+naming a team id resolves to that team's shared scope only after a live
+`team_members` check (never cached), so a membership change takes effect
+on the very next request rather than whenever the session happens to be
+re-minted. A request naming a team the user isn't actually a member of is
+rejected outright (401) — not a silent fallback to their private scope,
+which would hide the caller's own mistake. This is what makes panels 1-7
+genuinely "team-wide" without needing a second, shared-scope-specific
+copy of each query: the frontend's workspace selector (`Dashboard.tsx`)
+just sets the header and reloads, and every existing panel reads whichever
+scope the header resolved to. `GET /api/workspaces` lists the teams a
+signed-in user can switch into.
+
+### Admin security posture (Tier 3 only)
+
+`GET /api/admin/security-posture` — stale API keys (`last_used_at` older
+than 90 days or never set), key rotation status across every scope, and
+a 24-hour failed-dashboard-login count — is gated behind the same named
+*operator* Basic Auth `cmd/hupi-admin-ui` uses (`auth.Store.ResolveOperator`),
+not a regular dashboard session: this view spans every user/team in the
+deployment (`api_keys`/`key_rotations`/`users` carry no row-level
+security at all — confirmed against `schema/*.sql`), which is an operator
+concern, not something any one signed-in user should see regardless of
+their own team memberships.
+
+## Panels and their data sources
+
+Every Tier 1/2 panel reads only plaintext columns — no decryption
+anywhere in `cmd/hupi-dashboard/queries.go`:
+
+| Panel | Source |
+|---|---|
+| Conversation volume | `episodes.ts`/`.type` |
+| Theme word cloud | `entities.name`/`.kind` × `summaries.entities_touched` |
+| Entity relationships | `entity_relationships` (all columns plaintext) |
+| Memory health | `scope_corpus_size`, `summaries.created_at`/`.correction_reason` |
+| Forgotten but important | `episodes.importance`/`.ts` (stale + high-importance), `entities.last_updated` (stale) |
+| Retrieval governance | `scope_corpus_size` + the same thresholds `internal/store/retrieve.go`'s `keywordSearchTierForScope` uses |
+| Security posture | `key_rotations`, `audit_log` (export/import/key_rotation/correct/dashboard_login events) |
+| Export | `GET /api/export` — not a read-only plaintext panel like the rest, this one decrypts: it reuses `internal/store.Store.ExportMemory` exactly as `cmd/hupi-export-memory` does (same `store.New(db, keys, embedder)` construction), which already writes its own `audit_log` entry |
+
+`audit_log` has **no row-level-security restriction on `SELECT`** (its
+own migration's comment: "audit_log's entire purpose is cross-scope
+visibility for admin tools") — `securityPosture`'s call to
+`audit.Query` always passes an explicit `ScopeKind`/`ScopeOwner` filter;
+never call it without both, or a Tier 3 user would see every other user's
+audit trail. `hupi_app` also has no `DELETE` grant on `audit_log` at all
+(append-only by design) — relevant if you're ever cleaning up test data
+against a real database, not just this package's own tests.
+
+## Phase 2 — decrypt-on-view themes
+
+A deliberately separate, opt-in feature (`cmd/hupi-dashboard/content_analysis.go`):
+real topic extraction over decrypted conversation content, the one place
+in this product where plaintext touches a request/response path outside
+the retrieve-or-consolidate-then-reencrypt loop.
+
+- **`GET /api/content-themes`** (2a) — gated by
+  `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` (default `false`, same honest
+  opt-in convention as `HUPI_ENABLE_KEYWORD_SEARCH`). Decrypts episode
+  input/output text and current-summary prose for the requested window
+  via the scope's `KeyStore` (the same per-row `key_version` → `GetVersion`
+  pattern `internal/store/retrieve.go` already uses), runs local
+  keyword-frequency extraction in Go — no LLM call, decrypted content
+  never leaves the server process — and returns only the aggregated term
+  list, never raw text, never cached. When the flag is off, returns
+  `{"enabled": false}` (not an error), so the frontend can treat it as a
+  normal, hideable state.
+- **`GET /api/content-themes/narrative`** (2b) — a separate toggle,
+  `HUPI_ENABLE_DASHBOARD_LLM_THEMES` (also default `false`), decrypting
+  the same window and asking `internal/provider.Registry.Chat()` (the
+  same provider profile retrieval/consolidation already trust with
+  plaintext) for a short narrative paragraph instead of a bare term list.
+
+Both decrypt via `decryptRecentText`, bounded by
+`defaultContentAnalysisMaxChars` (200,000 characters, reasoned not
+measured) so one request can't decrypt an entire unbounded scope's
+history — this is a display feature, not a retrieval path.
+
+## Env vars
+
+| Var | Meaning | Default |
+|---|---|---|
+| `HUPI_DASHBOARD_LISTEN_ADDR` | Listen address | `127.0.0.1:8790` |
+| `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` | Phase 2a local keyword themes | `false` |
+| `HUPI_ENABLE_DASHBOARD_LLM_THEMES` | Phase 2b LLM narrative themes | `false` |
+
+Same bind-to-localhost posture as `cmd/hupi-admin-ui` — this reads real
+data about one scope's memory and should sit behind a trusted user's own
+machine or a reverse proxy, not be exposed directly to the internet.

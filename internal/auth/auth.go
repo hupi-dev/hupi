@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"hupi/internal/crypto"
 	"hupi/internal/identity"
 )
@@ -118,6 +120,58 @@ func (s *Store) CreateTeam(ctx context.Context, teamID, name string) error {
 	scope := identity.Scope{Kind: identity.ScopeKindShared, Owner: teamID}
 	if _, _, err := s.keys.GetOrCreate(ctx, scope); err != nil {
 		return fmt.Errorf("auth: provision encryption key for team %s: %w", teamID, err)
+	}
+	return nil
+}
+
+// ErrInvalidPassword mirrors ErrInvalidKey/ErrInvalidOperator's own
+// reasoning — the same error whether userID doesn't exist, has no
+// password set, or the password simply doesn't match, so a caller can't
+// use a different error to probe which case it was.
+var ErrInvalidPassword = errors.New("auth: invalid username or password")
+
+// SetPassword bcrypt-hashes password and stores it on users.password_hash
+// (schema/0023_dashboard_sessions.sql) — admin-driven only, via
+// cmd/hupi-admin's set-password subcommand, no self-service reset. Lives
+// here (not gated behind a Tier-3 hook like AddTeamMember/CreateAPIKey)
+// because the operation itself needs nothing team-specific: a plain
+// column on users, set directly through this package's existing Store.
+// It's only ever useful once something resolves a login against it
+// (hupi-dashboard's hupi-t3-only password login route), but the ability
+// to provision the credential isn't itself a Tier-3 concept the way real
+// end-user API-key auth is.
+func (s *Store) SetPassword(ctx context.Context, userID, password string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("auth: hash password for %s: %w", userID, err)
+	}
+	res, err := s.db.ExecContext(ctx, `update users set password_hash = $1 where id = $2`, string(hash), userID)
+	if err != nil {
+		return fmt.Errorf("auth: set password for %s: %w", userID, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("auth: set password for %s: no such user", userID)
+	}
+	return nil
+}
+
+// VerifyPassword resolves a username+password pair to the user id it
+// authenticates, for hupi-dashboard's password login route. Deliberately
+// constant-time-safe against username enumeration the same way
+// ResolveOperator/TeamStore.Resolve are: a nonexistent user and a wrong
+// password for a real one both return ErrInvalidPassword, and bcrypt
+// comparison itself is already constant-time.
+func (s *Store) VerifyPassword(ctx context.Context, userID, password string) error {
+	var hash sql.NullString
+	err := s.db.QueryRowContext(ctx, `select password_hash from users where id = $1`, userID).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) || !hash.Valid {
+		return ErrInvalidPassword
+	}
+	if err != nil {
+		return fmt.Errorf("auth: load password hash for %s: %w", userID, err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash.String), []byte(password)); err != nil {
+		return ErrInvalidPassword
 	}
 	return nil
 }
