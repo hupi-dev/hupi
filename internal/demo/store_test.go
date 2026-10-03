@@ -321,6 +321,70 @@ func TestSweep_DeletesGuestDataButKeepsSessionRowForCapWindow(t *testing.T) {
 	}
 }
 
+// TestSweep_DeletesGuestWithEntityRelationships is the regression test
+// for a real production failure (2026-10-03):
+// entity_relationships.source_summary_id/subject_id/object_id reference
+// summaries/entities with no ON DELETE action (schema/0015, added after
+// deleteGuest was first written), so a guest who had triggered the
+// entity-relationship extraction path couldn't be swept at all — the
+// delete from summaries/entities failed with a foreign key violation.
+// deleteGuest must delete entity_relationships first.
+func TestSweep_DeletesGuestWithEntityRelationships(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := newTestStore(t, db, &stubRunner{}, testLimits())
+
+	sess, err := s.CreateSession(ctx)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`delete from demo_sessions where token_hash = $1`, hashToken(sess.Token)) })
+
+	guestScope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: sess.GuestUserID}
+	err = dbscope.Run(ctx, db, guestScope, guestScope, func(tx *sql.Tx) error {
+		for _, stmt := range []struct {
+			sql  string
+			args []any
+		}{
+			{`insert into entities (id, kind, name, scope_kind, scope_owner) values ($1, 'person', 'Test Person', 'private', $2)`,
+				[]any{"person:demo-sweep-test", sess.GuestUserID}},
+			{`insert into entities (id, kind, name, scope_kind, scope_owner) values ($1, 'project', 'Test Project', 'private', $2)`,
+				[]any{"project:demo-sweep-test", sess.GuestUserID}},
+			{`insert into summaries (id, period, level, status, grounding_checked, scope_kind, scope_owner) values ($1, '2026-10-02', 'daily', 'draft', true, 'private', $2)`,
+				[]any{"sum-demo-sweep-test", sess.GuestUserID}},
+			{`insert into entity_relationships (id, scope_kind, scope_owner, subject_id, predicate, object_id, source_summary_id) values ($1, 'private', $2, $3, 'works_on', $4, $5)`,
+				[]any{"rel-demo-sweep-test", sess.GuestUserID, "person:demo-sweep-test", "project:demo-sweep-test", "sum-demo-sweep-test"}},
+		} {
+			if _, err := tx.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed entity/summary/relationship: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx,
+		`update demo_sessions set expires_at = now() - interval '1 minute' where token_hash = $1`,
+		hashToken(sess.Token),
+	); err != nil {
+		t.Fatalf("force-expire session: %v", err)
+	}
+
+	if _, err := s.Sweep(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("Sweep: %v (should have deleted entity_relationships before summaries/entities)", err)
+	}
+
+	var relExists, summaryExists, entityExists bool
+	db.QueryRowContext(ctx, `select exists(select 1 from entity_relationships where scope_owner = $1)`, sess.GuestUserID).Scan(&relExists)
+	db.QueryRowContext(ctx, `select exists(select 1 from summaries where scope_owner = $1)`, sess.GuestUserID).Scan(&summaryExists)
+	db.QueryRowContext(ctx, `select exists(select 1 from entities where scope_owner = $1)`, sess.GuestUserID).Scan(&entityExists)
+	if relExists || summaryExists || entityExists {
+		t.Errorf("Sweep left data behind: entity_relationships=%v summaries=%v entities=%v", relExists, summaryExists, entityExists)
+	}
+}
+
 // TestSweep_RemovesOldSessionRowsEvenWithoutAGuest is phase 2's own
 // regression test: a demo_sessions row old enough to no longer matter
 // for CreateSession's daily cap must eventually be deleted too, even
