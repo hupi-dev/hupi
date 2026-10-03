@@ -852,6 +852,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		enc         *crypto.Encryptor
 		vectorRank  int // -1 if not found by vector search
 		keywordRank int // -1 if not found by keyword search
+		factRank    int // -1 if not found by per-fact search
 	}
 	byID := make(map[string]*candidate)
 
@@ -908,7 +909,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 			vecRows.Close()
 			return nil, err
 		}
-		byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: vecRank, keywordRank: -1}
+		byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: vecRank, keywordRank: -1, factRank: -1}
 		vecRank++
 	}
 	if err := vecRows.Err(); err != nil {
@@ -1022,9 +1023,79 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				c.keywordRank = rank
 				continue
 			}
-			byID[m.id] = &candidate{id: m.id, text: kwText[m.id], period: kwPeriod[m.id], enc: kwEnc[m.id], vectorRank: -1, keywordRank: rank}
+			byID[m.id] = &candidate{id: m.id, text: kwText[m.id], period: kwPeriod[m.id], enc: kwEnc[m.id], vectorRank: -1, keywordRank: rank, factRank: -1}
 		}
 	}
+
+	// Per-fact search: a third fusion signal alongside the two above,
+	// catching a summary whose *own* overall embedding/keyword profile
+	// doesn't match the query at all, but which contains one specific,
+	// correctly-grounded fact that does — a real, confirmed gap
+	// (docs/LONGMEMEVAL_ACCURACY_PLAN.md's 852ce960 case: a mortgage
+	// pre-approval amount buried in an otherwise unrelated day's summary
+	// never entered the candidate pool, because fusedSearchSummaries
+	// only ever scored whole summaries, and per-fact ranking
+	// (loadKeyFacts/rankKeyFacts below) only ever runs on summaries that
+	// already made the pool). grounded = true matches the same trust bar
+	// loadKeyFacts itself applies — this never surfaces a fact retrieval
+	// wouldn't otherwise be willing to show. The same similarityThreshold
+	// cutoff as the vector half above is the real false-positive guard:
+	// a summary only enters via this path when one of its facts is a
+	// genuinely close match, not merely the closest of a bad lot.
+	factRows, err := q.QueryContext(ctx, `
+		select s.id, s.summary, s.key_version, s.period, min(f.embedding <=> $1::vector) as best_distance
+		from summary_key_facts f
+		join summaries s on s.id = f.summary_id
+		where f.embedding is not null
+		  and (f.embedding_model is null or f.embedding_model = $5)
+		  and f.grounded = true
+		  and f.scope_kind = $2 and f.scope_owner = $3
+		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		group by s.id
+		order by best_distance
+		limit $4
+	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor, s.currentEmbeddingModel())
+	if err != nil {
+		return nil, err
+	}
+	factRank := 0
+	for factRows.Next() {
+		var id string
+		var summaryCT []byte
+		var keyVersion int
+		var period string
+		var distance float64
+		if err := factRows.Scan(&id, &summaryCT, &keyVersion, &period, &distance); err != nil {
+			factRows.Close()
+			return nil, err
+		}
+		similarity := 1 - distance
+		if similarity < similarityThreshold {
+			continue
+		}
+		if c, ok := byID[id]; ok {
+			c.factRank = factRank
+			factRank++
+			continue
+		}
+		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			factRows.Close()
+			return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
+		}
+		text, err := enc.Decrypt(summaryCT)
+		if err != nil {
+			factRows.Close()
+			return nil, err
+		}
+		byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: -1, keywordRank: -1, factRank: factRank}
+		factRank++
+	}
+	if err := factRows.Err(); err != nil {
+		factRows.Close()
+		return nil, err
+	}
+	factRows.Close()
 
 	if len(byID) == 0 {
 		return nil, nil
@@ -1099,6 +1170,9 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		if c.keywordRank >= 0 {
 			fused += reciprocalRank(c.keywordRank)
 		}
+		if c.factRank >= 0 {
+			fused += reciprocalRank(c.factRank)
+		}
 		if hasTimeframe {
 			if pStart, pEnd, ok := parsePeriodRange(c.period); ok && periodsOverlap(pStart, pEnd, tfStart, tfEnd) {
 				// A full reciprocal-rank-0 contribution's worth of boost
@@ -1138,13 +1212,13 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		}
 		for _, id := range ids {
 			if excludedByTimeframe[id] {
-				fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d fused=excluded(timeframe) picked=false\n",
-					id, byID[id].vectorRank, byID[id].keywordRank)
+				fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d factRank=%d fused=excluded(timeframe) picked=false\n",
+					id, byID[id].vectorRank, byID[id].keywordRank, byID[id].factRank)
 				continue
 			}
 			i := poolIndex[id]
-			fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d fused=%.4f picked=%v\n",
-				id, byID[id].vectorRank, byID[id].keywordRank, pool[i].relevance, pickedSet[i])
+			fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d factRank=%d fused=%.4f picked=%v\n",
+				id, byID[id].vectorRank, byID[id].keywordRank, byID[id].factRank, pool[i].relevance, pickedSet[i])
 		}
 	}
 
