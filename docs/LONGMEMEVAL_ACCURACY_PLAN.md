@@ -597,3 +597,88 @@ remaining work for this category.
 - A full LongMemEval re-run only once steps 1, 5, and 6 are individually
   verified (3 and 4 no longer need this — they were never shipped), to
   get a real, final combined number.
+
+## Round 3 fast-iteration sample (2026-10-03)
+
+Same 6-question stratified sample as round 2 (one per category, same
+question IDs, clean DB via the fast-iteration harness — see the
+separately-tracked harness plan), run against `main` at commit 9558e14
+(PR #92: based_in/lives_in predicate canonicalization + dashboard
+relationship date-range display — unrelated to retrieval/consolidation
+accuracy, included only because it was the tip of main when this round
+ran).
+
+| Category | question_id | Round 2 (3 trials) | Round 3 (1 trial) |
+|---|---|---|---|
+| single-session-user | `0862e8bf_abs` | correct | **correct** |
+| single-session-assistant | `5809eb10` | grounded but wrong milestone (known residual) | **correct** — matches gold exactly this trial |
+| single-session-preference | `35a27287` | correct (verbose/hedging style, confirmed pre-existing) | **wrong** — same verbose-style answer, judge flipped to incorrect this trial |
+| temporal-reasoning | `gpt4_4edbafa2` | correct, 3/3 | **correct** |
+| knowledge-update | `07741c45` | correct, 3/3 | **wrong** — hypothesis "In a shoe rack" dropped the "in my closet" specificity gold has; judge marked it incorrect |
+| multi-session | `09ba9854_abs` | correctly abstains, 3/3 | **correct**, abstains |
+
+Task-averaged accuracy: 4/6 (0.667). Judge: gpt-4o, via
+`bench/score_longmemeval.sh`.
+
+Hypothesis tested: none — this was a baseline re-check on `main` as it
+stood after round 2's fixes, not a round testing a new change.
+
+Outcome: two instances flipped relative to round 2, in opposite
+directions. `5809eb10`'s long-standing "known residual" (wrong milestone)
+did not reproduce this trial — it matched gold cleanly. `07741c45`
+(previously 3/3 correct) and `35a27287` (previously confirmed-correct
+despite being verbose) both scored wrong this trial. Given round 2's own
+numbers came from 3 trials each and round 3 is a single trial per
+question, the most likely explanation for all three is answer-generation
+and LLM-judge variance rather than a real regression or a real fix — not
+confirmed either way. **Do not treat `5809eb10` as fixed, or `07741c45`
+as regressed, on the strength of this single trial.**
+
+Known limitation this round: the planned direct-DB-decryption sanity
+check (reading a stored summary for one scope to cross-check a
+prediction, same method prior rounds used) could not be done. The
+harness's `bench_round3.env` was regenerating `HUPI_KEK` fresh via
+`openssl rand` on every `source`, rather than reusing one key across the
+two sub-runs this round was split into (the background run hit this
+session's time limit mid-round and was resumed with a separate
+`-data-file`/`-out-file` for the 3 remaining questions). The two
+ephemeral KEKs from both sub-runs were never saved, so neither scope's
+data is decryptable anymore in this clean DB — this didn't affect the
+predictions themselves (each sub-run's hypothesis was written to its
+output file from in-process state before the key was lost), only the
+after-the-fact sanity check. Fixed for future rounds: `bench_round3.env`
+now persists the KEK to `bench_round3.kek` on first generation and
+reuses it on every subsequent `source`.
+
+Next: run 3 trials each for `5809eb10` and `07741c45` specifically (not
+the full 6) to tell real signal from single-trial judge/generation noise
+before deciding either needs further work. If `07741c45` is a real
+regression, check whether it's consolidation dropping the "closet"
+detail or the judge being stricter on a directionally-correct-but-less-
+specific answer (the latter wouldn't be a HUPI bug at all).
+
+### Follow-up: 1 additional trial each (2026-10-03)
+
+Re-ran `5809eb10`/`07741c45` only (same clean DB, fresh `resetScope` per
+run) for one more independent trial, intending 3 total but stopped after
+trial 1 — see results below before spending the other 2.
+
+| question_id | Trial 1 hypothesis | Result | Combined with original round 3 run |
+|---|---|---|---|
+| `07741c45` | "Taking up space in your closet" | **wrong** (gold: "in a shoe rack in my closet") | 2/2 wrong — both attempts land "in the closet" but drop the specific "shoe rack" container the gold answer names |
+| `5809eb10` | "2014" | **correct** | 2/2 correct |
+
+2 data points each, not the originally-planned 3 — still thin to call
+either conclusively, but the direction is consistent both times for both
+questions: `07741c45` leans toward a real, reproducible gap (not judge
+noise — two differently-worded hypotheses both independently omitted
+"shoe rack"), and `5809eb10`'s round-2 "known residual" (wrong milestone)
+leans toward genuinely resolved rather than a fluke.
+
+Next: if `07741c45` is picked up again, check consolidation's stored
+summary/key-facts for this scope directly (decrypt via the persisted
+`bench_round3.kek`) to see whether "shoe rack" ever survives
+consolidation at all, or only the QA step is dropping it at answer time
+— that distinguishes a consolidation-completeness bug from an
+answer-prompt specificity issue, same diagnostic split this plan's
+earlier categories used throughout.
