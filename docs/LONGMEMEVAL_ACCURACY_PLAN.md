@@ -656,3 +656,29 @@ before deciding either needs further work. If `07741c45` is a real
 regression, check whether it's consolidation dropping the "closet"
 detail or the judge being stricter on a directionally-correct-but-less-
 specific answer (the latter wouldn't be a HUPI bug at all).
+
+### Follow-up: 1 additional trial each (2026-10-03)
+
+Re-ran `5809eb10`/`07741c45` only (same clean DB, fresh `resetScope` per
+run) for one more independent trial, intending 3 total but stopped after
+trial 1 — see results below before spending the other 2.
+
+| question_id | Trial 1 hypothesis | Result | Combined with original round 3 run |
+|---|---|---|---|
+| `07741c45` | "Taking up space in your closet" | **wrong** (gold: "in a shoe rack in my closet") | 2/2 wrong — both attempts land "in the closet" but drop the specific "shoe rack" container the gold answer names |
+| `5809eb10` | "2014" | **correct** | 2/2 correct |
+
+2 data points each, not the originally-planned 3 — still thin to call
+either conclusively, but the direction is consistent both times for both
+questions: `07741c45` leans toward a real, reproducible gap (not judge
+noise — two differently-worded hypotheses both independently omitted
+"shoe rack"), and `5809eb10`'s round-2 "known residual" (wrong milestone)
+leans toward genuinely resolved rather than a fluke.
+
+Next: if `07741c45` is picked up again, check consolidation's stored
+summary/key-facts for this scope directly (decrypt via the persisted
+`bench_round3.kek`) to see whether "shoe rack" ever survives
+consolidation at all, or only the QA step is dropping it at answer time
+— that distinguishes a consolidation-completeness bug from an
+answer-prompt specificity issue, same diagnostic split this plan's
+earlier categories used throughout.
