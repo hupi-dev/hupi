@@ -642,6 +642,41 @@ func (r *Runner) upsertRelationships(ctx context.Context, tx *sql.Tx, scope iden
 			continue
 		}
 
+		// A bare edge (no valid_from, no valid_until — "this relationship
+		// exists" with zero temporal information) is skipped if ANY row
+		// already exists for this exact (subject, predicate, object)
+		// triple, regardless of that existing row's own validity window.
+		// Found for real in production: the exact-match check above only
+		// catches a repeat of the *same* validity window, so a bare edge
+		// extracted in the same consolidation run as (or after) a
+		// dated one for the identical triple sailed straight through it —
+		// cluster.go's mergeConsolidationOutputs concatenates every
+		// cluster's relationships with no cross-cluster dedup, so one
+		// cluster's dateless mention and another's dated one for the same
+		// fact both reach here in the same run. A bare assertion adds
+		// strictly no information beyond what any existing record of the
+		// same triple already established, dated or not — unlike the
+		// supersession logic below, skipping it here never closes or
+		// alters an existing row, so it can't trigger the one-to-many
+		// edge-loss concern docs/ENTITY_RELATIONSHIPS_PLAN.md §5 raises
+		// about that separate mechanism.
+		if validFrom == nil && validUntil == nil {
+			var anyExists bool
+			err = tx.QueryRowContext(ctx, `
+				select exists(
+					select 1 from entity_relationships
+					where scope_kind = $1 and scope_owner = $2
+					  and subject_id = $3 and predicate = $4 and object_id = $5
+				)
+			`, scope.Kind, scope.Owner, subjectID, predicate, objectID).Scan(&anyExists)
+			if err != nil {
+				return fmt.Errorf("check existing relationship (any validity) %s %s %s: %w", subjectID, predicate, objectID, err)
+			}
+			if anyExists {
+				continue
+			}
+		}
+
 		// Conservative supersession, deliberately narrower than "same
 		// subject+predicate always supersedes the old object": that rule
 		// is wrong for a genuinely one-to-many predicate (e.g.

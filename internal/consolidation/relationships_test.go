@@ -338,3 +338,140 @@ func TestUpsertRelationships_DoesNotSupersedeWithoutExplicitValidFrom(t *testing
 		t.Errorf("open friends_with edges for Eli = %d, want 2 (both should still be open — no valid_from given, so neither should have been superseded)", count)
 	}
 }
+
+// TestUpsertRelationships_SkipsBareEdgeWhenAnyRecordOfTheSameTripleExists
+// is the regression test for a real production duplicate: the exact-match
+// check only catches a repeat with the *same* (valid_from, valid_until),
+// so a dateless mention of a relationship that was already recorded with
+// specific dates (a realistic scenario when clustering splits one day's
+// text into separate topic groups — see mergeConsolidationOutputs'
+// concatenation-with-no-cross-cluster-dedup) used to insert a third,
+// strictly-less-informative row for the exact same (subject, predicate,
+// object) triple. This is deliberately not the same mechanism as
+// DoesNotSupersedeWithoutExplicitValidFrom above — it never closes or
+// alters an existing row (so one-to-many predicates like friends_with
+// still work, see TestUpsertRelationships_SkipsBareEdgeOnlyForSameObject
+// below), it only skips inserting a new one that adds no information.
+func TestUpsertRelationships_SkipsBareEdgeWhenAnyRecordOfTheSameTripleExists(t *testing.T) {
+	runner, db := testRunner(t, "", "")
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-relationships-bare-dup"}
+	ctx := context.Background()
+	cleanupRelationshipScope(t, db, scope)
+
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		for _, e := range []struct{ id, kind, name string }{
+			{"person:priya", "person", "Priya"},
+			{"organization:acme", "organization", "Acme"},
+		} {
+			if _, err := tx.ExecContext(ctx, `
+				insert into entities (id, kind, name, scope_kind, scope_owner) values ($1, $2, $3, $4, $5)
+			`, e.id, e.kind, e.name, scope.Kind, scope.Owner); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed entities: %v", err)
+	}
+
+	upsert := func(updates []RelationshipUpdate) {
+		t.Helper()
+		err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+			return runner.upsertRelationships(ctx, tx, scope, updates, "")
+		})
+		if err != nil {
+			t.Fatalf("upsertRelationships: %v", err)
+		}
+	}
+
+	// First: a dated stint is recorded. Then: the same (subject,
+	// predicate, object) triple is extracted again with no dates at all
+	// — a realistic "a different part of the same day's text mentioned
+	// it without dates" case, not a literal re-consolidation repeat.
+	upsert([]RelationshipUpdate{
+		{SubjectKind: "person", SubjectName: "Priya", Predicate: "worked_at", ObjectKind: "organization", ObjectName: "Acme",
+			ValidFrom: "2019-01-01", ValidUntil: "2022-01-01"},
+	})
+	upsert([]RelationshipUpdate{
+		{SubjectKind: "person", SubjectName: "Priya", Predicate: "worked_at", ObjectKind: "organization", ObjectName: "Acme"},
+	})
+
+	var count int
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from entity_relationships
+			where scope_kind = $1 and scope_owner = $2 and subject_id = 'person:priya'
+			  and predicate = 'worked_at' and object_id = 'organization:acme'
+		`, scope.Kind, scope.Owner).Scan(&count)
+	})
+	if err != nil {
+		t.Fatalf("count relationships: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("rows for person:priya worked_at organization:acme = %d, want exactly 1 (the bare second mention should have been skipped as adding no new information)", count)
+	}
+}
+
+// TestUpsertRelationships_SkipsBareEdgeOnlyForSameObject confirms the new
+// bare-edge skip is scoped to the same object — it must not reintroduce
+// the one-to-many edge-loss concern DoesNotSupersedeWithoutExplicitValidFrom
+// above already protects against for a genuinely different object.
+func TestUpsertRelationships_SkipsBareEdgeOnlyForSameObject(t *testing.T) {
+	runner, db := testRunner(t, "", "")
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-relationships-bare-diffobj"}
+	ctx := context.Background()
+	cleanupRelationshipScope(t, db, scope)
+
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		for _, e := range []struct{ id, kind, name string }{
+			{"person:priya", "person", "Priya"},
+			{"organization:acme", "organization", "Acme"},
+			{"organization:globex", "organization", "Globex"},
+		} {
+			if _, err := tx.ExecContext(ctx, `
+				insert into entities (id, kind, name, scope_kind, scope_owner) values ($1, $2, $3, $4, $5)
+			`, e.id, e.kind, e.name, scope.Kind, scope.Owner); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed entities: %v", err)
+	}
+
+	upsert := func(updates []RelationshipUpdate) {
+		t.Helper()
+		err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+			return runner.upsertRelationships(ctx, tx, scope, updates, "")
+		})
+		if err != nil {
+			t.Fatalf("upsertRelationships: %v", err)
+		}
+	}
+
+	upsert([]RelationshipUpdate{
+		{SubjectKind: "person", SubjectName: "Priya", Predicate: "worked_at", ObjectKind: "organization", ObjectName: "Acme",
+			ValidFrom: "2019-01-01", ValidUntil: "2022-01-01"},
+	})
+	// A bare edge to a *different* object must still be inserted — this
+	// isn't a duplicate of anything.
+	upsert([]RelationshipUpdate{
+		{SubjectKind: "person", SubjectName: "Priya", Predicate: "worked_at", ObjectKind: "organization", ObjectName: "Globex"},
+	})
+
+	var count int
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from entity_relationships
+			where scope_kind = $1 and scope_owner = $2 and subject_id = 'person:priya' and predicate = 'worked_at'
+		`, scope.Kind, scope.Owner).Scan(&count)
+	})
+	if err != nil {
+		t.Fatalf("count relationships: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("worked_at edges for person:priya = %d, want 2 (bare edge to a different object must not be skipped)", count)
+	}
+}
