@@ -739,3 +739,61 @@ see whether both the $350k and $400k facts made it into storage at all,
 and if so, which one retrieval/fusion is ranking first — that tells
 whether this is a storage-completeness gap (one fact never got written)
 or a ranking/recency gap (both written, wrong one wins).
+
+### Follow-up: traced and fixed one layer, found a deeper one (2026-10-03)
+
+Traced per the "Next" step above. Root cause, in order:
+
+1. The $400,000 fact (from the Nov-30 session, where the user says
+   "remember when I got pre-approved for $400,000 from Wells Fargo?" and
+   the assistant — per this benchmark's own deliberate no-continuity
+   design — replies that it doesn't recall) was extracted correctly by
+   consolidation, but the separate grounding-check pass marked it
+   **ungrounded**. `summarySystemPrompt` already has a carve-out treating
+   "remember when X" as a direct statement; `groundingSystemPrompt` had
+   no equivalent, so the assistant's expected-but-irrelevant denial
+   likely read as casting doubt on the fact.
+2. Because it was ungrounded, it was invisible to **both** retrieval
+   (`loadKeyFacts`' `grounded=true` filter) and cross-period contradiction
+   detection (`loadGroundedKeyFactsByID`, same filter) — so the stale
+   $350k fact from 2023-08-11 was never corrected, and was the only
+   version the QA step ever saw.
+3. **Fixed** in PR #95: added the same "remember when X" carve-out to
+   `groundingSystemPrompt`, confirmed via a new live test against the
+   real gpt-4.1 judge (ungrounded → grounded) and via a from-scratch
+   re-consolidation of this exact scope (the $400k fact is now stored
+   grounded).
+4. Also checked the QA-step recency instruction
+   (`internal/qaprompt/qaprompt.go:111`, from Category 3's earlier work)
+   — already correct, already wired into `hupi-bench`'s real answer
+   path. Not a gap; no change made.
+
+**But the end-to-end answer is still wrong** after the fix above. Re-tracing
+with `HUPI_DEBUG_FUSION` post-fix shows the 2023-11-30 summary — now
+correctly holding the grounded $400k fact — **never enters the retrieval
+candidate pool at all** for this query. Candidate selection runs at the
+whole-summary level (vector+keyword fusion over the summary as a whole),
+and Nov-30's summary is dominated by ~19 unrelated facts (cable
+providers, electricity, moving logistics, home insurance) with the
+mortgage mention as a single buried aside — the summary's own
+embedding/keyword profile doesn't match a mortgage-focused query closely
+enough to make the candidate pool, even though one sentence inside it
+would be a near-perfect match in isolation. Per-fact ranking
+(`FACTRANK_DEBUG`) only runs on summaries that already made the pool, so
+a correctly-extracted, correctly-grounded fact can still be invisible if
+its parent summary covers mostly unrelated ground.
+
+This is the same underlying mechanism as the already-tracked `5809eb10`
+backlog item above ("RRF fusion weighting... underweighting a short,
+specific fact vs. longer generic ones") — not a new, separate class of
+bug, but now confirmed on a second, independent question. Fixing it
+properly likely means moving some retrieval-candidate signal to the
+individual-fact level rather than relying solely on whole-summary
+vector/keyword matching — a materially bigger change than this round's
+fixes, not attempted here.
+
+Next: this is now the clearest, best-understood lead for a real
+accuracy improvement — both `5809eb10` and `852ce960` point at the same
+mechanism. Worth designing deliberately (a dedicated plan section, same
+as Category 3's own phased approach) rather than a quick patch, given
+it touches the core retrieval scoring path every query uses.
