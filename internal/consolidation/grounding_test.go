@@ -413,6 +413,148 @@ func TestLiveGroundingCheckReproducesBatchMismatchWithRealData(t *testing.T) {
 	}
 }
 
+// TestLiveGroundingCheckAcceptsRememberWhenFactDespiteAssistantDenial is
+// the real, measured reproduction behind the groundingSystemPrompt
+// "remember when X" carve-out above: LongMemEval's 852ce960 scope has the
+// user ask "remember when I got pre-approved for $400,000 from Wells
+// Fargo?" and the assistant — per this benchmark's own deliberate
+// no-continuity design — reply that it doesn't recall. Before the
+// carve-out, the real gpt-4.1 grounding judge marked the resulting key
+// fact ungrounded, which made it invisible to both retrieval
+// (loadKeyFacts' own grounded=true filter) and cross-period contradiction
+// detection (loadGroundedKeyFactsByID, same filter) — so an earlier,
+// stale $350,000 pre-approval fact from a different day was never
+// corrected and was the only version ever surfaced to the QA step,
+// producing a wrong LongMemEval answer (see
+// docs/LONGMEMEVAL_ACCURACY_PLAN.md's round 4 section). This test
+// confirms the real judge now accepts the fact with the fixed prompt.
+func TestLiveGroundingCheckAcceptsRememberWhenFactDespiteAssistantDenial(t *testing.T) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	dbURL := os.Getenv("HUPI_DATABASE_URL")
+	kek := os.Getenv("HUPI_KEK")
+	if apiKey == "" || dbURL == "" || kek == "" {
+		t.Skip("OPENAI_API_KEY/HUPI_DATABASE_URL/HUPI_KEK not all set; skipping live real-data grounding reproduction")
+	}
+
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	kekBytes, err := base64.StdEncoding.DecodeString(kek)
+	if err != nil {
+		t.Fatalf("decode HUPI_KEK: %v", err)
+	}
+	keys := crypto.NewKeyStore(db, kekBytes)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:bench-longmemeval-hupi-852ce960"}
+	enc, _, err := keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("GetOrCreate key: %v", err)
+	}
+
+	const summaryID = "sum_user:bench-longmemeval-hupi-852ce960_2023-11-30_daily_v1"
+	rows, err := db.QueryContext(context.Background(), `
+		select fact from summary_key_facts
+		where summary_id = $1 and grounded = false
+		order by id`, summaryID)
+	if err != nil {
+		t.Fatalf("query facts: %v", err)
+	}
+	defer rows.Close()
+
+	var facts []KeyFactOutput
+	for rows.Next() {
+		var blob []byte
+		if err := rows.Scan(&blob); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		plain, err := enc.Decrypt(blob)
+		if err != nil {
+			t.Fatalf("decrypt fact: %v", err)
+		}
+		facts = append(facts, KeyFactOutput{Fact: plain})
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if len(facts) == 0 {
+		t.Skip("no ungrounded facts found for this summary — DB state may have changed (e.g. already re-consolidated with the fix)")
+	}
+	t.Logf("found %d ungrounded fact(s): %+v", len(facts), facts)
+
+	epRows, err := db.QueryContext(context.Background(), `
+		select id, ts, input_text, output_text from episodes
+		where scope_kind = $1 and scope_owner = $2
+		  and type = 'interaction' and ts::date = '2023-11-30'
+		order by ts`, scope.Kind, scope.Owner)
+	if err != nil {
+		t.Fatalf("query episodes: %v", err)
+	}
+	defer epRows.Close()
+
+	var sourceText strings.Builder
+	for epRows.Next() {
+		var id, ts string
+		var inBlob, outBlob []byte
+		if err := epRows.Scan(&id, &ts, &inBlob, &outBlob); err != nil {
+			t.Fatalf("scan episode: %v", err)
+		}
+		in, err := enc.Decrypt(inBlob)
+		if err != nil {
+			t.Fatalf("decrypt input_text: %v", err)
+		}
+		out, err := enc.Decrypt(outBlob)
+		if err != nil {
+			t.Fatalf("decrypt output_text: %v", err)
+		}
+		fmt.Fprintf(&sourceText, "--- id: %s (date: %s) ---\nUSER: %s\nASSISTANT: %s\n\n", id, ts, in, out)
+	}
+	if err := epRows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if sourceText.Len() == 0 {
+		t.Skip("no episodes found for 852ce960/2023-11-30")
+	}
+
+	real := provider.NewOpenAICompat(provider.OpenAICompatConfig{
+		Name:    "live-gpt41",
+		Vendor:  "openai",
+		Model:   "gpt-4.1",
+		BaseURL: "https://api.openai.com/v1",
+		APIKey:  apiKey,
+	})
+	resp, err := real.ChatCompletion(context.Background(), provider.ChatRequest{
+		Messages: []provider.Message{
+			{Role: provider.RoleSystem, Content: groundingSystemPrompt},
+			{Role: provider.RoleUser, Content: buildGroundingPrompt(sourceText.String(), facts)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	t.Logf("raw response:\n%s", resp.Message.Content)
+
+	var result struct {
+		Grounded []struct {
+			I  int  `json:"i"`
+			OK bool `json:"ok"`
+		} `json:"grounded"`
+	}
+	if err := json.Unmarshal([]byte(extractJSON(resp.Message.Content)), &result); err != nil {
+		t.Fatalf("could not parse response: %v", err)
+	}
+	if len(result.Grounded) != len(facts) {
+		t.Fatalf("sent %d facts, got %d verdicts", len(facts), len(result.Grounded))
+	}
+	for _, v := range result.Grounded {
+		if !v.OK {
+			t.Errorf("fact %d (%q) still judged ungrounded with the fixed prompt", v.I, facts[v.I-1].Fact)
+		}
+	}
+}
+
 func TestBuildGroundingPromptIncludesSourceAndNumberedFacts(t *testing.T) {
 	prompt := buildGroundingPrompt("the source text", []KeyFactOutput{
 		{Fact: "fact one"}, {Fact: "fact two"},
