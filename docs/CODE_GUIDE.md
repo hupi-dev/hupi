@@ -29,6 +29,8 @@ cmd/
   hupi-admin/            CLI — provision users/teams/memberships/API keys/operators
   hupi-admin-ui/         web server — same provisioning, browser UI, see ADMIN_UI.md
     web/                 the React frontend (Vite/TypeScript/Tailwind), embedded via assets.go's //go:embed web/dist
+  hupi-dashboard/        web server — read-only analytics over one scope's own memory, see DASHBOARD.md
+    web/                 the React frontend, same embed-via-assets.go pattern as hupi-admin-ui/web
   hupi-audit/            CLI — query audit_log (tail, filtered query)
   hupi-export/           CLI — write an age-encrypted HPMF snapshot, one scope or -all
   hupi-import/           CLI — load an HPMF snapshot back into Postgres, fresh or -merge
@@ -599,3 +601,4 @@ The full set of hooks, all following this pattern:
 | "How do I use HUPI from inside VS Code?" | [VSCODE_EXTENSION.md](VSCODE_EXTENSION.md), [vscode-extension/](../vscode-extension/) |
 | "Where do the published LoCoMo/LongMemEval numbers come from, and can I reproduce them?" | [BENCHMARKS.md](BENCHMARKS.md), §5's `cmd/hupi-bench` entry above, [bench/](../bench/) |
 | "What's next if Postgres/pgvector itself becomes the bottleneck at scale?" | [SCALING_ROADMAP.md](SCALING_ROADMAP.md) |
+| "What analytics/usage insight does a user get about their own memory?" | [DASHBOARD.md](DASHBOARD.md), `cmd/hupi-dashboard/` |

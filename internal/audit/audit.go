@@ -31,6 +31,11 @@ const (
 	EventKeyRotation = "key_rotation"
 	// EventReembed was added in schema/0013 — see internal/reembed.
 	EventReembed = "reembed"
+	// EventDashboardLogin was added in schema/0023 — every hupi-dashboard
+	// sign-in attempt (password or OIDC, success or failure), Tier 3 only;
+	// see cmd/hupi-dashboard/queries.go's securityPosture, which this
+	// gives a real signal to show.
+	EventDashboardLogin = "dashboard_login"
 )
 
 // Entry is one audit_log row. ActingScope/WorkspaceScope follow the same

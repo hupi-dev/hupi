@@ -120,24 +120,29 @@ go build -o bin/hupi-import      ./cmd/hupi-import
 go build -o bin/hupi-rotate-key  ./cmd/hupi-rotate-key
 go build -o bin/hupi-admin       ./cmd/hupi-admin
 go build -o bin/hupi-admin-ui    ./cmd/hupi-admin-ui  # optional — browser alternative to hupi-admin, see ADMIN_UI.md
+go build -o bin/hupi-dashboard   ./cmd/hupi-dashboard # optional — read-only analytics over your own memory, see DASHBOARD.md
 ```
 
-All six share one `go.mod` — a single `go build ./...` from the repo root
-also works if you'd rather not name each one.
+All seven share one `go.mod` — a single `go build ./...` from the repo
+root also works if you'd rather not name each one.
 
-**`hupi-admin-ui` embeds a React frontend built separately with npm** —
-`cmd/hupi-admin-ui/assets.go` does `//go:embed web/dist`, and
-`cmd/hupi-admin-ui/web/dist` is npm build output, not source-controlled
-(only a placeholder `index.html` is committed there so a plain `go build`
-never fails on a fresh clone — see `cmd/hupi-admin-ui/web/README.md`).
+**`hupi-admin-ui` and `hupi-dashboard` each embed a React frontend built
+separately with npm** — `cmd/hupi-admin-ui/assets.go` and
+`cmd/hupi-dashboard/assets.go` both do `//go:embed web/dist`, and each
+`web/dist` is npm build output, not source-controlled (only a placeholder
+`index.html` is committed in each so a plain `go build` never fails on a
+fresh clone — see `cmd/hupi-admin-ui/web/README.md`).
 `install.sh` and the Dockerfile both run the npm build automatically
-before compiling this binary; if you're building `hupi-admin-ui` by hand
-from a fresh clone, run the npm build first or you'll just get the
-placeholder page at `/`:
+before compiling these binaries; if you're building either by hand from a
+fresh clone, run the npm build first or you'll just get the placeholder
+page at `/`:
 
 ```bash
 cd cmd/hupi-admin-ui/web && npm ci && npm run build && cd -
 go build -o bin/hupi-admin-ui ./cmd/hupi-admin-ui
+
+cd cmd/hupi-dashboard/web && npm ci && npm run build && cd -
+go build -o bin/hupi-dashboard ./cmd/hupi-dashboard
 ```
 
 ## Step 5 — `providers.yaml`
