@@ -198,14 +198,106 @@ func memoryHealth(ctx context.Context, db *sql.DB, scope identity.Scope) (Memory
 	return h, err
 }
 
+// defaultForgottenMinImportance/-StaleDays are reasoned, not measured —
+// same honest status as this file's other UI-facing defaults
+// (summaryMaxResults-style constants in internal/store). This is a
+// display panel, not a retrieval-affecting decision, so unlike
+// keywordSearchNarrowThreshold these aren't env-var overridable — a
+// caller that wants different values just passes different query
+// params (handlers.go's queryFloat/queryInt already support that).
+const (
+	defaultForgottenMinImportance = 0.7
+	defaultForgottenStaleDays     = 30
+)
+
+// ForgottenEpisode is a high-importance episode nothing recent has
+// surfaced again — importance alone (episodes.importance, plaintext)
+// plus how long ago it happened.
+type ForgottenEpisode struct {
+	ID         string    `json:"id"`
+	Importance float64   `json:"importance"`
+	TS         time.Time `json:"ts"`
+}
+
+// StaleEntity is an entity nothing has touched in a while — last_updated
+// (plaintext, bumped every time storeSummary's upsertEntities touches
+// it) is the only "still relevant" signal entities carry; there's no
+// importance score on entities the way there is on episodes.
+type StaleEntity struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	LastUpdated string `json:"last_updated"`
+}
+
+type ForgottenButImportant struct {
+	Episodes []ForgottenEpisode `json:"episodes"`
+	Entities []StaleEntity      `json:"entities"`
+}
+
+// forgottenButImportant surfaces exactly what its name says: episodes
+// whose captured importance cleared minImportance but haven't happened
+// again in staleDays, and entities nothing has touched in that same
+// window — the "you flagged this as important, are you sure it's not
+// still relevant" nudge the plan's own design called "what the future
+// looks like."
+func forgottenButImportant(ctx context.Context, db *sql.DB, scope identity.Scope, minImportance float64, staleDays, limit int) (ForgottenButImportant, error) {
+	var result ForgottenButImportant
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		epRows, err := tx.QueryContext(ctx, `
+			select id, importance, ts from episodes
+			where type = 'interaction' and scope_kind = $1 and scope_owner = $2
+			  and importance >= $3 and ts < now() - make_interval(days => $4)
+			order by importance desc, ts desc
+			limit $5
+		`, scope.Kind, scope.Owner, minImportance, staleDays, limit)
+		if err != nil {
+			return err
+		}
+		defer epRows.Close()
+		for epRows.Next() {
+			var e ForgottenEpisode
+			if err := epRows.Scan(&e.ID, &e.Importance, &e.TS); err != nil {
+				return err
+			}
+			result.Episodes = append(result.Episodes, e)
+		}
+		if err := epRows.Err(); err != nil {
+			return err
+		}
+
+		entRows, err := tx.QueryContext(ctx, `
+			select id, name, kind, to_char(last_updated, 'YYYY-MM-DD') from entities
+			where scope_kind = $1 and scope_owner = $2
+			  and last_updated < current_date - $3::int
+			order by last_updated asc
+			limit $4
+		`, scope.Kind, scope.Owner, staleDays, limit)
+		if err != nil {
+			return err
+		}
+		defer entRows.Close()
+		for entRows.Next() {
+			var e StaleEntity
+			if err := entRows.Scan(&e.ID, &e.Name, &e.Kind, &e.LastUpdated); err != nil {
+				return err
+			}
+			result.Entities = append(result.Entities, e)
+		}
+		return entRows.Err()
+	})
+	return result, err
+}
+
 // KeywordSearchGovernance surfaces internal/store/retrieve.go's own
 // keywordSearchTierForScope decision for this scope — the same query and
-// thresholds that file uses, duplicated here rather than imported
-// because keywordSearchTierForScope is unexported (internal/store's own
-// package) and this dashboard has no other reason to depend on
-// internal/store (which also requires a provider.Embedder to construct a
-// Store, which this read-only dashboard doesn't have). Keep these two in
-// sync if the thresholds or table ever change.
+// thresholds that file uses, duplicated here rather than imported because
+// keywordSearchTierForScope is unexported (internal/store's own
+// package). handleExport does construct a real *store.Store (it has a
+// provider.Embedder available via server.registry), but this function
+// still doesn't reuse it — keywordSearchTierForScope isn't exported
+// regardless of whether a Store is in hand. Keep these two in sync if
+// the thresholds or table ever change.
 type KeywordSearchGovernance struct {
 	Tier             string `json:"tier"`
 	TotalCorpusSize  int    `json:"total_corpus_size"`

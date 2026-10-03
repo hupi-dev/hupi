@@ -3,6 +3,7 @@ import {
   api,
   ConversationVolumePoint,
   EntityRelationship,
+  ForgottenButImportant as ForgottenButImportantData,
   KeywordSearchGovernance,
   MemoryHealth,
   SecurityPosture,
@@ -31,14 +32,41 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
   const themes = useLoaded<ThemeWordCloudEntry[]>(() => api.themeWordCloud());
   const relationships = useLoaded<EntityRelationship[]>(() => api.entityRelationships());
   const health = useLoaded<MemoryHealth>(() => api.memoryHealth());
+  const forgotten = useLoaded<ForgottenButImportantData>(() => api.forgottenButImportant());
   const governance = useLoaded<KeywordSearchGovernance>(() => api.keywordSearchGovernance());
   const security = useLoaded<SecurityPosture>(() => api.securityPosture());
+  const [exporting, setExporting] = useState(false);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const data = await api.exportMemory();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `hupi-export-${whoami.scope_owner}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-6">
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">hupi-dashboard</h1>
-        <span className="text-sm text-slate-400">{whoami.scope_kind}:{whoami.scope_owner}</span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-slate-400">{whoami.scope_kind}:{whoami.scope_owner}</span>
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="rounded border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800 disabled:opacity-50"
+          >
+            {exporting ? "Exporting…" : "Export my memory"}
+          </button>
+        </div>
       </header>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -103,6 +131,34 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
               <dt className="text-slate-400">Last summary</dt>
               <dd>{health.last_summary_at ? new Date(health.last_summary_at).toLocaleDateString() : "—"}</dd>
             </dl>
+          )}
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Forgotten but important</CardTitle>
+          </CardHeader>
+          {forgotten === null ? (
+            <p className="text-sm text-slate-400">Loading…</p>
+          ) : forgotten.episodes.length === 0 && forgotten.entities.length === 0 ? (
+            <p className="text-sm text-slate-400">Nothing flagged important has gone stale.</p>
+          ) : (
+            <ul className="space-y-1 text-sm">
+              {forgotten.episodes.map((e) => (
+                <li key={e.id} className="flex justify-between">
+                  <span>High-importance conversation</span>
+                  <span className="text-slate-400">{new Date(e.ts).toLocaleDateString()}</span>
+                </li>
+              ))}
+              {forgotten.entities.map((e) => (
+                <li key={e.id} className="flex justify-between">
+                  <span>
+                    {e.name} <span className="text-slate-500">({e.kind})</span>
+                  </span>
+                  <span className="text-slate-400">not touched since {e.last_updated}</span>
+                </li>
+              ))}
+            </ul>
           )}
         </Card>
 

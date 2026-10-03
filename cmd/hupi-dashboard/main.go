@@ -43,7 +43,7 @@ func run() error {
 	}
 	defer deps.DB.Close()
 
-	srv := &server{db: deps.DB, registry: deps.Registry}
+	srv := &server{db: deps.DB, keys: deps.Keys, registry: deps.Registry}
 
 	top := http.NewServeMux()
 	top.Handle("/api/", requireDashboardSession(srv.routes()))

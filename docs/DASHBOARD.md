@@ -74,8 +74,10 @@ anywhere in `cmd/hupi-dashboard/queries.go`:
 | Theme word cloud | `entities.name`/`.kind` × `summaries.entities_touched` |
 | Entity relationships | `entity_relationships` (all columns plaintext) |
 | Memory health | `scope_corpus_size`, `summaries.created_at`/`.correction_reason` |
+| Forgotten but important | `episodes.importance`/`.ts` (stale + high-importance), `entities.last_updated` (stale) |
 | Retrieval governance | `scope_corpus_size` + the same thresholds `internal/store/retrieve.go`'s `keywordSearchTierForScope` uses |
 | Security posture | `key_rotations`, `audit_log` (export/import/key_rotation/correct/dashboard_login events) |
+| Export | `GET /api/export` — not a read-only plaintext panel like the rest, this one decrypts: it reuses `internal/store.Store.ExportMemory` exactly as `cmd/hupi-export-memory` does (same `store.New(db, keys, embedder)` construction), which already writes its own `audit_log` entry |
 
 `audit_log` has **no row-level-security restriction on `SELECT`** (its
 own migration's comment: "audit_log's entire purpose is cross-scope

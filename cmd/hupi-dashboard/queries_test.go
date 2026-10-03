@@ -91,6 +91,20 @@ func insertEntityRow(t *testing.T, db *sql.DB, scope identity.Scope, id, kind, n
 	}
 }
 
+func insertEntityRowWithLastUpdated(t *testing.T, db *sql.DB, scope identity.Scope, id, kind, name, lastUpdated string) {
+	t.Helper()
+	err := dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into entities (id, kind, name, last_updated, scope_kind, scope_owner)
+			values ($1, $2, $3, $4, $5, $6)
+		`, id, kind, name, lastUpdated, scope.Kind, scope.Owner)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test entity %s: %v", id, err)
+	}
+}
+
 func insertSummaryRow(t *testing.T, db *sql.DB, scope identity.Scope, id, period string, entitiesTouched []string, correctionReason string) {
 	t.Helper()
 	err := dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
@@ -265,6 +279,32 @@ func TestMemoryHealth_NoCorpusSizeRowYetIsNotAnError(t *testing.T) {
 	}
 	if health.EpisodeCount != 0 || health.SummaryCount != 0 {
 		t.Errorf("counts = %d/%d, want 0/0 for a brand-new scope", health.EpisodeCount, health.SummaryCount)
+	}
+}
+
+func TestForgottenButImportant_FindsOnlyStaleHighImportanceEpisodesAndEntities(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-forgotten"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	now := time.Now().UTC()
+	insertEpisode(t, db, scope, "ep_forgotten_stale_important", now.Add(-60*24*time.Hour), 0.9)   // stale + important: should surface
+	insertEpisode(t, db, scope, "ep_forgotten_recent_important", now.Add(-1*24*time.Hour), 0.9)   // important but recent: should not
+	insertEpisode(t, db, scope, "ep_forgotten_stale_unimportant", now.Add(-60*24*time.Hour), 0.2) // stale but unimportant: should not
+
+	insertEntityRowWithLastUpdated(t, db, scope, "project:stale", "project", "Stale Project", now.Add(-60*24*time.Hour).Format("2006-01-02"))
+	insertEntityRowWithLastUpdated(t, db, scope, "project:fresh", "project", "Fresh Project", now.Format("2006-01-02"))
+
+	result, err := forgottenButImportant(context.Background(), db, scope, 0.7, 30, 20)
+	if err != nil {
+		t.Fatalf("forgottenButImportant: %v", err)
+	}
+
+	if len(result.Episodes) != 1 || result.Episodes[0].ID != "ep_forgotten_stale_important" {
+		t.Errorf("episodes = %+v, want exactly ep_forgotten_stale_important", result.Episodes)
+	}
+	if len(result.Entities) != 1 || result.Entities[0].ID != "project:stale" {
+		t.Errorf("entities = %+v, want exactly project:stale", result.Entities)
 	}
 }
 

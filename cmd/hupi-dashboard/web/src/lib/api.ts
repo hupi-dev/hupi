@@ -33,6 +33,27 @@ export interface MemoryHealth {
   corrections_count: number;
 }
 
+export interface ForgottenEpisode {
+  id: string;
+  importance: number;
+  ts: string;
+}
+
+export interface StaleEntity {
+  id: string;
+  name: string;
+  kind: string;
+  last_updated: string;
+}
+
+// episodes/entities are typed non-nullable for the same reason
+// SecurityPosture.recent_events is below — api.forgottenButImportant's
+// .then() normalizes both before a component ever sees this type.
+export interface ForgottenButImportant {
+  episodes: ForgottenEpisode[];
+  entities: StaleEntity[];
+}
+
 export interface KeywordSearchGovernance {
   tier: "full" | "narrowed" | "disabled";
   total_corpus_size: number;
@@ -135,9 +156,19 @@ export const api = {
   themeWordCloud: (limit = 50) => request<ThemeWordCloudEntry[] | null>(`/theme-word-cloud?limit=${limit}`).then(orEmpty),
   entityRelationships: (limit = 200) => request<EntityRelationship[] | null>(`/entity-relationships?limit=${limit}`).then(orEmpty),
   memoryHealth: () => request<MemoryHealth>("/memory-health"),
+  forgottenButImportant: () =>
+    request<{ episodes: ForgottenEpisode[] | null; entities: StaleEntity[] | null }>("/forgotten-but-important").then((r) => ({
+      episodes: orEmpty(r.episodes),
+      entities: orEmpty(r.entities),
+    })),
   keywordSearchGovernance: () => request<KeywordSearchGovernance>("/keyword-search-governance"),
   securityPosture: (limit = 50) =>
     request<Omit<SecurityPosture, "recent_events"> & { recent_events: SecurityEvent[] | null }>(
       `/security-posture?limit=${limit}`,
     ).then((p) => ({ ...p, recent_events: orEmpty(p.recent_events) })),
+  // Goes through request() (not a plain <a href>) specifically so the
+  // Bearer session token (Tier 3) is attached — a bare link navigation
+  // can't set a custom header, so Dashboard.tsx turns this JSON back
+  // into a Blob and triggers the actual file download itself.
+  exportMemory: () => request<unknown>("/export"),
 };
