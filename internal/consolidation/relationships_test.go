@@ -475,3 +475,92 @@ func TestUpsertRelationships_SkipsBareEdgeOnlyForSameObject(t *testing.T) {
 		t.Errorf("worked_at edges for person:priya = %d, want 2 (bare edge to a different object must not be skipped)", count)
 	}
 }
+
+// TestUpsertRelationships_CanonicalizesBasedInToLivesInForPersonSubjects
+// confirms the based_in/lives_in synonym fix: a person's residence
+// extracted as "based_in" on one day and "lives_in" on another must land
+// as the same predicate, so they dedup instead of showing up as two
+// separate-looking relationships for the same fact.
+func TestUpsertRelationships_CanonicalizesBasedInToLivesInForPersonSubjects(t *testing.T) {
+	runner, db := testRunner(t, "", "")
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-relationships-based-in-alias"}
+	ctx := context.Background()
+	cleanupRelationshipScope(t, db, scope)
+
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		for _, e := range []struct{ id, kind, name string }{
+			{"person:sujith", "person", "Sujith"},
+			{"place:espoo", "place", "Espoo"},
+			{"organization:acme", "organization", "Acme"},
+		} {
+			if _, err := tx.ExecContext(ctx, `
+				insert into entities (id, kind, name, scope_kind, scope_owner) values ($1, $2, $3, $4, $5)
+			`, e.id, e.kind, e.name, scope.Kind, scope.Owner); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed entities: %v", err)
+	}
+
+	upsert := func(updates []RelationshipUpdate) {
+		t.Helper()
+		err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+			return runner.upsertRelationships(ctx, tx, scope, updates, "")
+		})
+		if err != nil {
+			t.Fatalf("upsertRelationships: %v", err)
+		}
+	}
+
+	upsert([]RelationshipUpdate{
+		{SubjectKind: "person", SubjectName: "Sujith", Predicate: "based_in", ObjectKind: "place", ObjectName: "Espoo"},
+	})
+	upsert([]RelationshipUpdate{
+		{SubjectKind: "person", SubjectName: "Sujith", Predicate: "lives_in", ObjectKind: "place", ObjectName: "Espoo"},
+	})
+	// An organization's based_in is a different, legitimate predicate
+	// (a registered location, not a residence) and must NOT be rewritten.
+	upsert([]RelationshipUpdate{
+		{SubjectKind: "organization", SubjectName: "Acme", Predicate: "based_in", ObjectKind: "place", ObjectName: "Espoo"},
+	})
+
+	var basedInCount, livesInCount int
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `
+			select count(*) from entity_relationships
+			where scope_kind = $1 and scope_owner = $2 and subject_id = 'person:sujith' and predicate = 'based_in'
+		`, scope.Kind, scope.Owner).Scan(&basedInCount); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `
+			select count(*) from entity_relationships
+			where scope_kind = $1 and scope_owner = $2 and subject_id = 'person:sujith' and predicate = 'lives_in'
+		`, scope.Kind, scope.Owner).Scan(&livesInCount)
+	})
+	if err != nil {
+		t.Fatalf("count relationships: %v", err)
+	}
+	if basedInCount != 0 {
+		t.Errorf("person:sujith based_in edges = %d, want 0 (should have been canonicalized to lives_in)", basedInCount)
+	}
+	if livesInCount != 1 {
+		t.Errorf("person:sujith lives_in edges = %d, want exactly 1 (both mentions should have merged into one)", livesInCount)
+	}
+
+	var orgBasedInCount int
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*) from entity_relationships
+			where scope_kind = $1 and scope_owner = $2 and subject_id = 'organization:acme' and predicate = 'based_in'
+		`, scope.Kind, scope.Owner).Scan(&orgBasedInCount)
+	})
+	if err != nil {
+		t.Fatalf("count org relationships: %v", err)
+	}
+	if orgBasedInCount != 1 {
+		t.Errorf("organization:acme based_in edges = %d, want 1 (organization's based_in must not be rewritten to lives_in)", orgBasedInCount)
+	}
+}

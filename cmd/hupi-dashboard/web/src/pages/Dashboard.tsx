@@ -341,10 +341,23 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
             ) : (
               <ul className="space-y-1 text-sm">
                 {relationships.map((r, i) => (
-                  <li key={i}>
-                    <span className="text-fog-100">{r.subject_id}</span>{" "}
-                    <span className="font-mono-tight text-ember-500">{r.predicate}</span>{" "}
-                    <span className="text-fog-100">{r.object_id}</span>
+                  <li key={i} className="flex items-baseline justify-between gap-2">
+                    <span>
+                      <span className="text-fog-100">{r.subject_id}</span>{" "}
+                      <span className="font-mono-tight text-ember-500">{r.predicate}</span>{" "}
+                      <span className="text-fog-100">{r.object_id}</span>
+                    </span>
+                    {/* Two rows can legitimately share the exact same
+                        subject/predicate/object (e.g. two separate
+                        employment stints at the same company) — without
+                        this, they render as identical-looking duplicate
+                        lines even though the dates make them genuinely
+                        different records. */}
+                    <span className="shrink-0 font-mono-tight text-xs text-fog-700">
+                      {r.valid_from || r.valid_until
+                        ? `${r.valid_from ?? "…"} – ${r.valid_until ?? "now"}`
+                        : "dates unknown"}
+                    </span>
                   </li>
                 ))}
               </ul>
