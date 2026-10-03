@@ -51,7 +51,7 @@ export function App() {
   useEffect(checkSession, []);
 
   if (loading) {
-    return <div className="flex h-full items-center justify-center text-slate-400">Loading…</div>;
+    return <div className="flex h-full min-h-screen items-center justify-center bg-ink text-fog-500">Loading…</div>;
   }
   if (needsLogin || !whoami) {
     return <Login onLoggedIn={checkSession} />;

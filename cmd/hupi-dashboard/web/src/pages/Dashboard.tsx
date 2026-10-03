@@ -1,5 +1,16 @@
 import { useEffect, useState } from "react";
 import {
+  Activity,
+  Download,
+  Eye,
+  GitBranch,
+  HeartPulse,
+  ShieldCheck,
+  Sparkles,
+  Tags,
+  TimerReset,
+} from "lucide-react";
+import {
   api,
   ConversationVolumePoint,
   EntityRelationship,
@@ -13,7 +24,7 @@ import {
   Workspace,
 } from "../lib/api";
 import { loadWorkspace, saveWorkspace } from "../lib/session";
-import { Card, CardHeader, CardTitle } from "../components/Card";
+import { Card, CardHeader, CardIcon, CardTitle } from "../components/Card";
 
 function useLoaded<T>(load: () => Promise<T>): T | null {
   const [value, setValue] = useState<T | null>(null);
@@ -28,6 +39,10 @@ function useLoaded<T>(load: () => Promise<T>): T | null {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return value;
+}
+
+function Loading() {
+  return <p className="text-sm text-fog-500">Loading…</p>;
 }
 
 export function Dashboard({ whoami }: { whoami: Whoami }) {
@@ -75,223 +90,302 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
   };
 
   return (
-    <div className="mx-auto max-w-5xl space-y-4 p-6">
-      <header className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">hupi-dashboard</h1>
-        <div className="flex items-center gap-3">
-          {workspaces && workspaces.length > 0 && (
-            <select
-              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
-              value={loadWorkspace() ?? ""}
-              onChange={(e) => handleWorkspaceChange(e.target.value)}
+    <div className="relative min-h-full overflow-hidden">
+      {/* Ambient glow + grid, same ingredients as the marketing site's own
+          Hero.astro — a blurred ember blob behind the header, a faint
+          line-grid radially masked toward the page's own focal point. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute -top-40 left-1/2 h-[28rem] w-[28rem] -translate-x-1/2 rounded-full bg-ember-600/20 blur-[120px]"
+      />
+      <div
+        aria-hidden
+        className="bg-grid pointer-events-none absolute inset-x-0 top-0 h-80 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"
+      />
+
+      <div className="relative mx-auto max-w-5xl space-y-5 p-6">
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/5 pb-5">
+          <div>
+            <p className="font-mono-tight text-xs uppercase tracking-widest text-ember-500">memory, in view</p>
+            <h1 className="text-2xl font-extrabold tracking-tight text-fog-100">hupi-dashboard</h1>
+          </div>
+          <div className="flex items-center gap-3">
+            {workspaces && workspaces.length > 0 && (
+              <select
+                className="rounded-lg border border-white/15 bg-navy-900 px-2 py-1.5 text-sm text-fog-100 transition-colors hover:border-white/30"
+                value={loadWorkspace() ?? ""}
+                onChange={(e) => handleWorkspaceChange(e.target.value)}
+              >
+                <option value="">My own memory</option>
+                {workspaces.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <span className="font-mono-tight text-sm text-fog-500">
+              {whoami.scope_kind}:{whoami.scope_owner}
+            </span>
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 px-3 py-1.5 text-sm font-medium text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5 disabled:opacity-50"
             >
-              <option value="">My own memory</option>
-              {workspaces.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-            </select>
-          )}
-          <span className="text-sm text-slate-400">{whoami.scope_kind}:{whoami.scope_owner}</span>
-          <button
-            onClick={handleExport}
-            disabled={exporting}
-            className="rounded border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800 disabled:opacity-50"
-          >
-            {exporting ? "Exporting…" : "Export my memory"}
-          </button>
-        </div>
-      </header>
+              <Download size={14} />
+              {exporting ? "Exporting…" : "Export my memory"}
+            </button>
+          </div>
+        </header>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Conversation volume (last 90 days)</CardTitle>
-          </CardHeader>
-          {volume === null ? (
-            <p className="text-sm text-slate-400">Loading…</p>
-          ) : volume.length === 0 ? (
-            <p className="text-sm text-slate-400">No interactions yet.</p>
-          ) : (
-            <ul className="space-y-1 text-sm">
-              {volume.map((p) => (
-                <li key={p.day} className="flex justify-between">
-                  <span className="text-slate-400">{p.day}</span>
-                  <span>{p.count}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Themes</CardTitle>
-          </CardHeader>
-          {themes === null ? (
-            <p className="text-sm text-slate-400">Loading…</p>
-          ) : themes.length === 0 ? (
-            <p className="text-sm text-slate-400">Nothing consolidated yet.</p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {themes.map((t) => (
-                <span
-                  key={t.entity_id}
-                  className="rounded-full bg-slate-800 px-3 py-1 text-sm"
-                  style={{ fontSize: `${Math.min(1.6, 0.8 + t.mentions / 10)}rem` }}
-                  title={`${t.kind}, mentioned ${t.mentions}x`}
-                >
-                  {t.name}
-                </span>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        {contentThemes?.enabled && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <Card>
             <CardHeader>
-              <CardTitle>Content themes (decrypted on view)</CardTitle>
+              <div className="flex items-center gap-3">
+                <CardIcon>
+                  <Activity size={18} />
+                </CardIcon>
+                <CardTitle>Conversation volume (last 90 days)</CardTitle>
+              </div>
             </CardHeader>
-            {!contentThemes.terms || contentThemes.terms.length === 0 ? (
-              <p className="text-sm text-slate-400">Nothing in this window yet.</p>
+            {volume === null ? (
+              <Loading />
+            ) : volume.length === 0 ? (
+              <p className="text-sm text-fog-500">No interactions yet.</p>
+            ) : (
+              <ul className="space-y-1 text-sm">
+                {volume.map((p) => (
+                  <li key={p.day} className="flex justify-between">
+                    <span className="font-mono-tight text-fog-500">{p.day}</span>
+                    <span className="text-fog-100">{p.count}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <CardIcon>
+                  <Tags size={18} />
+                </CardIcon>
+                <CardTitle>Themes</CardTitle>
+              </div>
+            </CardHeader>
+            {themes === null ? (
+              <Loading />
+            ) : themes.length === 0 ? (
+              <p className="text-sm text-fog-500">Nothing consolidated yet.</p>
             ) : (
               <div className="flex flex-wrap gap-2">
-                {contentThemes.terms.map((t) => (
-                  <span key={t.term} className="rounded-full bg-slate-800 px-3 py-1 text-sm" title={`${t.count}x`}>
-                    {t.term}
+                {themes.map((t) => (
+                  <span
+                    key={t.entity_id}
+                    className="rounded-full border border-ember-500/20 bg-ember-500/10 px-3 py-1 text-sm text-fog-100 transition-colors hover:border-ember-500/40"
+                    style={{ fontSize: `${Math.min(1.6, 0.8 + t.mentions / 10)}rem` }}
+                    title={`${t.kind}, mentioned ${t.mentions}x`}
+                  >
+                    {t.name}
                   </span>
                 ))}
               </div>
             )}
           </Card>
-        )}
 
-        {narrative?.enabled && narrative.narrative && (
+          {contentThemes?.enabled && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <CardIcon>
+                    <Sparkles size={18} />
+                  </CardIcon>
+                  <CardTitle>Content themes (decrypted on view)</CardTitle>
+                </div>
+              </CardHeader>
+              {!contentThemes.terms || contentThemes.terms.length === 0 ? (
+                <p className="text-sm text-fog-500">Nothing in this window yet.</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {contentThemes.terms.map((t) => (
+                    <span
+                      key={t.term}
+                      className="rounded-full border border-white/10 bg-navy-800 px-3 py-1 text-sm text-fog-300"
+                      title={`${t.count}x`}
+                    >
+                      {t.term}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
+
+          {narrative?.enabled && narrative.narrative && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center gap-3">
+                  <CardIcon>
+                    <Sparkles size={18} />
+                  </CardIcon>
+                  <CardTitle>Narrative summary (decrypted on view)</CardTitle>
+                </div>
+              </CardHeader>
+              <p className="text-sm leading-relaxed text-fog-300">{narrative.narrative}</p>
+            </Card>
+          )}
+
           <Card>
             <CardHeader>
-              <CardTitle>Narrative summary (decrypted on view)</CardTitle>
+              <div className="flex items-center gap-3">
+                <CardIcon>
+                  <HeartPulse size={18} />
+                </CardIcon>
+                <CardTitle>Memory health</CardTitle>
+              </div>
             </CardHeader>
-            <p className="text-sm">{narrative.narrative}</p>
+            {health === null ? (
+              <Loading />
+            ) : (
+              <dl className="grid grid-cols-2 gap-y-2 text-sm">
+                <dt className="text-fog-500">Episodes</dt>
+                <dd className="font-mono-tight text-fog-100">{health.episode_count}</dd>
+                <dt className="text-fog-500">Summaries</dt>
+                <dd className="font-mono-tight text-fog-100">{health.summary_count}</dd>
+                <dt className="text-fog-500">Corrections applied</dt>
+                <dd className="font-mono-tight text-fog-100">{health.corrections_count}</dd>
+                <dt className="text-fog-500">Last summary</dt>
+                <dd className="text-fog-100">
+                  {health.last_summary_at ? new Date(health.last_summary_at).toLocaleDateString() : "—"}
+                </dd>
+              </dl>
+            )}
           </Card>
-        )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Memory health</CardTitle>
-          </CardHeader>
-          {health === null ? (
-            <p className="text-sm text-slate-400">Loading…</p>
-          ) : (
-            <dl className="grid grid-cols-2 gap-y-1 text-sm">
-              <dt className="text-slate-400">Episodes</dt>
-              <dd>{health.episode_count}</dd>
-              <dt className="text-slate-400">Summaries</dt>
-              <dd>{health.summary_count}</dd>
-              <dt className="text-slate-400">Corrections applied</dt>
-              <dd>{health.corrections_count}</dd>
-              <dt className="text-slate-400">Last summary</dt>
-              <dd>{health.last_summary_at ? new Date(health.last_summary_at).toLocaleDateString() : "—"}</dd>
-            </dl>
-          )}
-        </Card>
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <CardIcon>
+                  <TimerReset size={18} />
+                </CardIcon>
+                <CardTitle>Forgotten but important</CardTitle>
+              </div>
+            </CardHeader>
+            {forgotten === null ? (
+              <Loading />
+            ) : forgotten.episodes.length === 0 && forgotten.entities.length === 0 ? (
+              <p className="text-sm text-fog-500">Nothing flagged important has gone stale.</p>
+            ) : (
+              <ul className="space-y-1 text-sm">
+                {forgotten.episodes.map((e) => (
+                  <li key={e.id} className="flex justify-between">
+                    <span className="text-fog-100">High-importance conversation</span>
+                    <span className="font-mono-tight text-fog-500">{new Date(e.ts).toLocaleDateString()}</span>
+                  </li>
+                ))}
+                {forgotten.entities.map((e) => (
+                  <li key={e.id} className="flex justify-between">
+                    <span className="text-fog-100">
+                      {e.name} <span className="text-fog-700">({e.kind})</span>
+                    </span>
+                    <span className="font-mono-tight text-fog-500">not touched since {e.last_updated}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Forgotten but important</CardTitle>
-          </CardHeader>
-          {forgotten === null ? (
-            <p className="text-sm text-slate-400">Loading…</p>
-          ) : forgotten.episodes.length === 0 && forgotten.entities.length === 0 ? (
-            <p className="text-sm text-slate-400">Nothing flagged important has gone stale.</p>
-          ) : (
-            <ul className="space-y-1 text-sm">
-              {forgotten.episodes.map((e) => (
-                <li key={e.id} className="flex justify-between">
-                  <span>High-importance conversation</span>
-                  <span className="text-slate-400">{new Date(e.ts).toLocaleDateString()}</span>
-                </li>
-              ))}
-              {forgotten.entities.map((e) => (
-                <li key={e.id} className="flex justify-between">
-                  <span>
-                    {e.name} <span className="text-slate-500">({e.kind})</span>
-                  </span>
-                  <span className="text-slate-400">not touched since {e.last_updated}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <CardIcon>
+                  <Eye size={18} />
+                </CardIcon>
+                <CardTitle>Retrieval governance</CardTitle>
+              </div>
+            </CardHeader>
+            {governance === null ? (
+              <Loading />
+            ) : (
+              <p className="text-sm text-fog-300">
+                Keyword search is currently{" "}
+                <span className="rounded-full border border-ember-500/30 bg-ember-500/10 px-2 py-0.5 font-mono-tight text-ember-500">
+                  {governance.tier}
+                </span>{" "}
+                for this scope
+                {governance.tier !== "full" && (
+                  <>
+                    {" "}
+                    ({governance.total_corpus_size} items, narrow at {governance.narrow_threshold}, disable at{" "}
+                    {governance.disable_threshold})
+                  </>
+                )}
+                .
+              </p>
+            )}
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Retrieval governance</CardTitle>
-          </CardHeader>
-          {governance === null ? (
-            <p className="text-sm text-slate-400">Loading…</p>
-          ) : (
-            <p className="text-sm">
-              Keyword search is currently <strong>{governance.tier}</strong> for this scope
-              {governance.tier !== "full" && (
-                <> ({governance.total_corpus_size} items, narrow at {governance.narrow_threshold}, disable at {governance.disable_threshold})</>
-              )}
-              .
-            </p>
-          )}
-        </Card>
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <CardIcon>
+                  <GitBranch size={18} />
+                </CardIcon>
+                <CardTitle>Entity relationships</CardTitle>
+              </div>
+            </CardHeader>
+            {relationships === null ? (
+              <Loading />
+            ) : relationships.length === 0 ? (
+              <p className="text-sm text-fog-500">None yet.</p>
+            ) : (
+              <ul className="space-y-1 text-sm">
+                {relationships.map((r, i) => (
+                  <li key={i}>
+                    <span className="text-fog-100">{r.subject_id}</span>{" "}
+                    <span className="font-mono-tight text-ember-500">{r.predicate}</span>{" "}
+                    <span className="text-fog-100">{r.object_id}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Entity relationships</CardTitle>
-          </CardHeader>
-          {relationships === null ? (
-            <p className="text-sm text-slate-400">Loading…</p>
-          ) : relationships.length === 0 ? (
-            <p className="text-sm text-slate-400">None yet.</p>
-          ) : (
-            <ul className="space-y-1 text-sm">
-              {relationships.map((r, i) => (
-                <li key={i}>
-                  <span className="text-slate-300">{r.subject_id}</span>{" "}
-                  <span className="text-slate-500">{r.predicate}</span>{" "}
-                  <span className="text-slate-300">{r.object_id}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Security posture</CardTitle>
-          </CardHeader>
-          {security === null ? (
-            <p className="text-sm text-slate-400">Loading…</p>
-          ) : (
-            <div className="space-y-2 text-sm">
-              {security.key_rotation && (
-                <p>
-                  Key rotation: v{security.key_rotation.from_version} → v{security.key_rotation.to_version} (
-                  {security.key_rotation.status})
-                </p>
-              )}
-              {security.recent_events.length === 0 ? (
-                <p className="text-slate-400">No export, import, correction, or key-rotation events.</p>
-              ) : (
-                <ul className="space-y-1">
-                  {security.recent_events.map((e, i) => (
-                    <li key={i} className="flex justify-between">
-                      <span>{e.event_type}</span>
-                      <span className="text-slate-400">{new Date(e.ts).toLocaleString()}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-        </Card>
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <CardIcon>
+                  <ShieldCheck size={18} />
+                </CardIcon>
+                <CardTitle>Security posture</CardTitle>
+              </div>
+            </CardHeader>
+            {security === null ? (
+              <Loading />
+            ) : (
+              <div className="space-y-2 text-sm">
+                {security.key_rotation && (
+                  <p className="text-fog-300">
+                    Key rotation: v{security.key_rotation.from_version} → v{security.key_rotation.to_version} (
+                    {security.key_rotation.status})
+                  </p>
+                )}
+                {security.recent_events.length === 0 ? (
+                  <p className="text-fog-500">No export, import, correction, or key-rotation events.</p>
+                ) : (
+                  <ul className="space-y-1">
+                    {security.recent_events.map((e, i) => (
+                      <li key={i} className="flex justify-between">
+                        <span className="text-fog-100">{e.event_type}</span>
+                        <span className="font-mono-tight text-fog-500">{new Date(e.ts).toLocaleString()}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </Card>
+        </div>
       </div>
     </div>
   );
