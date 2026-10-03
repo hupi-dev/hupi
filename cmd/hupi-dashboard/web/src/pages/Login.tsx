@@ -45,19 +45,28 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   };
 
   return (
-    <div className="flex h-full items-center justify-center">
-      <Card className="w-full max-w-sm">
-        <h1 className="mb-4 text-lg font-semibold">Sign in to hupi-dashboard</h1>
+    <div className="relative flex h-full min-h-screen items-center justify-center overflow-hidden">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute left-1/2 top-1/3 h-[28rem] w-[28rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-ember-600/20 blur-[120px]"
+      />
+      <div
+        aria-hidden
+        className="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_40%,black,transparent)]"
+      />
+      <Card className="relative w-full max-w-sm">
+        <p className="font-mono-tight mb-1 text-xs uppercase tracking-widest text-ember-500">hupi-dashboard</p>
+        <h1 className="mb-4 text-lg font-bold text-fog-100">Sign in to your memory</h1>
         <form onSubmit={handleSubmit} className="space-y-3">
           <input
-            className="w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className="w-full rounded-lg border border-white/15 bg-navy-950 px-3 py-2 text-sm text-fog-100 placeholder:text-fog-700 focus:border-ember-500 focus:outline-none"
             placeholder="Username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             autoComplete="username"
           />
           <input
-            className="w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm"
+            className="w-full rounded-lg border border-white/15 bg-navy-950 px-3 py-2 text-sm text-fog-100 placeholder:text-fog-700 focus:border-ember-500 focus:outline-none"
             placeholder="Password"
             type="password"
             value={password}
@@ -68,15 +77,15 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full rounded bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+            className="w-full rounded-lg bg-ember-500 px-3 py-2 text-sm font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400 hover:shadow-ember-500/30 disabled:opacity-50"
           >
             Sign in
           </button>
         </form>
-        <div className="mt-4 border-t border-slate-800 pt-4">
+        <div className="mt-4 border-t border-white/10 pt-4">
           <a
             href="/auth/login/oidc/start"
-            className="block w-full rounded border border-slate-700 px-3 py-2 text-center text-sm hover:bg-slate-800"
+            className="block w-full rounded-lg border border-white/15 px-3 py-2 text-center text-sm text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5"
           >
             Sign in with SSO
           </a>
