@@ -51,16 +51,24 @@ Two credential types converge on minting the same session token
 (`dashboard_sessions`, `schema/0023_dashboard_sessions.sql`):
 
 - **Password**: `POST /auth/login/password {username, password}` —
-  bcrypt-verified against `users.password_hash`, set only via a new
-  `hupi-admin set-password` subcommand (admin-driven, no self-service
-  reset, matching `create-user`/`create-key`/`create-operator`'s existing
-  admin-only provisioning model).
+  `username` is the user's own id (e.g. `user:alice`, not a separate
+  username field — `users` has none), bcrypt-verified via
+  `internal/auth.Store.VerifyPassword` against `users.password_hash`,
+  set only via `hupi-admin set-password -user <id>` (admin-driven, no
+  self-service reset, matching `create-user`/`create-key`/
+  `create-operator`'s existing admin-only provisioning model —
+  `set-password` itself lives in the **public** repo's `cmd/hupi-admin`
+  since the underlying operation needs nothing team-specific, unlike
+  `add-member`/`create-key`).
 - **OIDC/SSO**: `GET /auth/login/oidc/start` redirects into a genuine
   Authorization Code + PKCE flow against the configured IdP;
-  `/auth/login/oidc/callback` completes it. The JWT *verification* half
-  reuses `internal/auth/oidc.go`'s existing issuer/audience/JWKS logic
-  directly — only the redirect/callback flow-initiation code is new, since
-  that package previously only verified an already-issued JWT passed as
+  `/auth/login/oidc/callback` completes it, then redirects back to `/`
+  with the minted session token in a one-time `?dashboard_token=...`
+  query param — `App.tsx`'s `consumeOidcCallbackToken` reads it, saves it,
+  and strips it from the URL on mount. The JWT *verification* half reuses
+  `internal/auth/oidc.go`'s existing issuer/audience/JWKS logic directly —
+  only the redirect/callback flow-initiation code is new, since that
+  package previously only verified an already-issued JWT passed as
   `Authorization: Bearer`.
 
 ## Panels and their data sources
@@ -88,26 +96,42 @@ audit trail. `hupi_app` also has no `DELETE` grant on `audit_log` at all
 (append-only by design) — relevant if you're ever cleaning up test data
 against a real database, not just this package's own tests.
 
-## Phase 2 — decrypt-on-view themes (not yet built)
+## Phase 2 — decrypt-on-view themes
 
-A deliberately separate, opt-in feature: real topic extraction over
-decrypted conversation content, gated by
-`HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` (default `false`, same honest
-opt-in convention as `HUPI_ENABLE_KEYWORD_SEARCH`). Decrypts episodes/
-summaries for the requested window via the scope's `KeyStore` (the same
-pattern `internal/store/retrieve.go` already uses), runs local TF-IDF/
-keyword-frequency extraction in Go — no LLM call, decrypted content never
-leaves the server process — and returns only the aggregated term list,
-never raw text, never cached. A second, separately-gated toggle
-(`HUPI_ENABLE_DASHBOARD_LLM_THEMES`) will later add an LLM-powered
-narrative summary on top, reusing the same provider registry retrieval/
-consolidation already trust with plaintext.
+A deliberately separate, opt-in feature (`cmd/hupi-dashboard/content_analysis.go`):
+real topic extraction over decrypted conversation content, the one place
+in this product where plaintext touches a request/response path outside
+the retrieve-or-consolidate-then-reencrypt loop.
+
+- **`GET /api/content-themes`** (2a) — gated by
+  `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` (default `false`, same honest
+  opt-in convention as `HUPI_ENABLE_KEYWORD_SEARCH`). Decrypts episode
+  input/output text and current-summary prose for the requested window
+  via the scope's `KeyStore` (the same per-row `key_version` → `GetVersion`
+  pattern `internal/store/retrieve.go` already uses), runs local
+  keyword-frequency extraction in Go — no LLM call, decrypted content
+  never leaves the server process — and returns only the aggregated term
+  list, never raw text, never cached. When the flag is off, returns
+  `{"enabled": false}` (not an error), so the frontend can treat it as a
+  normal, hideable state.
+- **`GET /api/content-themes/narrative`** (2b) — a separate toggle,
+  `HUPI_ENABLE_DASHBOARD_LLM_THEMES` (also default `false`), decrypting
+  the same window and asking `internal/provider.Registry.Chat()` (the
+  same provider profile retrieval/consolidation already trust with
+  plaintext) for a short narrative paragraph instead of a bare term list.
+
+Both decrypt via `decryptRecentText`, bounded by
+`defaultContentAnalysisMaxChars` (200,000 characters, reasoned not
+measured) so one request can't decrypt an entire unbounded scope's
+history — this is a display feature, not a retrieval path.
 
 ## Env vars
 
 | Var | Meaning | Default |
 |---|---|---|
 | `HUPI_DASHBOARD_LISTEN_ADDR` | Listen address | `127.0.0.1:8790` |
+| `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` | Phase 2a local keyword themes | `false` |
+| `HUPI_ENABLE_DASHBOARD_LLM_THEMES` | Phase 2b LLM narrative themes | `false` |
 
 Same bind-to-localhost posture as `cmd/hupi-admin-ui` — this reads real
 data about one scope's memory and should sit behind a trusted user's own

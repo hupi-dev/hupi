@@ -7,6 +7,7 @@ import {
   KeywordSearchGovernance,
   MemoryHealth,
   SecurityPosture,
+  TermFrequency,
   ThemeWordCloudEntry,
   Whoami,
 } from "../lib/api";
@@ -35,6 +36,11 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
   const forgotten = useLoaded<ForgottenButImportantData>(() => api.forgottenButImportant());
   const governance = useLoaded<KeywordSearchGovernance>(() => api.keywordSearchGovernance());
   const security = useLoaded<SecurityPosture>(() => api.securityPosture());
+  // Phase 2, opt-in and off by default server-side (docs/DASHBOARD.md) —
+  // both come back as {enabled:false} rather than an error when their
+  // env var isn't set, so these render nothing rather than a broken card.
+  const contentThemes = useLoaded<{ enabled: boolean; terms?: TermFrequency[] }>(() => api.contentThemes());
+  const narrative = useLoaded<{ enabled: boolean; narrative?: string }>(() => api.contentThemesNarrative());
   const [exporting, setExporting] = useState(false);
 
   const handleExport = async () => {
@@ -113,6 +119,34 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
             </div>
           )}
         </Card>
+
+        {contentThemes?.enabled && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Content themes (decrypted on view)</CardTitle>
+            </CardHeader>
+            {!contentThemes.terms || contentThemes.terms.length === 0 ? (
+              <p className="text-sm text-slate-400">Nothing in this window yet.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {contentThemes.terms.map((t) => (
+                  <span key={t.term} className="rounded-full bg-slate-800 px-3 py-1 text-sm" title={`${t.count}x`}>
+                    {t.term}
+                  </span>
+                ))}
+              </div>
+            )}
+          </Card>
+        )}
+
+        {narrative?.enabled && narrative.narrative && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Narrative summary (decrypted on view)</CardTitle>
+            </CardHeader>
+            <p className="text-sm">{narrative.narrative}</p>
+          </Card>
+        )}
 
         <Card>
           <CardHeader>

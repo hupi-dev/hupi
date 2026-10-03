@@ -11,9 +11,10 @@ import { Card } from "../components/Card";
 //   POST /auth/login/password {username, password} -> 200 {token: string} | 4xx {error: string}
 //   GET  /auth/login/oidc/start -> redirects the browser into the IdP's
 //     Authorization Code + PKCE flow; /auth/login/oidc/callback completes
-//     it server-side and redirects back here with the same {token} shape
-//     delivered via a one-time query param this page reads on mount — see
-//     docs/DASHBOARD.md's login section for the exact handoff.
+//     it server-side and redirects back to "/" with the session token in
+//     a one-time ?dashboard_token=... query param, which App.tsx's
+//     consumeOidcCallbackToken reads, saves, and strips from the URL —
+//     see docs/DASHBOARD.md's login section for the full handoff.
 export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");

@@ -54,6 +54,13 @@ export interface ForgottenButImportant {
   entities: StaleEntity[];
 }
 
+// TermFrequency is Phase 2a's (decrypt-on-view, opt-in) local
+// keyword-frequency output — see cmd/hupi-dashboard/content_analysis.go.
+export interface TermFrequency {
+  term: string;
+  count: number;
+}
+
 export interface KeywordSearchGovernance {
   tier: "full" | "narrowed" | "disabled";
   total_corpus_size: number;
@@ -171,4 +178,8 @@ export const api = {
   // can't set a custom header, so Dashboard.tsx turns this JSON back
   // into a Blob and triggers the actual file download itself.
   exportMemory: () => request<unknown>("/export"),
+  contentThemes: (days = 30) =>
+    request<{ enabled: boolean; terms?: TermFrequency[] }>(`/content-themes?days=${days}`),
+  contentThemesNarrative: (days = 30) =>
+    request<{ enabled: boolean; narrative?: string }>(`/content-themes/narrative?days=${days}`),
 };

@@ -10,6 +10,7 @@
 // Usage:
 //
 //	hupi-admin create-user     -id user:alice -email alice@example.com
+//	hupi-admin set-password    -user user:alice
 //	hupi-admin create-team     -id team:acme-eng -name "Acme Eng"
 //	hupi-admin add-member      -team team:acme-eng -user user:alice [-role admin]
 //	hupi-admin create-key      -user user:alice
@@ -21,10 +22,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"hupi/internal/audit"
 	"hupi/internal/auth"
@@ -49,7 +52,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: hupi-admin <create-user|create-team|add-member|create-key|create-operator|revoke-operator> [flags]")
+		return fmt.Errorf("usage: hupi-admin <create-user|set-password|create-team|add-member|create-key|create-operator|revoke-operator> [flags]")
 	}
 	subcommand, args := os.Args[1], os.Args[2:]
 
@@ -84,6 +87,36 @@ func run() error {
 		scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: *id}
 		logAdminAction(ctx, deps, *actor, scope, "create-user", map[string]any{"user_id": *id})
 		fmt.Printf("created user %s\n", *id)
+
+	case "set-password":
+		fs := flag.NewFlagSet("set-password", flag.ContinueOnError)
+		user := fs.String("user", "", "user id to set a password for, e.g. user:alice (required)")
+		password := fs.String("password", "", "new password; if omitted, read from stdin instead of a flag (avoids shell history)")
+		actor := fs.String("actor", defaultActor(), "who's running this (audit log)")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if *user == "" {
+			return fmt.Errorf("set-password: -user is required")
+		}
+		pw := *password
+		if pw == "" {
+			fmt.Print("Password: ")
+			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("set-password: read password from stdin: %w", err)
+			}
+			pw = strings.TrimRight(line, "\r\n")
+		}
+		if pw == "" {
+			return fmt.Errorf("set-password: password must not be empty")
+		}
+		if err := store.SetPassword(ctx, *user, pw); err != nil {
+			return err
+		}
+		scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: *user}
+		logAdminAction(ctx, deps, *actor, scope, "set-password", map[string]any{"user_id": *user})
+		fmt.Printf("set password for %s (for hupi-dashboard's Tier 3 login — see docs/DASHBOARD.md)\n", *user)
 
 	case "create-team":
 		fs := flag.NewFlagSet("create-team", flag.ContinueOnError)

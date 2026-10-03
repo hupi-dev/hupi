@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"hupi/internal/crypto"
 	"hupi/internal/provider"
@@ -37,6 +38,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/keyword-search-governance", s.handleKeywordSearchGovernance)
 	mux.HandleFunc("GET /api/security-posture", s.handleSecurityPosture)
 	mux.HandleFunc("GET /api/export", s.handleExport)
+	mux.HandleFunc("GET /api/content-themes", s.handleContentThemes)
+	mux.HandleFunc("GET /api/content-themes/narrative", s.handleContentThemesNarrative)
 	mux.HandleFunc("GET /api/whoami", s.handleWhoami)
 
 	return mux
@@ -133,6 +136,63 @@ func (s *server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="hupi-export-%s.json"`, scope.Owner))
 	writeJSON(w, http.StatusOK, export)
+}
+
+// handleContentThemes is Phase 2a (content_analysis.go's own doc
+// comment) — local keyword-frequency extraction, no LLM call. Returns
+// {"enabled":false} rather than 404 when the feature is off, so the
+// frontend can treat "not enabled" as a normal, renderable state instead
+// of an error to catch.
+func (s *server) handleContentThemes(w http.ResponseWriter, r *http.Request) {
+	if !contentAnalysisEnabled() {
+		writeJSON(w, http.StatusOK, struct {
+			Enabled bool `json:"enabled"`
+		}{false})
+		return
+	}
+	days := queryInt(r, "days", defaultContentAnalysisDays)
+	text, err := decryptRecentText(r.Context(), s.db, s.keys, scopeFromContext(r.Context()), days, defaultContentAnalysisMaxChars)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Enabled bool            `json:"enabled"`
+		Terms   []TermFrequency `json:"terms"`
+	}{true, localKeywordThemes(text, defaultContentAnalysisTopTerms)})
+}
+
+// handleContentThemesNarrative is Phase 2b — same shape as
+// handleContentThemes, gated by its own separate flag.
+func (s *server) handleContentThemesNarrative(w http.ResponseWriter, r *http.Request) {
+	if !llmThemesEnabled() {
+		writeJSON(w, http.StatusOK, struct {
+			Enabled bool `json:"enabled"`
+		}{false})
+		return
+	}
+	days := queryInt(r, "days", defaultContentAnalysisDays)
+	text, err := decryptRecentText(r.Context(), s.db, s.keys, scopeFromContext(r.Context()), days, defaultContentAnalysisMaxChars)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	if strings.TrimSpace(text) == "" {
+		writeJSON(w, http.StatusOK, struct {
+			Enabled   bool   `json:"enabled"`
+			Narrative string `json:"narrative"`
+		}{true, "Nothing in this window yet."})
+		return
+	}
+	narrative, err := llmNarrativeThemes(r.Context(), s.registry.Chat(), text)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Enabled   bool   `json:"enabled"`
+		Narrative string `json:"narrative"`
+	}{true, narrative})
 }
 
 // handleWhoami lets the frontend show which scope it's actually looking

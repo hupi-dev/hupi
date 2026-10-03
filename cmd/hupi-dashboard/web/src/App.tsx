@@ -1,7 +1,24 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, Whoami } from "./lib/api";
+import { saveSessionToken } from "./lib/session";
 import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
+
+// Picks up the one-time ?dashboard_token=... query param hupi-t3's
+// /auth/login/oidc/callback redirects back here with (see Login.tsx's
+// own doc comment for the full OIDC handoff) — saves it the same way a
+// password login's response does, then strips it from the URL so it
+// never ends up in browser history or gets re-read on a later refresh.
+function consumeOidcCallbackToken(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("dashboard_token");
+  if (!token) return false;
+  saveSessionToken(token);
+  params.delete("dashboard_token");
+  const query = params.toString();
+  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  return true;
+}
 
 // App's whole job is one check: can /api/whoami be reached without
 // logging in? On Tier 1/2 (this OSS build, resolveDashboardSession is
@@ -16,6 +33,7 @@ export function App() {
 
   const checkSession = () => {
     setLoading(true);
+    consumeOidcCallbackToken();
     api
       .whoami()
       .then((w) => {
