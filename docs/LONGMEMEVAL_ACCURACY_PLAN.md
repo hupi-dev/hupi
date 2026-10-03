@@ -682,3 +682,118 @@ consolidation at all, or only the QA step is dropping it at answer time
 — that distinguishes a consolidation-completeness bug from an
 answer-prompt specificity issue, same diagnostic split this plan's
 earlier categories used throughout.
+
+## Round 4: fresh DB, random sample (2026-10-03)
+
+Previous rounds reused the same 6 fixed question IDs every time, which
+can't tell a real fix from a question this specific set of IDs happens
+to favor. This round fully tears down and recreates the benchmark
+Postgres container (`docker rm -f hupi-bench-pg` + a fresh
+`pgvector/pgvector:pg16` + `schema/migrate.sh`, confirmed empty —
+`episodes`/`entities`/`summaries` all 0 — before running) and picks one
+**random** instance per category from the existing 48-instance stratified
+sample (`bench/results/longmemeval_gpt-4.1_2026-09-26/sample_instances.json`,
+8 per category), rather than the same round-2 IDs:
+
+| Category | question_id | Result |
+|---|---|---|
+| single-session-user | `726462e0` | **correct** — "10%" discount |
+| multi-session | `2e6d26dc` | **correct** — 5 babies, named correctly |
+| single-session-preference | `75f70248` | **correct** |
+| temporal-reasoning | `gpt4_93159ced_abs` | **correct** — correctly abstains (hasn't started the Google job yet) |
+| knowledge-update | `852ce960` | **wrong** — hypothesis "$350,000", gold "$400,000" (Wells Fargo mortgage pre-approval amount) |
+| single-session-assistant | `65240037` | **correct** — tea tree oil dilution ratio |
+
+Task-averaged accuracy: 5/6 (0.833). Judge: gpt-4o.
+
+This is a genuinely clean run — no leftover-scope decryption noise in the
+log at all (every date logged `failed=0`), unlike round 3's runs which
+had stale scopes from earlier continuations.
+
+**Notable finding**: `knowledge-update` is now 0/2 across two
+*different*, randomly-selected instances in two different rounds
+(`07741c45`'s sneakers location in round 3, `852ce960`'s mortgage
+pre-approval amount here) — both are "a numeric/specific value was
+stated, possibly updated, and the wrong one got answered" shapes. Round
+2's original "Fixed, 3/3" result was for one specific instance
+(`07741c45`, and even that one has since flipped to wrong twice — see
+the round 3 and follow-up sections above). Two different instances
+failing independently is a stronger signal than the round 3 same-instance
+repeats: this now looks like `knowledge-update` as a category still has
+a real, unresolved gap, not an artifact of one question's phrasing.
+
+Confirmed by pulling `852ce960`'s actual source sessions from
+`longmemeval_s_cleaned.json`: both amounts are real, not a hallucination.
+$350,000 appears once, on 2023-08-11; $400,000 appears twice, on
+2023-08-30 and 2023-11-30 — i.e. the pre-approval amount was genuinely
+updated, and HUPI's answer surfaced the older, superseded value instead
+of the current one. This is the same shape of bug Category 3's
+recency-preference work (Phase 1, PR #69) already fixed for a different
+category — worth checking first whether that mechanism simply doesn't
+cover `knowledge-update`'s retrieval path, before designing anything new
+specific to this category.
+
+Next: trace `852ce960` through consolidation/retrieval directly (same
+`HUPI_DEBUG_FUSION` + `hupi-export-memory` method Category 2 used) to
+see whether both the $350k and $400k facts made it into storage at all,
+and if so, which one retrieval/fusion is ranking first — that tells
+whether this is a storage-completeness gap (one fact never got written)
+or a ranking/recency gap (both written, wrong one wins).
+
+### Follow-up: traced and fixed one layer, found a deeper one (2026-10-03)
+
+Traced per the "Next" step above. Root cause, in order:
+
+1. The $400,000 fact (from the Nov-30 session, where the user says
+   "remember when I got pre-approved for $400,000 from Wells Fargo?" and
+   the assistant — per this benchmark's own deliberate no-continuity
+   design — replies that it doesn't recall) was extracted correctly by
+   consolidation, but the separate grounding-check pass marked it
+   **ungrounded**. `summarySystemPrompt` already has a carve-out treating
+   "remember when X" as a direct statement; `groundingSystemPrompt` had
+   no equivalent, so the assistant's expected-but-irrelevant denial
+   likely read as casting doubt on the fact.
+2. Because it was ungrounded, it was invisible to **both** retrieval
+   (`loadKeyFacts`' `grounded=true` filter) and cross-period contradiction
+   detection (`loadGroundedKeyFactsByID`, same filter) — so the stale
+   $350k fact from 2023-08-11 was never corrected, and was the only
+   version the QA step ever saw.
+3. **Fixed** in PR #95: added the same "remember when X" carve-out to
+   `groundingSystemPrompt`, confirmed via a new live test against the
+   real gpt-4.1 judge (ungrounded → grounded) and via a from-scratch
+   re-consolidation of this exact scope (the $400k fact is now stored
+   grounded).
+4. Also checked the QA-step recency instruction
+   (`internal/qaprompt/qaprompt.go:111`, from Category 3's earlier work)
+   — already correct, already wired into `hupi-bench`'s real answer
+   path. Not a gap; no change made.
+
+**But the end-to-end answer is still wrong** after the fix above. Re-tracing
+with `HUPI_DEBUG_FUSION` post-fix shows the 2023-11-30 summary — now
+correctly holding the grounded $400k fact — **never enters the retrieval
+candidate pool at all** for this query. Candidate selection runs at the
+whole-summary level (vector+keyword fusion over the summary as a whole),
+and Nov-30's summary is dominated by ~19 unrelated facts (cable
+providers, electricity, moving logistics, home insurance) with the
+mortgage mention as a single buried aside — the summary's own
+embedding/keyword profile doesn't match a mortgage-focused query closely
+enough to make the candidate pool, even though one sentence inside it
+would be a near-perfect match in isolation. Per-fact ranking
+(`FACTRANK_DEBUG`) only runs on summaries that already made the pool, so
+a correctly-extracted, correctly-grounded fact can still be invisible if
+its parent summary covers mostly unrelated ground.
+
+This is the same underlying mechanism as the already-tracked `5809eb10`
+backlog item above ("RRF fusion weighting... underweighting a short,
+specific fact vs. longer generic ones") — not a new, separate class of
+bug, but now confirmed on a second, independent question. Fixing it
+properly likely means moving some retrieval-candidate signal to the
+individual-fact level rather than relying solely on whole-summary
+vector/keyword matching — a materially bigger change than this round's
+fixes, not attempted here.
+
+Next: this is now the clearest, best-understood lead for a real
+accuracy improvement — both `5809eb10` and `852ce960` point at the same
+mechanism. Worth designing deliberately (a dedicated plan section, same
+as Category 3's own phased approach) rather than a quick patch, given
+it touches the core retrieval scoring path every query uses.
