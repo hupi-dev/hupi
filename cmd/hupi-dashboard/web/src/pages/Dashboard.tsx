@@ -10,7 +10,9 @@ import {
   TermFrequency,
   ThemeWordCloudEntry,
   Whoami,
+  Workspace,
 } from "../lib/api";
+import { loadWorkspace, saveWorkspace } from "../lib/session";
 import { Card, CardHeader, CardTitle } from "../components/Card";
 
 function useLoaded<T>(load: () => Promise<T>): T | null {
@@ -41,7 +43,20 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
   // env var isn't set, so these render nothing rather than a broken card.
   const contentThemes = useLoaded<{ enabled: boolean; terms?: TermFrequency[] }>(() => api.contentThemes());
   const narrative = useLoaded<{ enabled: boolean; narrative?: string }>(() => api.contentThemesNarrative());
+  // Tier 3 only — [] on Tier 1/2 (no hupi-t3 overlay to mount
+  // GET /api/workspaces at all), so the switcher below renders nothing.
+  const workspaces = useLoaded<Workspace[]>(() => api.listWorkspaces());
   const [exporting, setExporting] = useState(false);
+
+  const handleWorkspaceChange = (teamID: string) => {
+    saveWorkspace(teamID);
+    // Every panel's useLoaded effect only fetches once, on mount — a
+    // full reload is the simplest way to make every single panel pick
+    // up the new X-Hupi-Workspace header consistently, rather than
+    // threading a workspace dependency through each of the eight
+    // separate useLoaded calls above individually.
+    window.location.reload();
+  };
 
   const handleExport = async () => {
     setExporting(true);
@@ -64,6 +79,20 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">hupi-dashboard</h1>
         <div className="flex items-center gap-3">
+          {workspaces && workspaces.length > 0 && (
+            <select
+              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm"
+              value={loadWorkspace() ?? ""}
+              onChange={(e) => handleWorkspaceChange(e.target.value)}
+            >
+              <option value="">My own memory</option>
+              {workspaces.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          )}
           <span className="text-sm text-slate-400">{whoami.scope_kind}:{whoami.scope_owner}</span>
           <button
             onClick={handleExport}

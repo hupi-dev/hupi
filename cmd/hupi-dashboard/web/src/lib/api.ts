@@ -1,4 +1,4 @@
-import { clearSessionToken, loadSessionToken } from "./session";
+import { clearSessionToken, loadSessionToken, loadWorkspace } from "./session";
 
 // --- wire types ------------------------------------------------------------
 // Mirror cmd/hupi-dashboard/{queries,handlers}.go's response shapes
@@ -97,6 +97,15 @@ export interface Whoami {
   scope_owner: string;
 }
 
+// Workspace is one team the signed-in user can switch into — Tier 3
+// only; GET /api/workspaces doesn't exist at all on the OSS build (no
+// hupi-t3 overlay to mount it), so api.listWorkspaces treats any error
+// as "not available" rather than surfacing it.
+export interface Workspace {
+  id: string;
+  name: string;
+}
+
 // --- error type --------------------------------------------------------
 
 export class ApiError extends Error {
@@ -135,9 +144,14 @@ function errorMessage(body: unknown, status: number): string {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = loadSessionToken();
+  const workspace = loadWorkspace();
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
+  // Tier 3 only — hupi-t3's resolveDashboardSession reads this to route
+  // to a shared team scope instead of the signed-in user's own private
+  // one; ignored entirely on Tier 1/2 (no session, so no header is sent).
+  if (workspace) headers.set("X-Hupi-Workspace", workspace);
 
   const res = await fetch(BASE + path, { ...init, headers });
 
@@ -182,4 +196,5 @@ export const api = {
     request<{ enabled: boolean; terms?: TermFrequency[] }>(`/content-themes?days=${days}`),
   contentThemesNarrative: (days = 30) =>
     request<{ enabled: boolean; narrative?: string }>(`/content-themes/narrative?days=${days}`),
+  listWorkspaces: () => request<Workspace[] | null>("/workspaces").then(orEmpty).catch(() => [] as Workspace[]),
 };

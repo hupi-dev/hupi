@@ -18,3 +18,21 @@ export function saveSessionToken(token: string): void {
 export function clearSessionToken(): void {
   sessionStorage.removeItem(STORAGE_KEY);
 }
+
+// The selected workspace (a team id) for hupi-t3's per-request workspace
+// routing (X-Hupi-Workspace header) — empty/absent means "my own private
+// scope," the default. Also sessionStorage, for the same reason as the
+// token above: this is session-scoped UI state, not a durable preference.
+const WORKSPACE_KEY = "hupi_dashboard_workspace";
+
+export function loadWorkspace(): string | null {
+  return sessionStorage.getItem(WORKSPACE_KEY);
+}
+
+export function saveWorkspace(teamID: string): void {
+  if (teamID) {
+    sessionStorage.setItem(WORKSPACE_KEY, teamID);
+  } else {
+    sessionStorage.removeItem(WORKSPACE_KEY);
+  }
+}

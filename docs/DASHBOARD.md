@@ -71,6 +71,36 @@ Two credential types converge on minting the same session token
   package previously only verified an already-issued JWT passed as
   `Authorization: Bearer`.
 
+### Workspace routing (Tier 3 only)
+
+`dashboard_sessions` is keyed on `user_id` alone, not a fixed
+`scope_kind`/`scope_owner` pair — which workspace a request actually
+reads is resolved fresh on every request, not baked in at login time. No
+`X-Hupi-Workspace` header means the signed-in user's own private scope;
+naming a team id resolves to that team's shared scope only after a live
+`team_members` check (never cached), so a membership change takes effect
+on the very next request rather than whenever the session happens to be
+re-minted. A request naming a team the user isn't actually a member of is
+rejected outright (401) — not a silent fallback to their private scope,
+which would hide the caller's own mistake. This is what makes panels 1-7
+genuinely "team-wide" without needing a second, shared-scope-specific
+copy of each query: the frontend's workspace selector (`Dashboard.tsx`)
+just sets the header and reloads, and every existing panel reads whichever
+scope the header resolved to. `GET /api/workspaces` lists the teams a
+signed-in user can switch into.
+
+### Admin security posture (Tier 3 only)
+
+`GET /api/admin/security-posture` — stale API keys (`last_used_at` older
+than 90 days or never set), key rotation status across every scope, and
+a 24-hour failed-dashboard-login count — is gated behind the same named
+*operator* Basic Auth `cmd/hupi-admin-ui` uses (`auth.Store.ResolveOperator`),
+not a regular dashboard session: this view spans every user/team in the
+deployment (`api_keys`/`key_rotations`/`users` carry no row-level
+security at all — confirmed against `schema/*.sql`), which is an operator
+concern, not something any one signed-in user should see regardless of
+their own team memberships.
+
 ## Panels and their data sources
 
 Every Tier 1/2 panel reads only plaintext columns — no decryption

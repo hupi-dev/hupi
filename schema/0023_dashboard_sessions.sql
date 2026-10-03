@@ -22,11 +22,17 @@ alter table users add column password_hash text;
 -- cmd/hupi-dashboard/auth.go's own doc comment for why that sidesteps
 -- CSRF entirely instead of needing cmd/hupi-admin-ui's
 -- Sec-Fetch-Site-based mitigation.
+--
+-- Deliberately keyed on user_id alone, not a fixed scope_kind/scope_owner
+-- pair: which workspace a request actually reads (the user's own private
+-- scope, or a shared team they belong to) is resolved fresh on every
+-- request from the X-Hupi-Workspace header plus a live team_members
+-- check (hupi-t3's resolveDashboardSession) — baking a scope into the
+-- session at login time would go stale the moment a team membership
+-- changes mid-session.
 create table dashboard_sessions (
     token_hash   text primary key,
     user_id      text not null references users(id),
-    scope_kind   text not null,
-    scope_owner  text not null,
     created_at   timestamptz not null default now(),
     expires_at   timestamptz not null
 );
