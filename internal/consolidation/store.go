@@ -504,6 +504,43 @@ func sanitizePredicate(s string) string {
 	return s
 }
 
+// personPredicateAliases collapses a short, explicitly-curated list of
+// known synonyms the consolidation prompt's own free-text predicate
+// guidance ("a short verb phrase, e.g. works_at, married_to,
+// friends_with, manages" — buildSummaryPrompt) gives the model no reason
+// to pick consistently between. Found for real in production:
+// person:sujith-samuel ended up with both lives_in and based_in edges to
+// the same place, which upsertRelationships' dedup (exact-match and the
+// bare-edge check) can't catch, since those checks compare predicate
+// strings verbatim, not meaning.
+//
+// Scoped to subject kind "person" specifically, not applied
+// unconditionally: "based_in" is also a natural, correct predicate for an
+// organization/project's registered location ("organization:acme
+// based_in place:nyc"), where "lives_in" would read oddly — an
+// organization doesn't live anywhere. Keep this map short and
+// subject-kind-scoped rather than a general synonym engine; add an entry
+// only once a real duplicate like this one is actually observed, the
+// same reasoned-not-speculative posture this package's other constants
+// take.
+var personPredicateAliases = map[string]string{
+	"based_in": "lives_in",
+}
+
+// canonicalizePredicate applies personPredicateAliases when subjectKind
+// is "person" — called after sanitizePredicate, not merged into it, so
+// the two stay single-purpose (one normalizes form, the other normalizes
+// meaning for a specific, known synonym set).
+func canonicalizePredicate(subjectKind, predicate string) string {
+	if subjectKind != "person" {
+		return predicate
+	}
+	if canonical, ok := personPredicateAliases[predicate]; ok {
+		return canonical
+	}
+	return predicate
+}
+
 // parseOptionalDate returns the date string unchanged if it parses as a
 // real YYYY-MM-DD date, or nil (a real SQL NULL, "unknown/unstated") for
 // anything empty or unparseable — the consolidation LLM's own
@@ -567,7 +604,7 @@ func (r *Runner) upsertRelationships(ctx context.Context, tx *sql.Tx, scope iden
 				"scope_kind", scope.Kind, "scope_owner", scope.Owner)
 			continue
 		}
-		predicate := sanitizePredicate(u.Predicate)
+		predicate := canonicalizePredicate(u.SubjectKind, sanitizePredicate(u.Predicate))
 		if predicate == "" {
 			slog.Warn("consolidation: skipping relationship with empty or too-long predicate",
 				"raw_predicate", u.Predicate, "scope_kind", scope.Kind, "scope_owner", scope.Owner)

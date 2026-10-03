@@ -21,7 +21,7 @@ const summarySystemPrompt = `You are HUPI's consolidation engine (see MEMORY_FOR
     {"id": "kind:slug", "kind": "person|project|preference|skill|place|organization", "name": "...", "attributes": {"key": "value"}, "supersedes_keys": ["existing_key_name", ...]}
   ],
   "relationships": [
-    {"subject_kind": "person|project|preference|skill|place|organization", "subject_name": "...", "predicate": "a short verb phrase, e.g. works_at, married_to, friends_with, manages", "object_kind": "person|project|preference|skill|place|organization", "object_name": "...", "valid_from": "YYYY-MM-DD or empty string if unknown", "valid_until": "YYYY-MM-DD or empty string if still current"}
+    {"subject_kind": "person|project|preference|skill|place|organization", "subject_name": "...", "predicate": "a short verb phrase, e.g. works_at, married_to, friends_with, manages, lives_in (a person's place of residence — always use lives_in for this, not based_in or resides_in)", "object_kind": "person|project|preference|skill|place|organization", "object_name": "...", "valid_from": "YYYY-MM-DD or empty string if unknown", "valid_until": "YYYY-MM-DD or empty string if still current"}
   ]
 }
 
