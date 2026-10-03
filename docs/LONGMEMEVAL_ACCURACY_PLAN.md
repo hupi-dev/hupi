@@ -682,3 +682,60 @@ consolidation at all, or only the QA step is dropping it at answer time
 — that distinguishes a consolidation-completeness bug from an
 answer-prompt specificity issue, same diagnostic split this plan's
 earlier categories used throughout.
+
+## Round 4: fresh DB, random sample (2026-10-03)
+
+Previous rounds reused the same 6 fixed question IDs every time, which
+can't tell a real fix from a question this specific set of IDs happens
+to favor. This round fully tears down and recreates the benchmark
+Postgres container (`docker rm -f hupi-bench-pg` + a fresh
+`pgvector/pgvector:pg16` + `schema/migrate.sh`, confirmed empty —
+`episodes`/`entities`/`summaries` all 0 — before running) and picks one
+**random** instance per category from the existing 48-instance stratified
+sample (`bench/results/longmemeval_gpt-4.1_2026-09-26/sample_instances.json`,
+8 per category), rather than the same round-2 IDs:
+
+| Category | question_id | Result |
+|---|---|---|
+| single-session-user | `726462e0` | **correct** — "10%" discount |
+| multi-session | `2e6d26dc` | **correct** — 5 babies, named correctly |
+| single-session-preference | `75f70248` | **correct** |
+| temporal-reasoning | `gpt4_93159ced_abs` | **correct** — correctly abstains (hasn't started the Google job yet) |
+| knowledge-update | `852ce960` | **wrong** — hypothesis "$350,000", gold "$400,000" (Wells Fargo mortgage pre-approval amount) |
+| single-session-assistant | `65240037` | **correct** — tea tree oil dilution ratio |
+
+Task-averaged accuracy: 5/6 (0.833). Judge: gpt-4o.
+
+This is a genuinely clean run — no leftover-scope decryption noise in the
+log at all (every date logged `failed=0`), unlike round 3's runs which
+had stale scopes from earlier continuations.
+
+**Notable finding**: `knowledge-update` is now 0/2 across two
+*different*, randomly-selected instances in two different rounds
+(`07741c45`'s sneakers location in round 3, `852ce960`'s mortgage
+pre-approval amount here) — both are "a numeric/specific value was
+stated, possibly updated, and the wrong one got answered" shapes. Round
+2's original "Fixed, 3/3" result was for one specific instance
+(`07741c45`, and even that one has since flipped to wrong twice — see
+the round 3 and follow-up sections above). Two different instances
+failing independently is a stronger signal than the round 3 same-instance
+repeats: this now looks like `knowledge-update` as a category still has
+a real, unresolved gap, not an artifact of one question's phrasing.
+
+Confirmed by pulling `852ce960`'s actual source sessions from
+`longmemeval_s_cleaned.json`: both amounts are real, not a hallucination.
+$350,000 appears once, on 2023-08-11; $400,000 appears twice, on
+2023-08-30 and 2023-11-30 — i.e. the pre-approval amount was genuinely
+updated, and HUPI's answer surfaced the older, superseded value instead
+of the current one. This is the same shape of bug Category 3's
+recency-preference work (Phase 1, PR #69) already fixed for a different
+category — worth checking first whether that mechanism simply doesn't
+cover `knowledge-update`'s retrieval path, before designing anything new
+specific to this category.
+
+Next: trace `852ce960` through consolidation/retrieval directly (same
+`HUPI_DEBUG_FUSION` + `hupi-export-memory` method Category 2 used) to
+see whether both the $350k and $400k facts made it into storage at all,
+and if so, which one retrieval/fusion is ranking first — that tells
+whether this is a storage-completeness gap (one fact never got written)
+or a ranking/recency gap (both written, wrong one wins).
