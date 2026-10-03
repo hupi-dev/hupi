@@ -39,6 +39,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/users", s.listUsers)
 	mux.HandleFunc("POST /api/users", s.createUser)
 	mux.HandleFunc("GET /api/users/{id}", s.userDetail)
+	mux.HandleFunc("POST /api/users/{id}/password", s.setPassword)
 
 	// /api/users/{id}/keys, /api/keys/revoke, and every /api/teams... route
 	// only exist when the Tier-3 extension is present — team_handlers.go.
@@ -103,6 +104,38 @@ func (s *server) createUser(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, audit.EventAdminProvision, identity.Scope{Kind: identity.ScopeKindPrivate, Owner: req.ID},
 		map[string]any{"action": "create-user", "user_id": req.ID})
 	writeJSON(w, http.StatusCreated, auth.User{ID: req.ID, Email: req.Email})
+}
+
+// setPassword provisions the credential hupi-dashboard's password login
+// route verifies against (cmd/hupi-dashboard/team.go, hupi-t3 only) — the
+// web-UI equivalent of `hupi-admin set-password`. Lives here, not behind
+// mountTeamRoutes: auth.Store.SetPassword needs nothing team-specific,
+// the same reasoning `hupi-admin set-password` itself isn't gated behind
+// a Tier-3 hook either (see that subcommand's own doc comment). No
+// minimum-length/complexity check here — same posture CreateAPIKey's raw
+// random token has, deliberately left to whatever policy an operator
+// wants to enforce themselves, not hardcoded into this handler.
+func (s *server) setPassword(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Password == "" {
+		jsonError(w, http.StatusBadRequest, "password is required")
+		return
+	}
+	if err := s.store.SetPassword(r.Context(), id, req.Password); err != nil {
+		internalError(w, err)
+		return
+	}
+	s.audit(r, audit.EventAdminProvision, identity.Scope{Kind: identity.ScopeKindPrivate, Owner: id},
+		map[string]any{"action": "set-password", "user_id": id})
+	writeJSON(w, http.StatusOK, struct {
+		Status string `json:"status"`
+	}{"ok"})
 }
 
 // userDetail bundles what used to be three separate page loads (the user,

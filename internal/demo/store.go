@@ -306,12 +306,22 @@ func (s *Store) Sweep(ctx context.Context, hardBackstopAge time.Duration) (int, 
 	}
 	var guestIDs []string
 	for rows.Next() {
-		var id string
+		// sql.NullString, not string: guest_user_id is nullable
+		// (schema/0016, ON DELETE SET NULL) and the query's own "is not
+		// null" filter shouldn't be the only thing standing between a
+		// real NULL and a Scan error — found for real in production
+		// (2026-10-03) when a stale binary predating this filter hit
+		// exactly that. A NULL here means this guest's data was already
+		// cleaned up (by an earlier sweep, or a concurrent one); skipping
+		// it is correct, not a problem to surface.
+		var id sql.NullString
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("demo: scan sweep row: %w", err)
 		}
-		guestIDs = append(guestIDs, id)
+		if id.Valid {
+			guestIDs = append(guestIDs, id.String)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
@@ -338,18 +348,28 @@ func (s *Store) Sweep(ctx context.Context, hardBackstopAge time.Duration) (int, 
 // deletion nulls out demo_sessions.guest_user_id via its own FK
 // (schema/0016_demo_sessions_decouple_cap_from_cleanup.sql) rather than
 // cascading the session row away — that row survives on purpose, see
-// Sweep's own doc comment. Those three tables have row-level
-// security enabled (schema/0005) and hupi_app is a non-owner role, so
-// the deletes must run inside a dbscope.Run transaction carrying this
+// Sweep's own doc comment. These tables have row-level security enabled
+// (schema/0005, schema/0015) and hupi_app is a non-owner role, so the
+// deletes must run inside a dbscope.Run transaction carrying this
 // guest's own scope — the same requirement every other write against
 // them already has (internal/store, internal/consolidation). scope_keys
 // and users are not RLS-scoped (schema/0006's own doc comment), so
 // deleting them in the same transaction is just convenient, not
 // required.
+//
+// entity_relationships must be deleted before summaries and entities:
+// its source_summary_id/subject_id/object_id columns reference them with
+// no ON DELETE action (schema/0015_entity_relationships.sql, added after
+// this function was first written), so deleting a referenced summary or
+// entity first fails with a foreign key violation — found for real in
+// production (2026-10-03): a stale hupi-demo-sweep binary's unrelated
+// Scan bug masked this one until that binary was rebuilt and the sweep
+// actually reached this delete for a guest with a real relationship row.
 func (s *Store) deleteGuest(ctx context.Context, guestID string) error {
 	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: guestID}
 	return dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
 		for _, stmt := range []string{
+			`delete from entity_relationships where scope_kind = 'private' and scope_owner = $1`,
 			`delete from episodes where scope_kind = 'private' and scope_owner = $1`,
 			`delete from summaries where scope_kind = 'private' and scope_owner = $1`,
 			`delete from entities where scope_kind = 'private' and scope_owner = $1`,
