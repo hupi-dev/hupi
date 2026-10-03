@@ -53,6 +53,95 @@ func insertSummary(t *testing.T, s *Store, scope identity.Scope, id, period, tex
 	}
 }
 
+// insertSummaryWithEmbedding is insertSummary with an explicit embedding
+// vector instead of the fixed axis(0) vector insertSummary always uses —
+// needed whenever a test must make a summary's own overall embedding
+// deliberately *dissimilar* to the query (insertSummary's fixed vector
+// always matches the fake test embedder's fixed query output, which is
+// fine when that's not what's under test, but wrong here).
+func insertSummaryWithEmbedding(t *testing.T, s *Store, scope identity.Scope, id, period, text string, vec []float32) {
+	t.Helper()
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	summaryCT, err := enc.Encrypt(text)
+	if err != nil {
+		t.Fatalf("encrypt test summary: %v", err)
+	}
+	embeddingLiteral := pgfmt.VectorLiteral(vec)
+
+	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into summaries (
+				id, period, level, status, summary, grounding_checked,
+				scope_kind, scope_owner, key_version, embedding
+			) values (
+				$1, $2, 'daily', 'draft', $3, true,
+				$4, $5, $6, $7::vector
+			)
+		`, id, period, summaryCT, scope.Kind, scope.Owner, keyVersion, embeddingLiteral)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test summary %s: %v", id, err)
+	}
+}
+
+// TestFusedSearchSummaries_FindsSummaryByBuriedFactMatch_852ce960 is the
+// regression test for a real LongMemEval miss
+// (docs/LONGMEMEVAL_ACCURACY_PLAN.md's 852ce960 case): a summary whose
+// own overall content is dominated by unrelated topics can bury one
+// single, correctly-grounded, highly specific fact so deeply that the
+// summary's own embedding/keyword profile never matches a query about
+// that fact — and before this fix, fusedSearchSummaries only ever scored
+// whole summaries, so the summary never entered the candidate pool at
+// all (confirmed via live HUPI_DEBUG_FUSION tracing against the real
+// scope, not just reasoned about). Per-fact ranking (rankKeyFacts) only
+// ever runs on summaries that already made the pool, so a real, grounded
+// fact could be permanently unreachable through no fault of its own
+// extraction or grounding.
+//
+// The fake test embedder (scope_isolation_test.go) returns the same
+// fixed vector (axis(0)) for every query regardless of content — this
+// fixture gives the summary's own embedding a *different* axis (clearly
+// dissimilar, cosine 0) while the one buried fact gets axis(0) (an exact
+// match to whatever the query embeds to), and the query text shares no
+// vocabulary with the summary's own prose (so BM25 can't find it as a
+// side effect, which would defeat the point of this test). Only the new
+// per-fact search signal can surface this summary.
+func TestFusedSearchSummaries_FindsSummaryByBuriedFactMatch_852ce960(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-fact-level-candidate"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	axis := func(i int) []float32 {
+		v := make([]float32, 1536)
+		v[i] = 1
+		return v
+	}
+
+	period := "2023-11-30"
+	summaryID := "sum_test-fact-level-candidate_2023-11-30_daily_v1"
+	insertSummaryWithEmbedding(t, s, scope, summaryID, period,
+		"The user discussed moving logistics, cable providers, and home insurance quotes.",
+		axis(7))
+	model := s.currentEmbeddingModel()
+	insertKeyFactWithEmbedding(t, s, scope, summaryID,
+		"The user was pre-approved for $400,000 from Wells Fargo.", model, axis(0))
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "What was the mortgage pre-approval amount?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	want := "The user was pre-approved for $400,000 from Wells Fargo."
+	if !strings.Contains(result.ContextMessage, want) {
+		t.Errorf("context message = %q, want it to contain the buried fact %q — the summary should have entered the candidate pool via the per-fact match alone", result.ContextMessage, want)
+	}
+}
+
 // TestRetrieve_UsesCorrectedSummaryNotSupersededOne is a regression test
 // for a real bug found via manual end-to-end testing (not code review):
 // vectorSearchSummaries and buildAnchor originally filtered on

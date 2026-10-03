@@ -467,6 +467,7 @@ migration_probe() {
     0021_summary_key_facts_embeddings.sql) echo "select exists(select 1 from information_schema.columns where table_name='summary_key_facts' and column_name='embedding_model')" ;;
     0022_scope_corpus_size.sql)        echo "select (to_regclass('public.scope_corpus_size') is not null)" ;;
     0023_dashboard_sessions.sql)       echo "select (to_regclass('public.dashboard_sessions') is not null)" ;;
+    0024_summary_key_facts_embedding_index.sql) echo "select (to_regclass('public.summary_key_facts_embedding_idx') is not null)" ;;
     *) die "no idempotency probe defined for migration $1 (add one to migration_probe)" ;;
   esac
 }
@@ -492,7 +493,7 @@ apply_all_migrations() {
            0014_demo_sessions.sql 0015_entity_relationships.sql 0016_demo_sessions_decouple_cap_from_cleanup.sql \
            0017_summaries_supersedes_unique.sql 0018_summary_key_facts_rls.sql 0019_entity_relationships_valid_date_order.sql \
            0020_audit_log_target_ref_index.sql 0021_summary_key_facts_embeddings.sql 0022_scope_corpus_size.sql \
-           0023_dashboard_sessions.sql; do
+           0023_dashboard_sessions.sql 0024_summary_key_facts_embedding_index.sql; do
     apply_migration "$f"
   done
 }
