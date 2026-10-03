@@ -990,6 +990,21 @@ func (r *Runner) loadSummaries(ctx context.Context, q dbscope.Querier, scope ide
 	return out, rows.Err()
 }
 
+// consolidationMaxTokens overrides the Anthropic provider's own default
+// (4096, internal/provider/anthropic.go's toAnthropicRequest) explicitly,
+// rather than leaving this call to fall back to it silently. Found for
+// real, not guessed: a genuinely busy day (2026-10-02, 9 raw sources
+// clustered into 3 topic groups) reproducibly truncated mid-JSON on one
+// cluster's own summary+key_facts+entities_touched output two attempts in
+// a row ("unexpected end of JSON input"), confirmed by re-running
+// hupi-consolidate -date 2026-10-02 directly against production and
+// seeing the identical failure both times — not a transient provider
+// hiccup. 8192 is a reasoned, not measured, doubling of the prior
+// default: generous enough for a single topic cluster's worth of output
+// without being an arbitrary large guess. Re-measure if a busier day
+// ever truncates against this new ceiling too.
+const consolidationMaxTokens = 8192
+
 // generateSummary picks a scope-appropriate system prompt (team-neutral
 // voice for shared scope, per docs/TIER3_PLAN.md §5, via
 // Runner.TeamPromptOverride) before calling the consolidation LLM.
@@ -1007,11 +1022,13 @@ func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, leve
 		}
 	}
 
+	maxTokens := consolidationMaxTokens
 	req := provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: systemPrompt},
 			{Role: provider.RoleUser, Content: buildSummaryPrompt(level, period, sources, establishedRecord, knownEntities)},
 		},
+		MaxTokens: &maxTokens,
 	}
 
 	var lastErr error
