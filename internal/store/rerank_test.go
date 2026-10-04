@@ -7,12 +7,32 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"hupi/internal/dbscope"
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
+
+// histogramSampleCount reads a plain (non-vector) Histogram's cumulative
+// observation count directly via its Write method — testutil.CollectAndCount
+// returns the number of metric *series* (always 1 for a non-vector
+// histogram, regardless of how many observations it's recorded), not the
+// observation count itself, so it can't distinguish "never observed"
+// from "observed many times."
+func histogramSampleCount(t *testing.T, h interface{ Write(*dto.Metric) error }) uint64 {
+	t.Helper()
+	var m dto.Metric
+	if err := h.Write(&m); err != nil {
+		t.Fatalf("write histogram metric: %v", err)
+	}
+	return m.GetHistogram().GetSampleCount()
+}
 
 func TestBuildRerankPrompt_IncludesIDPeriodAndTruncatesText(t *testing.T) {
 	long := strings.Repeat("x", rerankMaxCandidateChars+50)
@@ -91,6 +111,53 @@ func TestRerankSummaries_MalformedResponseReturnsError(t *testing.T) {
 	s := &Store{chatProvider: fakeRerankProvider{response: "not json at all"}}
 	if _, err := s.rerankSummaries(context.Background(), "irrelevant", []rerankCandidate{{id: "sum_a"}}); err == nil {
 		t.Error("rerankSummaries() with a malformed response = nil error, want non-nil")
+	}
+}
+
+// TestRerankSummaries_SuccessIncrementsOkCounterAndDuration confirms the
+// real observability this feature needs before being safe to turn on in
+// production (docs/BENCHMARKS.md §9: each call costs ~3.5-4.3s measured
+// directly, not estimated — a number that needs to be watchable, not
+// just grep-able from a log line).
+func TestRerankSummaries_SuccessIncrementsOkCounterAndDuration(t *testing.T) {
+	okBefore := testutil.ToFloat64(metrics.RerankCallsTotal.WithLabelValues("ok"))
+	errBefore := testutil.ToFloat64(metrics.RerankCallsTotal.WithLabelValues("error"))
+	countBefore := histogramSampleCount(t, metrics.RerankDuration)
+
+	s := &Store{chatProvider: fakeRerankProvider{response: `{"scores": [{"id": "sum_a", "score": 9}]}`}}
+	if _, err := s.rerankSummaries(context.Background(), "irrelevant", []rerankCandidate{{id: "sum_a"}}); err != nil {
+		t.Fatalf("rerankSummaries: %v", err)
+	}
+
+	if got := testutil.ToFloat64(metrics.RerankCallsTotal.WithLabelValues("ok")); got != okBefore+1 {
+		t.Errorf(`hupi_rerank_calls_total{result="ok"} went from %v to %v, want exactly +1`, okBefore, got)
+	}
+	if got := testutil.ToFloat64(metrics.RerankCallsTotal.WithLabelValues("error")); got != errBefore {
+		t.Errorf(`hupi_rerank_calls_total{result="error"} changed on a success, want unchanged: %v -> %v`, errBefore, got)
+	}
+	if got := histogramSampleCount(t, metrics.RerankDuration); got != countBefore+1 {
+		t.Errorf("hupi_rerank_duration_seconds observation count went from %v to %v, want exactly +1", countBefore, got)
+	}
+}
+
+// TestRerankSummaries_FailureIncrementsErrorCounter is
+// SuccessIncrementsOkCounterAndDuration's negative counterpart — a
+// failed call still costs real wall-clock time (duration is always
+// observed) but must not be miscounted as "ok".
+func TestRerankSummaries_FailureIncrementsErrorCounter(t *testing.T) {
+	okBefore := testutil.ToFloat64(metrics.RerankCallsTotal.WithLabelValues("ok"))
+	errBefore := testutil.ToFloat64(metrics.RerankCallsTotal.WithLabelValues("error"))
+
+	s := &Store{chatProvider: fakeRerankProvider{err: errFakeNotImplemented}}
+	if _, err := s.rerankSummaries(context.Background(), "irrelevant", []rerankCandidate{{id: "sum_a"}}); err == nil {
+		t.Fatal("rerankSummaries() with a failing provider = nil error, want non-nil")
+	}
+
+	if got := testutil.ToFloat64(metrics.RerankCallsTotal.WithLabelValues("error")); got != errBefore+1 {
+		t.Errorf(`hupi_rerank_calls_total{result="error"} went from %v to %v, want exactly +1`, errBefore, got)
+	}
+	if got := testutil.ToFloat64(metrics.RerankCallsTotal.WithLabelValues("ok")); got != okBefore {
+		t.Errorf(`hupi_rerank_calls_total{result="ok"} changed on a failure, want unchanged: %v -> %v`, okBefore, got)
 	}
 }
 

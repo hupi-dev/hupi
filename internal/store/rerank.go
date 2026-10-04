@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"hupi/internal/metrics"
 	"hupi/internal/provider"
 )
 
@@ -92,14 +93,19 @@ func (s *Store) rerankSummaries(ctx context.Context, query string, candidates []
 			{Role: provider.RoleUser, Content: prompt},
 		},
 	})
-	slog.Default().Warn("rerank chat call timing", "candidates", len(candidates), "prompt_chars", len(prompt), "duration", time.Since(start), "error", err)
+	duration := time.Since(start)
+	metrics.RerankDuration.Observe(duration.Seconds())
+	slog.Default().Warn("rerank chat call timing", "candidates", len(candidates), "prompt_chars", len(prompt), "duration", duration, "error", err)
 	if err != nil {
+		metrics.RerankCallsTotal.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("rerank chat call: %w", err)
 	}
 	var parsed rerankResponse
 	if err := json.Unmarshal([]byte(extractJSON(resp.Message.Content)), &parsed); err != nil {
+		metrics.RerankCallsTotal.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("parse rerank response: %w", err)
 	}
+	metrics.RerankCallsTotal.WithLabelValues("ok").Inc()
 	scores := make(map[string]float64, len(parsed.Scores))
 	for _, sc := range parsed.Scores {
 		scores[sc.ID] = sc.Score
