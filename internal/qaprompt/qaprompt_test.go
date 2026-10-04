@@ -105,3 +105,75 @@ func TestConciseIncludesNonPersonEntityAttributionGuidance(t *testing.T) {
 		}
 	}
 }
+
+// TestConciseIncludesSimilarLivesAttributionEmphasis is a real
+// regression test for two LoCoMo adversarial misses traced to their
+// actual retrieved context (not just the final answer): a question
+// about Melanie answered with Caroline's own quote, and a question
+// about Caroline answered with Melanie's own quote, both between two
+// close friends with heavily overlapping interests (running, mental
+// health). In both cases the retrieved context was unambiguous — every
+// fact was explicitly labeled with the correct name — confirming this
+// isn't a retrieval gap, it's the answer step not reliably applying the
+// already-correct WHO guidance when two people's lives are similar
+// enough that a fact "sounds like it could belong to either."
+func TestConciseIncludesSimilarLivesAttributionEmphasis(t *testing.T) {
+	for _, want := range []string{
+		"This risk is HIGHEST, not lower, when two people's lives are similar",
+		"check the exact name actually attached to the specific fact you're using, every time",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected similar-lives attribution emphasis: %q", want)
+		}
+	}
+}
+
+// TestConciseDoesNotCountAMisattributedFactAsSomethingRelevant is a real
+// regression test for a full-scale LoCoMo finding (docs/BENCHMARKS.md):
+// rescoring the full 10-conversation run against the v6 baseline found
+// the adversarial (abstention) category's "confident wrong" rate (a
+// specific answer given with no hedge at all) rose from 23.1% to 35.4%
+// — the dominant share of a real ~17-point regression, not just a
+// wording/scoring-technicality. The "make your best specific attempt"
+// paragraph already existed and already encouraged guessing over
+// abstention for genuinely under-specified questions; this connects it
+// explicitly to the WHO-check so a fact confirmed to belong to a
+// different person/thing doesn't count as "something relevant" to
+// guess from, without weakening the paragraph's original purpose for
+// questions that really are answerable from what's retrieved.
+func TestConciseDoesNotCountAMisattributedFactAsSomethingRelevant(t *testing.T) {
+	for _, want := range []string{
+		"does not count as something relevant to work with",
+		"that is the same as having nothing",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected misattributed-fact-is-not-relevant guidance: %q", want)
+		}
+	}
+}
+
+// TestConciseAbstentionExamplesUseTheExactScoredPhrase is a real
+// regression test for a bug this file's own doc comment already
+// documented once (gap 3, found on the original LoCoMo run) but PR
+// #101/#103 silently reintroduced: LoCoMo's adversarial category is
+// scored by a literal, case-insensitive substring check for "not
+// mentioned" or "no information available" — see
+// bench/data/locomo/task_eval/evaluation.py's own category-5 branch.
+// "isn't mentioned" does not contain that substring and scores as
+// wrong even though it is a correct abstention in meaning. Every
+// abstention example in this prompt must use the literal phrase, not
+// a contraction or synonym, so the model's own output is more likely
+// to match it too.
+func TestConciseAbstentionExamplesUseTheExactScoredPhrase(t *testing.T) {
+	if strings.Contains(strings.ToLower(Concise), "isn't mentioned") {
+		t.Error(`Concise contains "isn't mentioned" in an example — this does not match LoCoMo's literal "not mentioned" substring check; use "is not mentioned" instead`)
+	}
+	for _, want := range []string{
+		"own necklace is not mentioned",
+		"purchasing three cows from peter is not mentioned",
+	} {
+		if !strings.Contains(strings.ToLower(Concise), want) {
+			t.Errorf("Concise missing expected exact-phrase abstention example: %q", want)
+		}
+	}
+}

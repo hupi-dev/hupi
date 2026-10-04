@@ -312,3 +312,37 @@ inspected failures, not guessed:
   conversation. Needs a few repeat trials on this exact question before
   concluding whether this is systemic or a one-off compliance miss —
   not re-run yet.
+- **Adversarial (abstention) accuracy regressed on the full 10-conversation
+  LoCoMo run** (found 2026-10-04, after PR #96/#97/#99/#100/#101):
+  67.7% (v6 baseline, `bench/results/locomo_gpt-4.1_2026-09-26/`) →
+  51.1% today, a real −16.6pp drop. Category 5 is scored by a literal,
+  case-insensitive substring check for "not mentioned"/"no information
+  available" (`bench/data/locomo/task_eval/evaluation.py`'s own
+  category-5 branch — already documented in this package's own doc
+  comment as gap 3, found on the very first LoCoMo run). Classifying
+  every adversarial prediction into scored-correct / hedged-but-wrong-
+  wording / confidently-wrong-with-no-hedge split the regression two
+  ways:
+  - ~4.3pp (26%) was a real but narrow wording regression: PR #101/#103
+    introduced example phrasing using "isn't mentioned", which does not
+    contain the literal scored substring "not mentioned" — **fixed** in
+    the same change as the finding below (all abstention examples now
+    use the exact phrase).
+  - ~12.3pp (74%, the dominant share) was a genuine increase in
+    confidently-wrong answers (23.1% → 35.4%, no hedge at all). Traced
+    two flipped cases to their actual retrieved context (not just the
+    final answer) in one conversation between close friends with
+    heavily overlapping lives (Caroline and Melanie, both into running,
+    mental health): retrieval was completely unambiguous both times —
+    every fact was explicitly labeled with the correct person's name,
+    one even marked "(most relevant)" — yet the answer still blended
+    the two people's facts together, in both directions. **Partially
+    addressed**: extended the existing WHO-attribution paragraph to
+    name this "similar lives" case explicitly, and connected the
+    long-standing "make your best specific attempt" guidance to the
+    WHO-check so a fact confirmed to belong to someone else doesn't
+    count as "something relevant" to guess from. Verified end-to-end on
+    one of the two traced cases (now correctly abstains); the other
+    still answers confidently wrong, so this is a real, measured
+    improvement, not a complete fix — a full re-run of the adversarial
+    category is the real test, not done yet.
