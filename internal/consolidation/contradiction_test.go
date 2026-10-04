@@ -6,8 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"hupi/internal/dbscope"
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 )
 
 func TestBuildContradictionCheckPromptIncludesBothPeriodsAndEntities(t *testing.T) {
@@ -429,7 +432,13 @@ func TestCheckCrossPeriodContradictions_AppliesRedundancyRemoval(t *testing.T) {
 		t.Fatalf("load seeded ids: %v", err)
 	}
 
+	metricBefore := testutil.ToFloat64(metrics.RedundancyFactsRemovedTotal)
+
 	runner.checkCrossPeriodContradictions(ctx, scope, newID, "2022-11-09", []string{"person:nate"})
+
+	if got := testutil.ToFloat64(metrics.RedundancyFactsRemovedTotal); got != metricBefore+1 {
+		t.Errorf("hupi_redundancy_facts_removed_total went from %v to %v, want exactly +1", metricBefore, got)
+	}
 
 	var supersededBy sql.NullString
 	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {

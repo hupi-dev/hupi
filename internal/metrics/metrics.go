@@ -152,6 +152,40 @@ var (
 		Name: "hupi_attachment_ingest_duration_seconds",
 		Help: "Attachment extraction/captioning duration in seconds, by kind.",
 	}, []string{"kind"})
+
+	// RerankCallsTotal/RerankDuration cover the LLM reranker pass
+	// (internal/store/rerank.go, HUPI_ENABLE_LLM_RERANK) — gated to
+	// ordering-shaped questions only (docs/BENCHMARKS.md §9), but real
+	// measurement found each call still costs ~3.5-4.3s, so this is
+	// real, worth-watching cost on a narrow slice of turns, not
+	// something safe to assume stays cheap without a number behind it.
+	// Separate from the generic ProviderCallDuration (which only covers
+	// the main answer-generation call, internal/gateway/handler.go) so
+	// this specific cost is visible on its own, not folded into overall
+	// provider latency.
+	RerankCallsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hupi_rerank_calls_total",
+		Help: `LLM reranker call outcomes: result is "ok" or "error" (degrades to unchanged RRF-fused scores on error, never blocks the turn).`,
+	}, []string{"result"})
+
+	RerankDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "hupi_rerank_duration_seconds",
+		Help:    "LLM reranker call duration in seconds.",
+		Buckets: []float64{0.5, 1, 2, 3, 4, 5, 7.5, 10, 15, 20},
+	})
+
+	// RedundancyFactsRemovedTotal covers cross-period redundancy removal
+	// (internal/consolidation/contradiction.go, HUPI_ENABLE_REDUNDANCY_DEDUP
+	// — off by default as of this metric's introduction, docs/BENCHMARKS.md
+	// §10's own documented limitation). Always zero while the flag is
+	// off; wired in now so enabling it later comes with observability
+	// already in place, not added after the fact once something's
+	// already gone wrong — the real risk here is silent over-removal,
+	// not a crash, so a sudden rate change is the signal to watch for.
+	RedundancyFactsRemovedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "hupi_redundancy_facts_removed_total",
+		Help: "Key facts removed by cross-period redundancy detection (a pure restatement, not a contradiction) during consolidation.",
+	})
 )
 
 // InstrumentHandler wraps h to record HTTPRequestsTotal/HTTPRequestDuration

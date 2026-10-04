@@ -11,6 +11,7 @@ import (
 
 	"hupi/internal/dbscope"
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
@@ -398,6 +399,9 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 	if err := r.Correct(ctx, scope, old.id, current, reason, systemActor, extraGrounding); err != nil {
 		slog.Warn("consolidation: applying contradiction correction failed", "related_summary", old.id, "error", err)
 		return
+	}
+	if redundantApplied > 0 {
+		metrics.RedundancyFactsRemovedTotal.Add(float64(redundantApplied))
 	}
 	slog.Info("consolidation: cross-period contradiction corrected", "corrected_summary", old.id, "triggering_period", newPeriod, "facts_replaced", applied, "redundant_removed", redundantApplied, "prose_rewritten", strings.TrimSpace(parsed.CorrectedProse) != "")
 
