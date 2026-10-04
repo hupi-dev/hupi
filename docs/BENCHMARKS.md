@@ -18,11 +18,24 @@ headline percentage.
 | Category | Questions | Accuracy |
 |---|---|---|
 | 1 — multi-hop | 282 | 46.4% |
-| 2 — single-hop | 321 | 61.1% |
-| 3 — temporal | 96 | 35.3% |
-| 4 — open-domain | 841 | 56.4% |
+| 2 — temporal | 321 | 61.1% |
+| 3 — open-domain | 96 | 35.3% |
+| 4 — single-hop | 841 | 56.4% |
 | 5 — adversarial (abstention) | 446 | 68.2% |
 | **Overall** | **1,986** | **57.3%** |
+
+**Category labels corrected 2026-10-04**: categories 2 and 4 were
+swapped (and 3 mislabeled) in every table in this doc until this date —
+confirmed against the LoCoMo paper's own Appendix B.1 / Table 5 question
+counts (`bench/data/locomo/static/paper/locomo.pdf`: 841 single-hop, 282
+multi-hop, 321 temporal, 96 open-domain, 446 adversarial — matched
+against this dataset's observed per-ID counts), the eval code (`f1()`
+sub-answer splitting applies only to category 1, i.e. multi-hop), and
+direct inspection of the actual questions in each category. All
+historical accuracy *numbers* in this doc and in
+[BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md) were
+always correct for their actual category ID; only the English label
+attached to IDs 2/3/4 was wrong.
 
 **Method**: `cmd/hupi-bench -benchmark locomo -all-conversations`, real
 `gateway.Handler`, real nightly consolidation (`hupi-consolidate`), real
@@ -113,9 +126,9 @@ that motivated those fixes, not a final apples-to-apples comparison):
 | Category | HUPI-memory (v3) | No-memory baseline |
 |---|---|---|
 | 1 — multi-hop | 24.4% | 53.0% |
-| 2 — single-hop | 31.7% | 64.9% |
-| 3 — temporal | 20.2% | 23.6% |
-| 4 — open-domain | 20.8% | 49.9% |
+| 2 — temporal | 31.7% | 64.9% |
+| 3 — open-domain | 20.2% | 23.6% |
+| 4 — single-hop | 20.8% | 49.9% |
 | 5 — adversarial | 50.7% | 43.7% |
 | **Overall** | **30.5%** | **50.9%** |
 
@@ -349,9 +362,9 @@ inspected failures, not guessed:
   | Category | Regressed (pre-fix) | Fixed (post-PR #103) | v6 baseline |
   |---|---|---|---|
   | 1 — multi-hop | 48.5% | 48.3% | — |
-  | 2 — single-hop | 56.6% | 54.5% | — |
-  | 3 — temporal | 33.9% | 34.8% | — |
-  | 4 — open-domain | 61.2% | 60.8% | — |
+  | 2 — temporal | 56.6% | 54.5% | — |
+  | 3 — open-domain | 33.9% | 34.8% | — |
+  | 4 — single-hop | 61.2% | 60.8% | — |
   | 5 — adversarial | 51.1% | **66.6%** | 67.7% |
   | **Overall** | **55.0%** | **58.0%** | 57.3% (v7) |
 
@@ -361,8 +374,8 @@ inspected failures, not guessed:
   question was observed to flip between a correct abstention and a
   confident-wrong answer across two back-to-back reruns with identical
   prompt and code, confirming real variance exists at this scale).
-  Categories 1–4 moved by at most ~2pp in either direction (single-hop
-  dipped 56.6%→54.5%, temporal rose 33.9%→34.8%), consistent with the
+  Categories 1–4 moved by at most ~2pp in either direction (temporal
+  dipped 56.6%→54.5%, open-domain rose 33.9%→34.8%), consistent with the
   prediction that this fix is adversarial-specific and wouldn't move
   F1-scored categories much either way — those don't award partial
   credit for a correct-but-differently-attributed abstention the way
