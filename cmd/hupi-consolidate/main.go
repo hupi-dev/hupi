@@ -29,10 +29,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/push"
+	"golang.org/x/sync/errgroup"
 
 	"hupi/internal/bootstrap"
 	"hupi/internal/consolidation"
@@ -83,34 +86,88 @@ func run() error {
 	}
 
 	period := date.Format("2006-01-02")
-	var failed int
-	for _, scope := range scopes {
+	failed := runScopesConcurrently(scopes, func(scope identity.Scope) error {
 		if err := runSafely(func() error { return runner.RunDaily(ctx, scope, date) }); err != nil {
-			// One user's or team's bad day (a malformed LLM response, a
-			// transient network error) shouldn't block everyone else's
-			// consolidation — log and keep going, report the failure
-			// count at the end. runSafely additionally converts a panic
-			// into this same path (review finding C4): a panic is exactly
-			// the one failure mode this loop's own stated design intent
-			// doesn't actually cover without it.
 			slog.Error("daily consolidation failed for scope",
 				"scope_kind", scope.Kind, "scope_owner", scope.Owner, "date", period, "error", err)
-			failed++
-			continue
+			return err
 		}
-	}
+		return nil
+	})
 
 	slog.Info("daily consolidation complete", "date", period, "scopes", len(scopes), "failed", failed)
 
 	rollupFailed := runDueRollups(ctx, runner, date, scopes)
-	failed += rollupFailed
+	totalFailed := failed + rollupFailed
 
 	pushMetrics()
 
-	if failed > 0 {
-		return fmt.Errorf("consolidation failed for %d scope-runs on %s", failed, period)
+	if totalFailed > 0 {
+		return fmt.Errorf("consolidation failed for %d scope-runs on %s", totalFailed, period)
 	}
 	return nil
+}
+
+// runScopesConcurrently runs fn once per scope, bounded by
+// consolidateConcurrency, and returns how many calls failed. One scope's
+// error is isolated from every other's — the same "one user's or team's
+// bad day (a malformed LLM response, a transient network error)
+// shouldn't block everyone else's consolidation" intent the sequential
+// version of this loop already had, now with real concurrency rather
+// than a scope-by-scope wait. fn's own error is intentionally never
+// returned to the errgroup itself: errgroup.Group with SetLimit cancels
+// remaining work on the first non-nil error from any goroutine, which
+// would silently reintroduce "one bad scope blocks everyone else" —
+// fn is expected to log its own error (callers already do, with
+// scope-specific context an int count alone can't carry) and this just
+// tallies how many did.
+//
+// A real, confirmed production concern motivates this existing at all,
+// not just a hypothetical: before this, every scope was processed one at
+// a time with zero concurrency, so nightly runtime scaled linearly with
+// the number of active users/teams — found while investigating why a
+// LongMemEval benchmark run (which exercises this same code path, just
+// with many synthetic scopes sharing one database) kept slowing down as
+// more scopes accumulated. Every dependency a scope's work touches is
+// already safe for concurrent use across different scopes: *sql.DB pools
+// its own connections, crypto.KeyStore has its own internal mutex (it
+// already had to be concurrency-safe for cmd/hupi's own concurrent HTTP
+// handlers), and consolidation.Runner holds no other mutable per-call
+// state.
+func runScopesConcurrently(scopes []identity.Scope, fn func(identity.Scope) error) int {
+	var failed atomic.Int64
+	g := new(errgroup.Group)
+	g.SetLimit(consolidateConcurrency())
+	for _, scope := range scopes {
+		g.Go(func() error {
+			if err := fn(scope); err != nil {
+				failed.Add(1)
+			}
+			return nil
+		})
+	}
+	g.Wait() // nolint:errcheck — the g.Go func above always returns nil; failures are counted separately
+	return int(failed.Load())
+}
+
+// consolidateConcurrency bounds runScopesConcurrently's fan-out (see its
+// own doc comment for why this exists at all). Defaults conservative
+// rather than maximal — raising it is an operator tuning decision
+// (balancing nightly-job wall-clock time against LLM provider rate
+// limits and Postgres's own max_connections), not something this code
+// should guess aggressively on their behalf.
+func consolidateConcurrency() int {
+	const defaultConsolidateConcurrency = 5
+	v := os.Getenv("HUPI_CONSOLIDATE_CONCURRENCY")
+	if v == "" {
+		return defaultConsolidateConcurrency
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		slog.Warn("HUPI_CONSOLIDATE_CONCURRENCY is not a positive integer, using default", "value", v, "default", defaultConsolidateConcurrency)
+		return defaultConsolidateConcurrency
+	}
+	return n
 }
 
 // runSafely isolates one scope's consolidation/rollup call from a panic
@@ -158,7 +215,7 @@ func runDueRollups(ctx context.Context, runner *consolidation.Runner, date time.
 	jobs := dueRollups(date)
 	var failed int
 	for _, job := range jobs {
-		for _, scope := range scopes {
+		failed += runScopesConcurrently(scopes, func(scope identity.Scope) error {
 			if err := runSafely(func() error {
 				return runner.RunRollup(ctx, scope, job.level, job.sourceLevel, job.period, job.sourcePeriods)
 			}); err != nil {
@@ -166,11 +223,11 @@ func runDueRollups(ctx context.Context, runner *consolidation.Runner, date time.
 				slog.Error("rollup failed for scope",
 					"scope_kind", scope.Kind, "scope_owner", scope.Owner,
 					"level", job.level, "period", job.period, "error", err)
-				failed++
-				continue
+				return err
 			}
 			metrics.RollupRunsTotal.WithLabelValues("ok").Inc()
-		}
+			return nil
+		})
 		slog.Info("rollup complete", "level", job.level, "period", job.period, "scopes", len(scopes))
 	}
 	return failed
