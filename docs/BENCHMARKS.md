@@ -322,9 +322,29 @@ inspected failures, not guessed:
   in storage), while `summary_key_facts` already works better (4 of
   the same entity's wins independently confirmed present and grounded)
   but nothing at answer time fetches *every* matching key_fact for a
-  counting query, only a bounded top-K relevance sample. Real design
-  pass needed (query-shape detection + exhaustive per-entity key_fact
-  fetch, not a prompt-paragraph patch) — not attempted yet.
+  counting query, only a bounded top-K relevance sample. **Two real
+  attempts tried, both found genuine problems and were reverted, not
+  shipped** — see
+  [MULTIHOP_COUNT_AGGREGATION_PLAN.md](MULTIHOP_COUNT_AGGREGATION_PLAN.md)
+  for the full account. (1) Reusing the existing ordering-query
+  retrieval-widening mechanism for a broad "how many" trigger
+  regressed the 43 real counting questions from 43.3% to 38.0% mean
+  F1 — a full re-run found it pulled extra content into a category-5
+  adversarial question that happened to share the surface phrase,
+  flipping a correct abstention into a confident misattribution. (2) A
+  consolidation-prompt extension (record every occurrence of a
+  repeating event as its own key_fact) couldn't be cleanly verified at
+  all: a real from-scratch re-ingest of `conv-42` surfaced that two of
+  the "wins" the original diagnosis was built on had zero key_fact
+  backing even before this fix, and an independent re-extraction read
+  the same two events as losses instead — real run-to-run
+  non-determinism on this specific conversation's own ambiguous text,
+  not something a prompt-wording change can fix. Whether the gold
+  count of seven wins is even reliably reconstructable from what this
+  conversation's text actually supports is now an open question in its
+  own right. Deprioritized pending a bigger investment (reading the
+  raw source conversation directly, multiple re-ingest trials) than
+  fits one backlog item.
 - **A relative-date resolution miss on one turn, not yet distinguished
   from single-trial noise** (same calibration run): "How long did it
   take Jon to open his studio?" (gold: "six months") requires resolving
