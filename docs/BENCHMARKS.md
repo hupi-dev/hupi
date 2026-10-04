@@ -312,22 +312,22 @@ inspected failures, not guessed:
   conversation. Needs a few repeat trials on this exact question before
   concluding whether this is systemic or a one-off compliance miss —
   not re-run yet.
-- **Adversarial (abstention) accuracy regressed on the full 10-conversation
-  LoCoMo run** (found 2026-10-04, after PR #96/#97/#99/#100/#101):
-  67.7% (v6 baseline, `bench/results/locomo_gpt-4.1_2026-09-26/`) →
-  51.1% today, a real −16.6pp drop. Category 5 is scored by a literal,
-  case-insensitive substring check for "not mentioned"/"no information
-  available" (`bench/data/locomo/task_eval/evaluation.py`'s own
-  category-5 branch — already documented in this package's own doc
-  comment as gap 3, found on the very first LoCoMo run). Classifying
-  every adversarial prediction into scored-correct / hedged-but-wrong-
-  wording / confidently-wrong-with-no-hedge split the regression two
-  ways:
+- ~~**Adversarial (abstention) accuracy regressed on the full
+  10-conversation LoCoMo run**~~ — **resolved 2026-10-04**, confirmed by
+  a full 10-conversation re-run (`bench/results/locomo_full10_rescore_stats.json`).
+  Found after PR #96/#97/#99/#100/#101: 67.7% (v6 baseline,
+  `bench/results/locomo_gpt-4.1_2026-09-26/`) → 51.1%, a real −16.6pp
+  drop. Category 5 is scored by a literal, case-insensitive substring
+  check for "not mentioned"/"no information available"
+  (`bench/data/locomo/task_eval/evaluation.py`'s own category-5 branch —
+  already documented in this package's own doc comment as gap 3, found
+  on the very first LoCoMo run). Classifying every adversarial
+  prediction into scored-correct / hedged-but-wrong-wording /
+  confidently-wrong-with-no-hedge split the regression two ways:
   - ~4.3pp (26%) was a real but narrow wording regression: PR #101/#103
     introduced example phrasing using "isn't mentioned", which does not
-    contain the literal scored substring "not mentioned" — **fixed** in
-    the same change as the finding below (all abstention examples now
-    use the exact phrase).
+    contain the literal scored substring "not mentioned" — fixed by
+    changing both examples to the exact phrase "is not mentioned".
   - ~12.3pp (74%, the dominant share) was a genuine increase in
     confidently-wrong answers (23.1% → 35.4%, no hedge at all). Traced
     two flipped cases to their actual retrieved context (not just the
@@ -336,13 +336,35 @@ inspected failures, not guessed:
     mental health): retrieval was completely unambiguous both times —
     every fact was explicitly labeled with the correct person's name,
     one even marked "(most relevant)" — yet the answer still blended
-    the two people's facts together, in both directions. **Partially
-    addressed**: extended the existing WHO-attribution paragraph to
-    name this "similar lives" case explicitly, and connected the
-    long-standing "make your best specific attempt" guidance to the
-    WHO-check so a fact confirmed to belong to someone else doesn't
-    count as "something relevant" to guess from. Verified end-to-end on
-    one of the two traced cases (now correctly abstains); the other
-    still answers confidently wrong, so this is a real, measured
-    improvement, not a complete fix — a full re-run of the adversarial
-    category is the real test, not done yet.
+    the two people's facts together, in both directions. Fixed by
+    extending the existing WHO-attribution paragraph to name this
+    "similar lives" case explicitly, and connecting the long-standing
+    "make your best specific attempt" guidance to the WHO-check so a
+    fact confirmed to belong to someone else doesn't count as
+    "something relevant" to guess from (PR #103).
+
+  **Confirmed fix, full re-run (`locomo_full10_rescore_predictions.json`,
+  same 10 conversations, same scopes, `-answer-only`):**
+
+  | Category | Regressed (pre-fix) | Fixed (post-PR #103) | v6 baseline |
+  |---|---|---|---|
+  | 1 — multi-hop | 48.5% | 48.3% | — |
+  | 2 — single-hop | 56.6% | 54.5% | — |
+  | 3 — temporal | 33.9% | 34.8% | — |
+  | 4 — open-domain | 61.2% | 60.8% | — |
+  | 5 — adversarial | 51.1% | **66.6%** | 67.7% |
+  | **Overall** | **55.0%** | **58.0%** | 57.3% (v7) |
+
+  Adversarial accuracy recovered almost fully (51.1% → 66.6%, within
+  ~1.1pp of the pre-regression 67.7% baseline — likely just run-to-run
+  LLM sampling noise at this point, not a remaining gap; a single traced
+  question was observed to flip between a correct abstention and a
+  confident-wrong answer across two back-to-back reruns with identical
+  prompt and code, confirming real variance exists at this scale).
+  Categories 1–4 moved by at most ~2pp in either direction (single-hop
+  dipped 56.6%→54.5%, temporal rose 33.9%→34.8%), consistent with the
+  prediction that this fix is adversarial-specific and wouldn't move
+  F1-scored categories much either way — those don't award partial
+  credit for a correct-but-differently-attributed abstention the way
+  category 5 does. Overall accuracy is now 58.0%, slightly above the
+  pre-regression v7 baseline of 57.3%.
