@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/http/httptrace"
@@ -120,10 +121,12 @@ func sendWithRetry(ctx context.Context, client *http.Client, name string, idempo
 			if attempt == maxRetries {
 				return 0, nil, fmt.Errorf("provider %s: request failed: %w", name, doErr)
 			}
+			delay := retryDelay(attempt, "")
+			slog.Default().Warn("provider request retrying after network-level error", "provider", name, "attempt", attempt, "delay", delay, "error", doErr)
 			select {
 			case <-ctx.Done():
 				return 0, nil, fmt.Errorf("provider %s: cancelled while waiting to retry: %w", name, ctx.Err())
-			case <-time.After(retryDelay(attempt, "")):
+			case <-time.After(delay):
 			}
 			continue
 		}
@@ -133,10 +136,12 @@ func sendWithRetry(ctx context.Context, client *http.Client, name string, idempo
 			return resp.StatusCode, nil, fmt.Errorf("provider %s: read response body: %w", name, readErr)
 		}
 		if retryableStatus(resp.StatusCode) && attempt < maxRetries {
+			delay := retryDelay(attempt, resp.Header.Get("Retry-After"))
+			slog.Default().Warn("provider request retrying after retryable status", "provider", name, "status", resp.StatusCode, "attempt", attempt, "delay", delay)
 			select {
 			case <-ctx.Done():
 				return 0, nil, fmt.Errorf("provider %s: cancelled while waiting to retry: %w", name, ctx.Err())
-			case <-time.After(retryDelay(attempt, resp.Header.Get("Retry-After"))):
+			case <-time.After(delay):
 			}
 			continue
 		}

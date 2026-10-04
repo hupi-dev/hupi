@@ -1277,6 +1277,54 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		}
 		pool[i] = mmrCandidate{relevance: fused, tokens: tokenSet(c.text)}
 	}
+
+	// Optional LLM reranker pass (docs/BENCHMARK_IMPROVEMENT_PLAN.md's
+	// "aunt" case and mostRelevantFactIndex's own documented
+	// lexical-overlap limitation): RRF's additive rank fusion can't
+	// distinguish "this excerpt actually answers the question" from
+	// "this excerpt is topically adjacent, found by the same
+	// mechanisms, but not what's actually needed" — a real judgment call
+	// over actual candidate text, not rank arithmetic. Best-effort: a
+	// failure here leaves pool exactly as RRF built it above, same
+	// degrade-to-existing-behavior shape query expansion's own caller
+	// uses.
+	//
+	// Gated on looksLikeOrderingRequest(query), not every retrieval —
+	// real measurement found each rerank call costs ~3.5-4.3s (a ~10-12K
+	// character prompt scoring ~20 candidates), and no other best-effort
+	// LLM pass in this codebase adds mandatory latency to every live
+	// chat turn: attributionCheck only runs when a request opts into
+	// explainMode=="deep" (internal/gateway/handler.go), AggregationHint
+	// only runs for ordering-shaped questions, and groundingCheck/
+	// contradiction-check both run at consolidation time, never in a
+	// user's request path at all. Reusing looksLikeOrderingRequest's
+	// existing widened-candidate-pool case is the one place in this file
+	// that already accepts added latency for broader recall, and is
+	// exactly where RRF's structural weakness is most likely to bite (a
+	// bigger, more redundant candidate pool) — ordinary single-fact
+	// questions, the common case, never pay this cost at all. Also
+	// gated on len(poolIDs) > 1 — reranking a single candidate (or none)
+	// is a pure cost with no possible effect.
+	reranked := false
+	if s.chatProvider != nil && rerankingEnabled() && looksLikeOrderingRequest(query) && len(poolIDs) > 1 {
+		candidates := make([]rerankCandidate, len(poolIDs))
+		for i, id := range poolIDs {
+			c := byID[id]
+			candidates[i] = rerankCandidate{id: id, period: c.period, text: c.text}
+		}
+		scores, err := s.rerankSummaries(ctx, query, candidates)
+		if err != nil {
+			slog.Default().Warn("rerank summaries: call failed, falling back to RRF-fused scores", "error", err)
+		} else {
+			reranked = true
+			for i, id := range poolIDs {
+				if score, ok := scores[id]; ok {
+					pool[i].relevance = score
+				}
+			}
+		}
+	}
+
 	picked := mmrSelect(pool, maxResults, mmrLambda())
 
 	// HUPI_DEBUG_FUSION is a real, permanent diagnostic escape hatch, not
@@ -1303,8 +1351,8 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				continue
 			}
 			i := poolIndex[id]
-			fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d factRank=%d fused=%.4f picked=%v\n",
-				id, byID[id].vectorRank, byID[id].keywordRank, byID[id].factRank, pool[i].relevance, pickedSet[i])
+			fmt.Fprintf(os.Stderr, "FUSION_DEBUG id=%s vectorRank=%d keywordRank=%d factRank=%d fused=%.4f reranked=%v picked=%v\n",
+				id, byID[id].vectorRank, byID[id].keywordRank, byID[id].factRank, pool[i].relevance, reranked, pickedSet[i])
 		}
 	}
 

@@ -481,3 +481,49 @@ inspected failures, not guessed:
   new failures elsewhere in the same category; a 96-question category is
   small enough that this isn't yet distinguished from noise. Overall:
   58.0% → 59.9%.
+
+## 9. LLM reranker pass over the RRF candidate pool
+
+Added to directly fix a structural weakness RRF's additive rank fusion
+can't resolve on its own: a candidate found weakly by both vector and
+keyword search structurally outranks one found strongly by only one
+signal, regardless of which one actually answers the question (the
+"aunt" case, §8 above — `reciprocalRank(11) + reciprocalRank(0) = 0.577`
+beats `reciprocalRank(4) + 0 = 0.167` purely on signal count, not
+relevance). One extra LLM call, inserted in `fusedSearchSummaries`
+between RRF fusion and MMR selection, re-scores the candidate pool by
+actual relevance to the question before MMR narrows it down.
+`HUPI_ENABLE_LLM_RERANK`, off by default.
+
+**Real measured cost found this cannot be unconditional.** A rerank call
+costs ~3.5-4.3s (a ~10-12K character prompt scoring ~20 candidates) —
+confirmed via direct timing instrumentation, not estimated. No other
+best-effort LLM pass in this codebase adds mandatory latency to every
+live chat turn: `attributionCheck` requires `explainMode=="deep"`
+(explicit per-request opt-in), `AggregationHint` requires an
+ordering-shaped question, and `groundingCheck`/contradiction-check both
+run at consolidation time, never in a user's request path. Gated the
+same way `AggregationHint` already is — `looksLikeOrderingRequest(query)`
+— so ordinary single-fact questions, the common case, never pay this
+cost at all.
+
+**Verification, two benchmarks:**
+- LongMemEval (`round5/clean17`, the confirmed 17/17 set): re-run with
+  reranking on, still **17/17 (1.0)**, task-averaged and overall. The
+  rerank call fired on exactly the two questions it should have —
+  `gpt4_70e84552_abs` ("which did I complete first, fixing the fence or
+  purchasing three cows from Peter?") and `gpt4_6ed717ea` ("which item
+  did I purchase first, the dog bed or the training pads?") — both
+  judged correct.
+- LoCoMo (full 10-conversation re-run, same scopes, `-answer-only`):
+  only 7 of 1,986 questions matched the gate at all (LoCoMo mostly
+  doesn't contain this question shape — `looksLikeOrderingRequest` was
+  originally tuned for a LongMemEval case). Overall 59.9% → 60.9%.
+  Category 3 (open-domain) dipped 34.2% → 30.2%, but diffing confirmed
+  this is unrelated to reranking: zero of the 7 fired calls touched any
+  of category 3's regressed questions, and the regressions themselves
+  are the same small-sample noise this 96-question category has shown
+  all session, plus a few pure verbosity-scoring artifacts ("Beach" vs.
+  "Deborah lives close to the beach." — same content, lower F1 from
+  extra words). No regression attributable to the reranker itself
+  anywhere it actually fired.
