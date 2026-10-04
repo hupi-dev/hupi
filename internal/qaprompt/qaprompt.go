@@ -115,13 +115,31 @@ package qaprompt
 // that one guards against combining two real but mismatched figures,
 // this one guards against ordering two named things when only one of
 // them is real.
+//
+// The second sentence of the "double-check WHO" paragraph (the
+// non-person generalization) was added after a real LongMemEval miss,
+// `6ae235be` (single-session-assistant): the user asked what processes
+// the Lake Charles Refinery uses, out of three CITGO refineries the
+// assistant had described earlier, each with its own near-identical
+// process list. Storage had the correct list for every refinery,
+// correctly grounded. The predicted answer correctly matched Lake
+// Charles's first three processes (atmospheric distillation, FCC,
+// alkylation — distinguishing it from Lemont's different list) but then
+// substituted the fourth item with Corpus Christi's extra process
+// (hydrocracking) instead of Lake Charles's own (hydrotreating) — not a
+// retrieval miss, an answer-time blend between two similarly-structured
+// entities sitting next to each other in context. The original paragraph
+// already named this exact mechanism for two people; it just didn't say
+// it also applies to any other kind of similar, enumerated entity
+// (places, branches, versions of a list), which is the same risk for a
+// different noun.
 const Concise = `Answer the following question directly, using a short phrase rather than a full sentence or explanation — but include every specific detail the question asks for (a complete name, date, or list), not just the first word or a truncated fragment.
 
 Always give dates as an absolute date (e.g. "7 May 2023"), never a relative term like "yesterday", "last year", or "this month".
 
 Make your best specific attempt using anything relevant you've been told, even if you're not fully certain or the exact wording isn't stated verbatim — a specific, plausible answer inferred from related information is better than declining to answer. Only say "not mentioned" or "no information available" if there is truly nothing relevant to work with at all — not merely because the precise fact isn't stated in so many words.
 
-Before answering, double-check WHO the retrieved information is actually about. A conversation between two people often has facts that apply to only one of them — if the question asks about person A but the fact you found belongs to person B, say so explicitly (e.g. "That's B's necklace, not A's — A's own necklace isn't mentioned") rather than answering as if it were A's.
+Before answering, double-check WHO the retrieved information is actually about. A conversation between two people often has facts that apply to only one of them — if the question asks about person A but the fact you found belongs to person B, say so explicitly (e.g. "That's B's necklace, not A's — A's own necklace isn't mentioned") rather than answering as if it were A's. The same risk applies to any set of similar, closely-related things, not just two people — several branches, locations, or versions of something, each with its own specific list or details. When a question names one specific one (e.g. "the Lake Charles Refinery" out of several refineries) and you have near-identical lists for multiple similar ones, use only the exact list that belongs to the one actually named — do not substitute or blend in an item from a different, similarly-structured one just because it sits right next to it in what you were given.
 
 When two or more retrieved memories give different values for the same specific fact about the same person or thing — for example, one memory says a gym membership costs $40 a month and a later-dated one says $55 — treat the most recently dated memory's value as the current one and answer with it, briefly noting the earlier value in parentheses (e.g. "$55 a month (earlier: $40)"). This holds even when the later memory mentions the value only in passing or as a recollection, and regardless of which memory appears first, is repeated more often, or is marked "(most relevant)". Judge recency by the date on the memory that actually states the value; an entity's "last updated" date covers its whole record, not each value inside it. This is only for genuine updates of one fact: values that answer different questions are not a conflict, even on the same topic (a $40 membership fee and a $55 personal-training session are two separate prices), and hypothetical or example figures don't count. If the question explicitly asks for the original, first, or previous value, give that one instead — past tense alone ("what was...") doesn't mean that.
 
