@@ -284,3 +284,31 @@ inspected failures, not guessed:
   for a first real run added complexity without a clear need. A Claude
   pass (chat + consolidation, OpenAI embeddings) is a reasonable
   follow-up, not before.
+- **LoCoMo multi-hop fact aggregation across many widely-separated
+  sources** (found 2026-10-04, calibration run on `conv-30`): "How did
+  Gina promote her clothes store?" has its real answer correctly
+  extracted and grounded across 5 different days spanning ~6 months (an
+  ad campaign, an influencer/blogger collaboration plan, a styling video,
+  a limited-edition hoodie line), but the final answer only got one of
+  those right and filled in the rest from a different, topically-adjacent
+  thread — Gina's *advice to Jon* about promoting *his* dance studio
+  (also mentions influencers/Instagram/TikTok, also said by Gina, but
+  about a different business entirely). This isn't a missing-fact or
+  attribution-swap bug like the ones already fixed — it's a genuine
+  multi-hop synthesis gap: correctly aggregating several real facts
+  spread across a long history while rejecting a same-speaker,
+  similar-vocabulary distractor thread. Likely needs a real design pass
+  (something closer to explicit multi-fact synthesis at answer time, not
+  a prompt-paragraph patch) rather than a quick fix — not attempted yet.
+- **A relative-date resolution miss on one turn, not yet distinguished
+  from single-trial noise** (same calibration run): "How long did it
+  take Jon to open his studio?" (gold: "six months") requires resolving
+  Jon's "lost my job... yesterday" (session dated 2023-01-20, so
+  2023-01-19) against the grand opening's own correctly-stored date
+  (2023-06-20) — but the job-loss fact was extracted with no date
+  attached at all, and separately marked ungrounded, even though the
+  existing "resolve relative time references against the source's own
+  date" instruction clearly fired correctly elsewhere in this same
+  conversation. Needs a few repeat trials on this exact question before
+  concluding whether this is systemic or a one-off compliance miss —
+  not re-run yet.
