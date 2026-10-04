@@ -564,3 +564,103 @@ func TestUpsertRelationships_CanonicalizesBasedInToLivesInForPersonSubjects(t *t
 		t.Errorf("organization:acme based_in edges = %d, want 1 (organization's based_in must not be rewritten to lives_in)", orgBasedInCount)
 	}
 }
+
+// TestUpsertRelationships_DoesNotCorruptEdgeWhenAnEarlierStartingOneArrivesLater
+// is the regression test for a real, confirmed bug found during a full
+// 48-instance LongMemEval run (round 5, six scopes/predicates hit it
+// independently — see docs/LONGMEMEVAL_ACCURACY_PLAN.md): consolidation
+// doesn't process periods in strict chronological order (cross-period
+// contradiction correction revisits earlier periods after later ones are
+// already stored), so an open-ended edge's own valid_from can be *later*
+// than a new edge's valid_from for the same (subject, predicate). The
+// old "close superseded edge" UPDATE blindly set valid_until to the new
+// edge's (earlier) valid_from regardless, producing valid_from >
+// valid_until and crashing the whole day's consolidation on
+// entity_relationships_valid_date_order_check
+// (schema/0019_entity_relationships_valid_date_order.sql) — not just a
+// skipped relationship, the real production failure mode this
+// reproduces.
+func TestUpsertRelationships_DoesNotCorruptEdgeWhenAnEarlierStartingOneArrivesLater(t *testing.T) {
+	runner, db := testRunner(t, "", "")
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-relationships-out-of-order"}
+	ctx := context.Background()
+	cleanupRelationshipScope(t, db, scope)
+
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		for _, e := range []struct{ id, kind, name string }{
+			{"person:dana", "person", "Dana"},
+			{"organization:old-co", "organization", "Old Co"},
+			{"organization:new-co", "organization", "New Co"},
+		} {
+			if _, err := tx.ExecContext(ctx, `
+				insert into entities (id, kind, name, scope_kind, scope_owner) values ($1, $2, $3, $4, $5)
+			`, e.id, e.kind, e.name, scope.Kind, scope.Owner); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed entities: %v", err)
+	}
+
+	mustUpsert := func(updates []RelationshipUpdate) {
+		t.Helper()
+		err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+			return runner.upsertRelationships(ctx, tx, scope, updates, "")
+		})
+		if err != nil {
+			t.Fatalf("upsertRelationships: %v", err)
+		}
+	}
+
+	// First (processed first, chronologically later): Dana works at New
+	// Co starting 2026-06-01, open-ended.
+	mustUpsert([]RelationshipUpdate{
+		{SubjectKind: "person", SubjectName: "Dana", Predicate: "works_at", ObjectKind: "organization", ObjectName: "New Co", ValidFrom: "2026-06-01"},
+	})
+
+	// Second (processed second, but chronologically *earlier* — the
+	// out-of-order case): Dana worked at Old Co starting 2020-01-01. Must
+	// not crash, and must not set New Co's valid_until before its own
+	// valid_from.
+	mustUpsert([]RelationshipUpdate{
+		{SubjectKind: "person", SubjectName: "Dana", Predicate: "works_at", ObjectKind: "organization", ObjectName: "Old Co", ValidFrom: "2020-01-01"},
+	})
+
+	got := map[string]sql.NullString{}
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select object_id, valid_until::text from entity_relationships
+			where scope_kind = $1 and scope_owner = $2 and subject_id = 'person:dana' and predicate = 'works_at'
+			order by object_id
+		`, scope.Kind, scope.Owner)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var objectID string
+			var validUntil sql.NullString
+			if err := rows.Scan(&objectID, &validUntil); err != nil {
+				return err
+			}
+			got[objectID] = validUntil
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		t.Fatalf("query relationships: %v", err)
+	}
+
+	if vu, ok := got["organization:new-co"]; !ok {
+		t.Fatal("expected the new-co edge to still exist")
+	} else if vu.Valid {
+		t.Errorf("new-co edge valid_until = %+v, want null (its own valid_from is later than old-co's, so it must not be closed by old-co's earlier valid_from)", vu)
+	}
+	if vu, ok := got["organization:old-co"]; !ok {
+		t.Fatal("expected the old-co edge to exist")
+	} else if vu.Valid {
+		t.Errorf("old-co edge valid_until = %+v, want null (nothing should have closed it)", vu)
+	}
+}

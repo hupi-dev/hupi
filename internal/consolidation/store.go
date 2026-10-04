@@ -728,6 +728,23 @@ func (r *Runner) upsertRelationships(ctx context.Context, tx *sql.Tx, scope iden
 		// wrongly closing a valid one-to-many edge. See
 		// docs/ENTITY_RELATIONSHIPS_PLAN.md §5 for the two approaches this
 		// was weighed against.
+		//
+		// "and (valid_from is null or valid_from <= $1::date)" is a real,
+		// confirmed fix, not defensive padding: consolidation doesn't
+		// process periods in strict chronological order (cross-period
+		// contradiction correction revisits earlier periods after later
+		// ones are already stored), so the "existing" open-ended edge
+		// being closed here can have its own valid_from *later* than the
+		// new edge's — closing it at the new edge's (earlier) valid_from
+		// would set valid_until before valid_from, violating
+		// entity_relationships_valid_date_order_check
+		// (schema/0019_entity_relationships_valid_date_order.sql). A real
+		// LongMemEval run reproduced this for real data (multiple scopes,
+		// multiple predicates, e.g. person:user listens_to). Skipping
+		// such a row rather than closing it wrongly is the same
+		// conservative direction this function already takes everywhere
+		// else — leaving a stale edge open a little longer beats
+		// corrupting one into an invalid window.
 		if validFrom != nil {
 			if _, err := tx.ExecContext(ctx, `
 				update entity_relationships
@@ -736,6 +753,7 @@ func (r *Runner) upsertRelationships(ctx context.Context, tx *sql.Tx, scope iden
 				  and subject_id = $4 and predicate = $5
 				  and object_id != $6
 				  and valid_until is null
+				  and (valid_from is null or valid_from <= $1::date)
 			`, validFrom, scope.Kind, scope.Owner, subjectID, predicate, objectID); err != nil {
 				return fmt.Errorf("close superseded relationship edges for %s %s: %w", subjectID, predicate, err)
 			}
