@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"hupi/internal/dbscope"
@@ -25,6 +26,16 @@ import (
 // in.
 const maxRelatedSummariesForContradictionCheck = 5
 
+// redundancyDedupEnabled gates the second removal reason
+// contradictionCheckPrompt can add below (pure restatement, not a value
+// conflict) — off by default, same posture as queryExpansionEnabled,
+// given this mutates stored consolidation data (unlike a pure ranking
+// change): a wrongly-merged fact is destroyed, not just mis-ranked.
+// Checked live, not cached, same convention as every other toggle.
+func redundancyDedupEnabled() bool {
+	return os.Getenv("HUPI_ENABLE_REDUNDANCY_DEDUP") == "true"
+}
+
 // contradictionCheckPrompt is deliberately narrow and separate from
 // summarySystemPrompt — Phase C sub-problem 2
 // (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): a focused yes/no judgment
@@ -36,20 +47,50 @@ const maxRelatedSummariesForContradictionCheck = 5
 // "update" from "unrelated additional fact," the same judgment
 // buildSummaryPrompt's established-record instruction already asks it
 // to make for same-period continuity, just extended across periods.
-const contradictionCheckPrompt = `You are checking whether any of a set of NEW facts contradicts any of a set of EXISTING facts about the same entities.
+//
+// A func, not a const, since redundancyDedupEnabled() conditionally
+// appends a second, distinct removal reason (see the redundancy
+// paragraph below) — the only prompt in this codebase that varies by an
+// env toggle, everything else here stays a plain string since its
+// behavior doesn't change.
+func contradictionCheckPrompt() string {
+	base := `You are checking whether any of a set of NEW facts contradicts any of a set of EXISTING facts about the same entities.
 
-A contradiction means a NEW fact states a different, incompatible value for the exact same specific real-world attribute an EXISTING fact already states — for example, a mortgage pre-approval amount that changed, or a job title that changed. It is NOT a contradiction if a NEW fact is simply a different, additional fact about the same entity, or only relates to the same entity/topic without stating a conflicting value for the same specific thing. When in doubt, do not report it as a contradiction — a missed contradiction is far less costly than incorrectly discarding a fact that was actually still true.
+A contradiction means a NEW fact states a different, incompatible value for the exact same specific real-world attribute an EXISTING fact already states — for example, a mortgage pre-approval amount that changed, or a job title that changed. It is NOT a contradiction if a NEW fact is simply a different, additional fact about the same entity, or only relates to the same entity/topic without stating a conflicting value for the same specific thing. When in doubt, do not report it as a contradiction — a missed contradiction is far less costly than incorrectly discarding a fact that was actually still true.`
+
+	if redundancyDedupEnabled() {
+		base += `
+
+A fact can also be removed for a second, distinct reason: when a NEW fact restates the EXACT same specific occurrence as an EXISTING fact, with no new information — the same single, one-time event, or the same current value for an attribute, mentioned again in passing. This is not a contradiction (nothing changed) — report it the same way, as an entry with an empty replacement, since the NEW fact already preserves it and the old copy is now pure duplication. Always use an empty replacement for this case, never a rewritten version of the same fact — if the EXISTING fact states a specific detail the NEW one doesn't repeat (an exact date, a number, a name), removing it entirely is still correct, because the NEW fact's own record of this occurrence is what survives, not a merged or edited version of the old one; do not produce a version of the old fact with that detail quietly dropped. Be careful: a repeating TYPE of event (a tournament win, a trip, a purchase) happening AGAIN is a new, distinct occurrence, not a restatement, even if worded almost identically to an earlier one — only report a removal this way when you are confident it is the literal same single occurrence as the new fact, never merely the same type of occurrence. When in doubt, do not report it — treating two real distinct occurrences as one duplicate destroys information permanently, which is worse than leaving a true duplicate in place. Mark which of the two reasons applies using the "reason" field: "contradiction" or "redundant".`
+	}
+
+	base += `
 
 Respond with exactly one JSON object, nothing else, no markdown fences:
-{"contradictions": [{"old_fact": "<the EXISTING fact's exact text>", "replacement": "<the corrected fact text, or an empty string to remove the old fact with nothing to replace it>"}], "corrected_prose": "<the EXISTING prose paragraph, rewritten to reflect every contradiction above instead of the stale value it currently states — omit or leave empty if contradictions is empty>"}
+{"contradictions": [{"old_fact": "<the EXISTING fact's exact text>", "replacement": "<the corrected fact text, or an empty string to remove the old fact with nothing to replace it>"`
+
+	if redundancyDedupEnabled() {
+		base += `, "reason": "contradiction or redundant"`
+	}
+
+	base += `}], "corrected_prose": "<the EXISTING prose paragraph, rewritten to reflect every contradiction above instead of the stale value it currently states — omit or leave empty if contradictions is empty>"}
 
 The EXISTING prose paragraph is given below alongside the EXISTING facts. If you report any contradictions, corrected_prose must be a complete rewrite of that whole paragraph — not just the changed sentence — with every stale value replaced and everything else preserved as-is, since this will wholesale replace the paragraph a person or another system would read.
 
 If there are no real contradictions, respond with {"contradictions": [], "corrected_prose": ""}.`
 
+	return base
+}
+
 type contradictionResult struct {
 	OldFact     string `json:"old_fact"`
 	Replacement string `json:"replacement"`
+	// Reason is only ever populated when redundancyDedupEnabled() added
+	// the second removal-reason paragraph to the prompt (see
+	// contradictionCheckPrompt) — defaults to "contradiction" when empty
+	// so this stays backward compatible with the unmodified prompt
+	// behavior and with any response that omits it.
+	Reason string `json:"reason"`
 }
 
 type contradictionResponse struct {
@@ -283,7 +324,7 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 
 	req := provider.ChatRequest{
 		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: contradictionCheckPrompt},
+			{Role: provider.RoleSystem, Content: contradictionCheckPrompt()},
 			{Role: provider.RoleUser, Content: buildContradictionCheckPrompt(newPeriod, newFacts, old.level, old.period, current.Summary, oldFacts, sharedEntityNames)},
 		},
 	}
@@ -302,6 +343,7 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 	}
 
 	applied := 0
+	redundantApplied := 0
 	for _, c := range parsed.Contradictions {
 		idx := -1
 		for i, f := range current.KeyFacts {
@@ -322,6 +364,9 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 			current.KeyFacts[idx].Fact = c.Replacement
 		}
 		applied++
+		if c.Reason == "redundant" {
+			redundantApplied++
+		}
 	}
 	if applied == 0 {
 		return
@@ -341,12 +386,20 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 		slog.Warn("consolidation: load triggering period's sources for grounding failed, correcting without them", "related_summary", old.id, "new_summary", newSummaryID, "error", err)
 	}
 
-	reason := fmt.Sprintf("system-detected contradiction: a %s summary stated a different value for the same fact", newPeriod)
+	var reason string
+	switch {
+	case redundantApplied == applied:
+		reason = fmt.Sprintf("system-detected redundancy: a %s summary restated the same fact with no new information", newPeriod)
+	case redundantApplied == 0:
+		reason = fmt.Sprintf("system-detected contradiction: a %s summary stated a different value for the same fact", newPeriod)
+	default:
+		reason = fmt.Sprintf("system-detected contradiction and redundancy: a %s summary stated different values for some facts and restated others with no new information", newPeriod)
+	}
 	if err := r.Correct(ctx, scope, old.id, current, reason, systemActor, extraGrounding); err != nil {
 		slog.Warn("consolidation: applying contradiction correction failed", "related_summary", old.id, "error", err)
 		return
 	}
-	slog.Info("consolidation: cross-period contradiction corrected", "corrected_summary", old.id, "triggering_period", newPeriod, "facts_replaced", applied, "prose_rewritten", strings.TrimSpace(parsed.CorrectedProse) != "")
+	slog.Info("consolidation: cross-period contradiction corrected", "corrected_summary", old.id, "triggering_period", newPeriod, "facts_replaced", applied, "redundant_removed", redundantApplied, "prose_rewritten", strings.TrimSpace(parsed.CorrectedProse) != "")
 
 	// Phase D item 4 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): old.id
 	// just changed, so any already-existing rollup covering old.period

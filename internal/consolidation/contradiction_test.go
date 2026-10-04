@@ -341,3 +341,183 @@ func TestCheckCrossPeriodContradictions_AppliesCorrection(t *testing.T) {
 		t.Errorf("corrected.Summary = %q, want the model's corrected_prose to have replaced the stale prose too", corrected.Summary)
 	}
 }
+
+// TestContradictionCheckPrompt_IncludesRedundancyParagraphOnlyWhenEnabled
+// is the real regression test for redundancyDedupEnabled's own gating:
+// the prompt sent to the model must only teach the second ("restated,
+// not contradicted") removal reason when the feature is explicitly
+// turned on — this mutates stored consolidation data, so it stays off by
+// default the same way queryExpansionEnabled does for its own real
+// cost/behavior change.
+func TestContradictionCheckPrompt_IncludesRedundancyParagraphOnlyWhenEnabled(t *testing.T) {
+	off := contradictionCheckPrompt()
+	if strings.Contains(off, "restates the EXACT same specific occurrence") {
+		t.Error("contradictionCheckPrompt() with the flag unset includes the redundancy paragraph, want it absent by default")
+	}
+
+	t.Setenv("HUPI_ENABLE_REDUNDANCY_DEDUP", "true")
+	on := contradictionCheckPrompt()
+	for _, want := range []string{
+		"restates the EXACT same specific occurrence",
+		"a repeating TYPE of event",
+		"only report a removal this way when you are confident it is the literal same single occurrence",
+	} {
+		if !strings.Contains(on, want) {
+			t.Errorf("contradictionCheckPrompt() with the flag set missing expected redundancy guidance: %q", want)
+		}
+	}
+}
+
+// TestCheckCrossPeriodContradictions_AppliesRedundancyRemoval is the
+// real regression test for docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's
+// follow-up work: a NEW fact that pure-restates an OLD fact (no value
+// conflict, "reason": "redundant") must remove the old fact via the
+// exact same supersede-and-splice mechanism contradiction correction
+// already uses — not a new write path, same Correct call, same
+// candidate-selection plumbing.
+func TestCheckCrossPeriodContradictions_AppliesRedundancyRemoval(t *testing.T) {
+	redundancyJSON := `{"contradictions": [{"old_fact": "Nate did not make it to the finals in his last game tournament", "replacement": "", "reason": "redundant"}], "corrected_prose": "Nate mentioned his gaming hobby again."}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
+	runner, db := testRunner(t, redundancyJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-cross-period-redundancy"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summary_key_facts where summary_id in (select id from summaries where scope_kind = $1 and scope_owner = $2)`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2022-11-04",
+		output: ConsolidationOutput{
+			Summary:         "Nate did not make it to the finals in his last game tournament.",
+			KeyFacts:        []KeyFactOutput{{Fact: "Nate did not make it to the finals in his last game tournament"}},
+			EntitiesTouched: []EntityUpdate{{ID: "person:nate", Kind: "person", Name: "Nate"}},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed old summary: %v", err)
+	}
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2022-11-09",
+		output: ConsolidationOutput{
+			Summary:         "Nate mentioned his gaming hobby again.",
+			KeyFacts:        []KeyFactOutput{{Fact: "Nate did not make it to the finals in his last game tournament"}},
+			EntitiesTouched: []EntityUpdate{{ID: "person:nate", Kind: "person", Name: "Nate"}},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed new summary: %v", err)
+	}
+
+	var oldID, newID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `select id from summaries where period = '2022-11-04' and scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&oldID); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `select id from summaries where period = '2022-11-09' and scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&newID)
+	}); err != nil {
+		t.Fatalf("load seeded ids: %v", err)
+	}
+
+	runner.checkCrossPeriodContradictions(ctx, scope, newID, "2022-11-09", []string{"person:nate"})
+
+	var supersededBy sql.NullString
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select id from summaries where supersedes = $1 and scope_kind = $2 and scope_owner = $3`, oldID, scope.Kind, scope.Owner).Scan(&supersededBy)
+	}); err != nil {
+		t.Fatalf("check supersession: %v", err)
+	}
+	if !supersededBy.Valid {
+		t.Fatal("old summary was not superseded — redundancy removal should have applied a correction")
+	}
+
+	corrected, err := runner.CurrentContent(ctx, scope, supersededBy.String)
+	if err != nil {
+		t.Fatalf("load corrected content: %v", err)
+	}
+	if len(corrected.KeyFacts) != 0 {
+		t.Errorf("corrected.KeyFacts = %+v, want the redundant fact removed with nothing replacing it", corrected.KeyFacts)
+	}
+}
+
+// TestCheckCrossPeriodContradictions_EmptyResponseLeavesBothFactsIntact
+// simulates the model correctly declining to merge a recurring-event
+// pair (docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's own explicit "when in
+// doubt, do not report it" guard) — this doesn't test the model's actual
+// judgment (that needs real-LLM verification against real conversation
+// text, not a stub), only that the Go code correctly does nothing when
+// told there's nothing to apply: neither summary should be superseded.
+func TestCheckCrossPeriodContradictions_EmptyResponseLeavesBothFactsIntact(t *testing.T) {
+	emptyJSON := `{"contradictions": [], "corrected_prose": ""}`
+	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
+	runner, db := testRunner(t, emptyJSON, groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-cross-period-no-merge"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from summary_key_facts where summary_id in (select id from summaries where scope_kind = $1 and scope_owner = $2)`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2022-04-25",
+		output: ConsolidationOutput{
+			Summary:         "Nate won a local Street Fighter tournament.",
+			KeyFacts:        []KeyFactOutput{{Fact: "Nate won a local Street Fighter tournament"}},
+			EntitiesTouched: []EntityUpdate{{ID: "person:nate", Kind: "person", Name: "Nate"}},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed old summary: %v", err)
+	}
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2022-09-29",
+		output: ConsolidationOutput{
+			Summary:         "Nate won a big video game tournament and earned money.",
+			KeyFacts:        []KeyFactOutput{{Fact: "Nate won a big video game tournament and earned money"}},
+			EntitiesTouched: []EntityUpdate{{ID: "person:nate", Kind: "person", Name: "Nate"}},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed new summary: %v", err)
+	}
+
+	var oldID, newID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `select id from summaries where period = '2022-04-25' and scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&oldID); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `select id from summaries where period = '2022-09-29' and scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner).Scan(&newID)
+	}); err != nil {
+		t.Fatalf("load seeded ids: %v", err)
+	}
+
+	runner.checkCrossPeriodContradictions(ctx, scope, newID, "2022-09-29", []string{"person:nate"})
+
+	var supersededBy sql.NullString
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `select id from summaries where supersedes = $1 and scope_kind = $2 and scope_owner = $3`, oldID, scope.Kind, scope.Owner).Scan(&supersededBy)
+	})
+	if err != sql.ErrNoRows {
+		t.Errorf("expected no supersession row (err=sql.ErrNoRows), got err=%v supersededBy=%v — the two distinct tournament wins should not have been merged", err, supersededBy)
+	}
+}

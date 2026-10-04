@@ -527,3 +527,70 @@ cost at all.
   "Deborah lives close to the beach." — same content, lower F1 from
   extra words). No regression attributable to the reranker itself
   anywhere it actually fired.
+
+## 10. Fact-level redundancy removal (cross-period restatement)
+
+Added to address a second real retrieval-noise source: the same
+real-world fact gets independently re-extracted on multiple different
+days (the Wells Fargo mortgage case, §8 above; this session's own
+Nate-tournament trace, where "did not make it to the finals" was
+independently key-facted on three different dates for what may be one
+event). Extends the existing cross-period contradiction-correction
+mechanism (`internal/consolidation/contradiction.go`) rather than
+building new machinery — `checkOneRelatedSummary` already has a
+remove-with-no-replacement path for a contradicting fact; the only
+change is a new prompt paragraph (gated behind
+`HUPI_ENABLE_REDUNDANCY_DEDUP`, off by default) teaching the model a
+second, distinct reason to use that same path: a NEW fact that purely
+restates an OLD one, no value changed, just mentioned again. Explicitly
+tells the model NOT to use this for a repeating *type* of event (a
+tournament win, a trip) happening again — only for the literal same
+single occurrence — directly informed by this session's own
+counting-investigation finding that this exact kind of event-identity
+judgment is where things go wrong if the model isn't warned.
+
+**Real-infra verification, not just unit tests** — a `-answer-only`
+rerun can't exercise a consolidation-time change at all, so this needed
+a genuine from-scratch ingest. Built a small synthetic 2-session
+conversation (`cmd/hupi-ingest-turns`, not LoCoMo/LongMemEval, to get a
+clean, unconfounded signal after LoCoMo's own conv-42 turned out to have
+real win/loss ambiguity in its source text) with both failure shapes in
+one case: a stable fact restated in passing a month later (a mortgage
+pre-approval amount) and a genuinely recurring event happening twice (a
+local chess tournament, then a distinct regional one a month later).
+
+**First run found a real issue**: the model did fire the redundancy
+path correctly, but instead of removing the stale fact outright (as
+instructed), it rewrote both the dated and undated copies to matching
+text — which incidentally dropped the mortgage fact's specific date
+entirely. **Critically, the two distinct tournament wins were never
+touched or conflated** — the model correctly kept them as two separate
+facts and even synthesized a new one ("Alex has won two chess
+tournaments in a month"), confirming the one thing this feature was
+most at risk of getting wrong didn't go wrong.
+
+Tightened the prompt to explicitly forbid a rewritten/edited version of
+the old fact for the redundant case — always an empty replacement, never
+a quietly-trimmed one. Re-ran from scratch: the stale fact was now
+removed outright, not rewritten. But this surfaced a deeper, more
+fundamental limitation, not just a prompt-wording gap: the mechanism
+structurally only ever modifies the *older* summary (the one being
+corrected), always keeping whichever detail the *newer* mention
+happened to state — for a genuine contradiction this is correct
+(recency should win), but for pure redundancy the older mention is
+often the more specific one (closer to the event, more likely to carry
+an exact date), and it's always the one discarded. In this test, the
+surviving (newer) mortgage fact ended up with no date anywhere in
+storage, not because it was rewritten this time, but because the only
+dated copy was the one correctly and cleanly removed.
+
+**Shipped with this limitation documented, not hidden, feature kept off
+by default.** The core safety property — never conflating two real,
+distinct occurrences — held across both runs. The secondary limitation
+(losing a detail that only the discarded, usually-older copy had) is a
+real quality gap, not a correctness or safety one, and a proper fix
+(merging a surviving detail *into* the kept fact, not just choosing
+which whole fact to discard) is a bigger change than fits this round.
+Not yet verified against 2-3 more varied real cases per this session's
+own stated bar for raising the default — recommended next step before
+considering `HUPI_ENABLE_REDUNDANCY_DEDUP` on by default.
