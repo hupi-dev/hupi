@@ -18,11 +18,24 @@ headline percentage.
 | Category | Questions | Accuracy |
 |---|---|---|
 | 1 — multi-hop | 282 | 46.4% |
-| 2 — single-hop | 321 | 61.1% |
-| 3 — temporal | 96 | 35.3% |
-| 4 — open-domain | 841 | 56.4% |
+| 2 — temporal | 321 | 61.1% |
+| 3 — open-domain | 96 | 35.3% |
+| 4 — single-hop | 841 | 56.4% |
 | 5 — adversarial (abstention) | 446 | 68.2% |
 | **Overall** | **1,986** | **57.3%** |
+
+**Category labels corrected 2026-10-04**: categories 2 and 4 were
+swapped (and 3 mislabeled) in every table in this doc until this date —
+confirmed against the LoCoMo paper's own Appendix B.1 / Table 5 question
+counts (`bench/data/locomo/static/paper/locomo.pdf`: 841 single-hop, 282
+multi-hop, 321 temporal, 96 open-domain, 446 adversarial — matched
+against this dataset's observed per-ID counts), the eval code (`f1()`
+sub-answer splitting applies only to category 1, i.e. multi-hop), and
+direct inspection of the actual questions in each category. All
+historical accuracy *numbers* in this doc and in
+[BENCHMARK_IMPROVEMENT_PLAN.md](BENCHMARK_IMPROVEMENT_PLAN.md) were
+always correct for their actual category ID; only the English label
+attached to IDs 2/3/4 was wrong.
 
 **Method**: `cmd/hupi-bench -benchmark locomo -all-conversations`, real
 `gateway.Handler`, real nightly consolidation (`hupi-consolidate`), real
@@ -113,9 +126,9 @@ that motivated those fixes, not a final apples-to-apples comparison):
 | Category | HUPI-memory (v3) | No-memory baseline |
 |---|---|---|
 | 1 — multi-hop | 24.4% | 53.0% |
-| 2 — single-hop | 31.7% | 64.9% |
-| 3 — temporal | 20.2% | 23.6% |
-| 4 — open-domain | 20.8% | 49.9% |
+| 2 — temporal | 31.7% | 64.9% |
+| 3 — open-domain | 20.2% | 23.6% |
+| 4 — single-hop | 20.8% | 49.9% |
 | 5 — adversarial | 50.7% | 43.7% |
 | **Overall** | **30.5%** | **50.9%** |
 
@@ -297,9 +310,41 @@ inspected failures, not guessed:
   attribution-swap bug like the ones already fixed — it's a genuine
   multi-hop synthesis gap: correctly aggregating several real facts
   spread across a long history while rejecting a same-speaker,
-  similar-vocabulary distractor thread. Likely needs a real design pass
-  (something closer to explicit multi-fact synthesis at answer time, not
-  a prompt-paragraph patch) rather than a quick fix — not attempted yet.
+  similar-vocabulary distractor thread. **Confirmed much more pervasive
+  than this one example** (2026-10-04, full 10-conversation re-run): 45
+  zero-score multi-hop misses, dominant shape is counting questions
+  ("how many tournaments has X won") almost always undercounting.
+  Root-caused via direct code/data inspection, not guessed — see
+  [MULTIHOP_COUNT_AGGREGATION_PLAN.md](MULTIHOP_COUNT_AGGREGATION_PLAN.md)
+  for the full design: entity attributes are a flat, dumb-merged map
+  with no accumulation semantics (confirmed lossy — one entity's
+  implied 6th tournament win has zero corroborating evidence anywhere
+  in storage), while `summary_key_facts` already works better (4 of
+  the same entity's wins independently confirmed present and grounded)
+  but nothing at answer time fetches *every* matching key_fact for a
+  counting query, only a bounded top-K relevance sample. **Two real
+  attempts tried, both found genuine problems and were reverted, not
+  shipped** — see
+  [MULTIHOP_COUNT_AGGREGATION_PLAN.md](MULTIHOP_COUNT_AGGREGATION_PLAN.md)
+  for the full account. (1) Reusing the existing ordering-query
+  retrieval-widening mechanism for a broad "how many" trigger
+  regressed the 43 real counting questions from 43.3% to 38.0% mean
+  F1 — a full re-run found it pulled extra content into a category-5
+  adversarial question that happened to share the surface phrase,
+  flipping a correct abstention into a confident misattribution. (2) A
+  consolidation-prompt extension (record every occurrence of a
+  repeating event as its own key_fact) couldn't be cleanly verified at
+  all: a real from-scratch re-ingest of `conv-42` surfaced that two of
+  the "wins" the original diagnosis was built on had zero key_fact
+  backing even before this fix, and an independent re-extraction read
+  the same two events as losses instead — real run-to-run
+  non-determinism on this specific conversation's own ambiguous text,
+  not something a prompt-wording change can fix. Whether the gold
+  count of seven wins is even reliably reconstructable from what this
+  conversation's text actually supports is now an open question in its
+  own right. Deprioritized pending a bigger investment (reading the
+  raw source conversation directly, multiple re-ingest trials) than
+  fits one backlog item.
 - **A relative-date resolution miss on one turn, not yet distinguished
   from single-trial noise** (same calibration run): "How long did it
   take Jon to open his studio?" (gold: "six months") requires resolving
@@ -312,22 +357,22 @@ inspected failures, not guessed:
   conversation. Needs a few repeat trials on this exact question before
   concluding whether this is systemic or a one-off compliance miss —
   not re-run yet.
-- **Adversarial (abstention) accuracy regressed on the full 10-conversation
-  LoCoMo run** (found 2026-10-04, after PR #96/#97/#99/#100/#101):
-  67.7% (v6 baseline, `bench/results/locomo_gpt-4.1_2026-09-26/`) →
-  51.1% today, a real −16.6pp drop. Category 5 is scored by a literal,
-  case-insensitive substring check for "not mentioned"/"no information
-  available" (`bench/data/locomo/task_eval/evaluation.py`'s own
-  category-5 branch — already documented in this package's own doc
-  comment as gap 3, found on the very first LoCoMo run). Classifying
-  every adversarial prediction into scored-correct / hedged-but-wrong-
-  wording / confidently-wrong-with-no-hedge split the regression two
-  ways:
+- ~~**Adversarial (abstention) accuracy regressed on the full
+  10-conversation LoCoMo run**~~ — **resolved 2026-10-04**, confirmed by
+  a full 10-conversation re-run (`bench/results/locomo_full10_rescore_stats.json`).
+  Found after PR #96/#97/#99/#100/#101: 67.7% (v6 baseline,
+  `bench/results/locomo_gpt-4.1_2026-09-26/`) → 51.1%, a real −16.6pp
+  drop. Category 5 is scored by a literal, case-insensitive substring
+  check for "not mentioned"/"no information available"
+  (`bench/data/locomo/task_eval/evaluation.py`'s own category-5 branch —
+  already documented in this package's own doc comment as gap 3, found
+  on the very first LoCoMo run). Classifying every adversarial
+  prediction into scored-correct / hedged-but-wrong-wording /
+  confidently-wrong-with-no-hedge split the regression two ways:
   - ~4.3pp (26%) was a real but narrow wording regression: PR #101/#103
     introduced example phrasing using "isn't mentioned", which does not
-    contain the literal scored substring "not mentioned" — **fixed** in
-    the same change as the finding below (all abstention examples now
-    use the exact phrase).
+    contain the literal scored substring "not mentioned" — fixed by
+    changing both examples to the exact phrase "is not mentioned".
   - ~12.3pp (74%, the dominant share) was a genuine increase in
     confidently-wrong answers (23.1% → 35.4%, no hedge at all). Traced
     two flipped cases to their actual retrieved context (not just the
@@ -336,13 +381,103 @@ inspected failures, not guessed:
     mental health): retrieval was completely unambiguous both times —
     every fact was explicitly labeled with the correct person's name,
     one even marked "(most relevant)" — yet the answer still blended
-    the two people's facts together, in both directions. **Partially
-    addressed**: extended the existing WHO-attribution paragraph to
-    name this "similar lives" case explicitly, and connected the
-    long-standing "make your best specific attempt" guidance to the
-    WHO-check so a fact confirmed to belong to someone else doesn't
-    count as "something relevant" to guess from. Verified end-to-end on
-    one of the two traced cases (now correctly abstains); the other
-    still answers confidently wrong, so this is a real, measured
-    improvement, not a complete fix — a full re-run of the adversarial
-    category is the real test, not done yet.
+    the two people's facts together, in both directions. Fixed by
+    extending the existing WHO-attribution paragraph to name this
+    "similar lives" case explicitly, and connecting the long-standing
+    "make your best specific attempt" guidance to the WHO-check so a
+    fact confirmed to belong to someone else doesn't count as
+    "something relevant" to guess from (PR #103).
+
+  **Confirmed fix, full re-run (`locomo_full10_rescore_predictions.json`,
+  same 10 conversations, same scopes, `-answer-only`):**
+
+  | Category | Regressed (pre-fix) | Fixed (post-PR #103) | v6 baseline |
+  |---|---|---|---|
+  | 1 — multi-hop | 48.5% | 48.3% | — |
+  | 2 — temporal | 56.6% | 54.5% | — |
+  | 3 — open-domain | 33.9% | 34.8% | — |
+  | 4 — single-hop | 61.2% | 60.8% | — |
+  | 5 — adversarial | 51.1% | **66.6%** | 67.7% |
+  | **Overall** | **55.0%** | **58.0%** | 57.3% (v7) |
+
+  Adversarial accuracy recovered almost fully (51.1% → 66.6%, within
+  ~1.1pp of the pre-regression 67.7% baseline — likely just run-to-run
+  LLM sampling noise at this point, not a remaining gap; a single traced
+  question was observed to flip between a correct abstention and a
+  confident-wrong answer across two back-to-back reruns with identical
+  prompt and code, confirming real variance exists at this scale).
+  Categories 1–4 moved by at most ~2pp in either direction (temporal
+  dipped 56.6%→54.5%, open-domain rose 33.9%→34.8%), consistent with the
+  prediction that this fix is adversarial-specific and wouldn't move
+  F1-scored categories much either way — those don't award partial
+  credit for a correct-but-differently-attributed abstention the way
+  category 5 does. Overall accuracy is now 58.0%, slightly above the
+  pre-regression v7 baseline of 57.3%.
+
+- **Follow-up: an open-domain-category fix (category 3, the real
+  commonsense/integration category) regressed adversarial accuracy on
+  its first attempt, caught and fixed before shipping** (found and
+  resolved same day, 2026-10-04). Tracing two real open-domain misses
+  (gold answers requiring a stated fact combined with simple judgment or
+  ordinary outside knowledge, not a literal statement) found the model
+  had the right fact retrieved both times — Caroline's own stated
+  `career_interest: "counseling or mental health"`; Joanna's hike near
+  Fort Wayne — but still answered "not mentioned" instead of deriving
+  the asked-for conclusion. Added a prompt paragraph with both real
+  cases as worked examples. A full 10-conversation re-run of this first
+  version found it net-regressed category 5 by 5.4pp (66.6% → 61.2%)
+  for a flat (not improved) result on its own target category.
+  Diffing the 38 regressed predictions found three distinct causes, all
+  fixed in the same pass before anything was committed:
+  1. The model sometimes used a fact already confirmed to belong to
+     someone else anyway (undermining the existing WHO-check) — fixed
+     by moving the new paragraph after the WHO-check paragraph (it
+     originally shipped before it) and adding an explicit
+     "the WHO-check above still applies in full here too" sentence.
+  2. The model sometimes fabricated a plausible-sounding but entirely
+     unstated specific (e.g. "roasted marshmallows" for a camping trip
+     question with nothing in context supporting it) — fixed with an
+     explicit "not a general license to elaborate... that is
+     fabrication, not inference" guard, since the paragraph's own real
+     examples are named facts, not permission to invent a scene.
+  3. The model sometimes correctly identified a false premise or
+     misattribution in prose (e.g. "Jon does not own a store; he owns a
+     dance studio") without including the literal substring LoCoMo's
+     scorer requires, scoring a substantively correct answer as wrong —
+     fixed with a new, general "always include the literal phrase...
+     don't rely on the explanation alone to imply it" instruction, not
+     just the two scattered worked examples this file already had.
+
+  Also bundled in the same re-verified pass: a **date-arithmetic**
+  paragraph for the real temporal category (category 2, 66% of its
+  zero-score misses were abstentions despite being literal date
+  questions) — two traced cases ("When did John get his dog Max?",
+  "When did John start his job in IT?") both had a duration and a dated
+  reference point correctly retrieved (`part_of_family_years: "10"` +
+  `date_of_passing: "2023-06-03"`; a message dated 2022-08-06 saying a
+  job ended "after 3 years") but the subtraction was never performed.
+
+  **Confirmed fix, full re-run
+  (`locomo_full10_combined_fix_predictions.json`, same 10 conversations,
+  same scopes, `-answer-only`):**
+
+  | Category | Post-PR #103 | v1 (regressed) | v2 (fixed) |
+  |---|---|---|---|
+  | 1 — multi-hop | 48.3% | 49.7% | 48.3% |
+  | 2 — temporal | 54.5% | 55.6% | 54.6% |
+  | 3 — open-domain | 34.8% | 34.8% | 34.2% |
+  | 4 — single-hop | 60.8% | 60.2% | 59.7% |
+  | 5 — adversarial | 66.6% | 61.2% | **76.9%** |
+  | **Overall** | **58.0%** | **57.0%** | **59.9%** |
+
+  Not just a recovery — category 5 ended up well above every prior
+  baseline in this investigation (76.9% vs. 66.6% post-PR #103 and
+  67.7% pre-regression v6/v7), most likely driven by the new general
+  "always include the literal phrase" instruction generalizing beyond
+  the two scattered examples that previously taught it only by
+  demonstration. Categories 1, 2, and 4 are flat (within ~1pp either
+  way). Category 3 (open-domain, this fix's original target) is also
+  flat (34.8% → 34.2%) — same as v1, its real-case fixes are offset by
+  new failures elsewhere in the same category; a 96-question category is
+  small enough that this isn't yet distinguished from noise. Overall:
+  58.0% → 59.9%.

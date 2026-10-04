@@ -248,17 +248,25 @@ clean from a fresh wipe. See that commit for the full account.
 | Category | Original (50.2%) | New (51.3%) | Change |
 |---|---|---|---|
 | 1 — multi-hop | 39.6% | 32.7% | **-6.9pp** |
-| 2 — single-hop | 38.0% | 51.4% | **+13.4pp** |
-| 3 — temporal | 23.1% | 22.0% | -1.1pp |
-| 4 — open-domain | 52.3% | 50.3% | -2.0pp |
+| 2 — temporal | 38.0% | 51.4% | **+13.4pp** |
+| 3 — open-domain | 23.1% | 22.0% | -1.1pp |
+| 4 — single-hop | 52.3% | 50.3% | -2.0pp |
 | 5 — adversarial (abstention) | 67.7% | 71.1% | +3.4pp |
 
-Net positive overall, but a real, honest mixed picture: single-hop and
-abstention improved substantially (consistent with steps 3/4's better-
-ranked, less-redundant retrieval), but **multi-hop regressed 6.9pp** and
-temporal reasoning didn't improve despite step 5 being specifically
-aimed at it (a small category, 96 questions, more noise-prone — not a
-clear win, but not clearly explained away by noise alone either).
+*(Category labels corrected 2026-10-04 — 2 and 4 were swapped, 3 was
+mislabeled; see [BENCHMARKS.md](BENCHMARKS.md)'s §1 note. The numbers
+were always right for their actual category ID; this also resolves
+what originally read as a confusing non-result below — step 5 (date
+resolution) really did land on the real temporal category, it just
+wasn't the one labeled "temporal" at the time.)*
+
+Net positive overall, but a real, honest mixed picture: temporal and
+abstention improved substantially — temporal's +13.4pp lines up with
+step 5 (relative-date resolution) specifically targeting it, not
+steps 3/4's retrieval work as originally guessed here — but
+**multi-hop regressed 6.9pp** and open-domain (a small category, 96
+questions, more noise-prone) barely moved, -1.1pp, which no step this
+round specifically targeted.
 
 ### Why multi-hop regressed — investigated, not just noted
 
@@ -366,9 +374,9 @@ with LoCoMo's own real `eval_question_answering`: 0 errors.
 | Category | Original (50.2%) | Post steps 1/3-6, pre-fix (51.3%) | Post steps 1/3-6, with fix |
 |---|---|---|---|
 | 1 — multi-hop | 39.6% | 32.7% (-6.9pp) | **46.4%** (+6.8pp vs original) |
-| 2 — single-hop | 38.0% | 51.4% | **61.1%** |
-| 3 — temporal | 23.1% | 22.0% | **35.3%** |
-| 4 — open-domain | 52.3% | 50.3% | **56.4%** |
+| 2 — temporal | 38.0% | 51.4% | **61.1%** |
+| 3 — open-domain | 23.1% | 22.0% | **35.3%** |
+| 4 — single-hop | 52.3% | 50.3% | **56.4%** |
 | 5 — adversarial (abstention) | 67.7% | 71.1% | 68.2% |
 | **Overall** | **50.2%** | **51.3%** | **57.3%** |
 
