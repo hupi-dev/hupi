@@ -152,6 +152,29 @@ func TestConciseDoesNotCountAMisattributedFactAsSomethingRelevant(t *testing.T) 
 	}
 }
 
+// TestConciseRequiresTheLiteralAbstentionPhraseEvenWithAnExplanation is a
+// real regression test for a full-rerun finding: extending the
+// predictive-inference paragraph (see
+// TestConciseIncludesPredictiveInferenceGuidance) caused several
+// adversarial regressions where the model correctly identified a false
+// premise or misattribution in prose ("Jon does not own a store; he owns
+// a dance studio") but never included the literal substring LoCoMo's
+// category-5 scorer checks for, so a substantively correct answer scored
+// as wrong. This is the same class of bug
+// TestConciseAbstentionExamplesUseTheExactScoredPhrase guards via two
+// specific examples; this guards the general instruction those examples
+// are supposed to generalize from.
+func TestConciseRequiresTheLiteralAbstentionPhraseEvenWithAnExplanation(t *testing.T) {
+	for _, want := range []string{
+		`always include the literal phrase "not mentioned" or "no information available"`,
+		"don't rely on the explanation alone to imply it",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected always-include-the-literal-phrase guidance: %q", want)
+		}
+	}
+}
+
 // TestConciseAbstentionExamplesUseTheExactScoredPhrase is a real
 // regression test for a bug this file's own doc comment already
 // documented once (gap 3, found on the original LoCoMo run) but PR
@@ -164,6 +187,54 @@ func TestConciseDoesNotCountAMisattributedFactAsSomethingRelevant(t *testing.T) 
 // abstention example in this prompt must use the literal phrase, not
 // a contraction or synonym, so the model's own output is more likely
 // to match it too.
+// TestConciseIncludesDateArithmeticGuidance is a real regression test
+// for LoCoMo's real temporal category (category 2), whose zero-score
+// misses were 66% abstentions despite being literal date questions.
+// Two traced cases ("When did John get his dog Max?", "When did John
+// start his job in IT?") both had a duration and a dated reference
+// point correctly retrieved, but the subtraction to produce the actual
+// asked-for date was never performed.
+func TestConciseIncludesDateArithmeticGuidance(t *testing.T) {
+	for _, want := range []string{
+		"can be computed from a duration plus a dated reference point",
+		"2022 minus 3 is 2019",
+		"part of the family for 10 years",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected date-arithmetic guidance: %q", want)
+		}
+	}
+}
+
+// TestConciseIncludesPredictiveInferenceGuidance is a real regression
+// test for LoCoMo's open-domain category (category 3), which scored
+// worst of all five (34.8%) with a third of its questions abstaining.
+// Two real misses traced to their actual retrieved context both had a
+// strong, directly on-topic fact already retrieved (Caroline's own
+// stated counseling career interest; Joanna's hike near Fort Wayne) but
+// the model still abstained rather than using that fact to answer a
+// speculative/indirect question ("would she pursue writing instead?",
+// "which state did she visit?"). Distinct from
+// TestConciseDoesNotCountAMisattributedFactAsSomethingRelevant above:
+// that guards against treating a fact confirmed to belong to someone
+// else as usable; this guards the opposite failure, where a genuinely
+// on-topic, correctly-attributed fact exists but isn't used to derive
+// an answer that was never spelled out word-for-word.
+func TestConciseIncludesPredictiveInferenceGuidance(t *testing.T) {
+	for _, want := range []string{
+		"predict, judge, or infer something that was never stated outright",
+		"counseling or mental health",
+		"Fort Wayne",
+		"not a general license to elaborate",
+		"that is fabrication, not inference",
+		"The WHO-check above still applies in full here too",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected predictive-inference guidance: %q", want)
+		}
+	}
+}
+
 func TestConciseAbstentionExamplesUseTheExactScoredPhrase(t *testing.T) {
 	if strings.Contains(strings.ToLower(Concise), "isn't mentioned") {
 		t.Error(`Concise contains "isn't mentioned" in an example — this does not match LoCoMo's literal "not mentioned" substring check; use "is not mentioned" instead`)

@@ -310,9 +310,21 @@ inspected failures, not guessed:
   attribution-swap bug like the ones already fixed — it's a genuine
   multi-hop synthesis gap: correctly aggregating several real facts
   spread across a long history while rejecting a same-speaker,
-  similar-vocabulary distractor thread. Likely needs a real design pass
-  (something closer to explicit multi-fact synthesis at answer time, not
-  a prompt-paragraph patch) rather than a quick fix — not attempted yet.
+  similar-vocabulary distractor thread. **Confirmed much more pervasive
+  than this one example** (2026-10-04, full 10-conversation re-run): 45
+  zero-score multi-hop misses, dominant shape is counting questions
+  ("how many tournaments has X won") almost always undercounting.
+  Root-caused via direct code/data inspection, not guessed — see
+  [MULTIHOP_COUNT_AGGREGATION_PLAN.md](MULTIHOP_COUNT_AGGREGATION_PLAN.md)
+  for the full design: entity attributes are a flat, dumb-merged map
+  with no accumulation semantics (confirmed lossy — one entity's
+  implied 6th tournament win has zero corroborating evidence anywhere
+  in storage), while `summary_key_facts` already works better (4 of
+  the same entity's wins independently confirmed present and grounded)
+  but nothing at answer time fetches *every* matching key_fact for a
+  counting query, only a bounded top-K relevance sample. Real design
+  pass needed (query-shape detection + exhaustive per-entity key_fact
+  fetch, not a prompt-paragraph patch) — not attempted yet.
 - **A relative-date resolution miss on one turn, not yet distinguished
   from single-trial noise** (same calibration run): "How long did it
   take Jon to open his studio?" (gold: "six months") requires resolving
@@ -381,3 +393,71 @@ inspected failures, not guessed:
   credit for a correct-but-differently-attributed abstention the way
   category 5 does. Overall accuracy is now 58.0%, slightly above the
   pre-regression v7 baseline of 57.3%.
+
+- **Follow-up: an open-domain-category fix (category 3, the real
+  commonsense/integration category) regressed adversarial accuracy on
+  its first attempt, caught and fixed before shipping** (found and
+  resolved same day, 2026-10-04). Tracing two real open-domain misses
+  (gold answers requiring a stated fact combined with simple judgment or
+  ordinary outside knowledge, not a literal statement) found the model
+  had the right fact retrieved both times — Caroline's own stated
+  `career_interest: "counseling or mental health"`; Joanna's hike near
+  Fort Wayne — but still answered "not mentioned" instead of deriving
+  the asked-for conclusion. Added a prompt paragraph with both real
+  cases as worked examples. A full 10-conversation re-run of this first
+  version found it net-regressed category 5 by 5.4pp (66.6% → 61.2%)
+  for a flat (not improved) result on its own target category.
+  Diffing the 38 regressed predictions found three distinct causes, all
+  fixed in the same pass before anything was committed:
+  1. The model sometimes used a fact already confirmed to belong to
+     someone else anyway (undermining the existing WHO-check) — fixed
+     by moving the new paragraph after the WHO-check paragraph (it
+     originally shipped before it) and adding an explicit
+     "the WHO-check above still applies in full here too" sentence.
+  2. The model sometimes fabricated a plausible-sounding but entirely
+     unstated specific (e.g. "roasted marshmallows" for a camping trip
+     question with nothing in context supporting it) — fixed with an
+     explicit "not a general license to elaborate... that is
+     fabrication, not inference" guard, since the paragraph's own real
+     examples are named facts, not permission to invent a scene.
+  3. The model sometimes correctly identified a false premise or
+     misattribution in prose (e.g. "Jon does not own a store; he owns a
+     dance studio") without including the literal substring LoCoMo's
+     scorer requires, scoring a substantively correct answer as wrong —
+     fixed with a new, general "always include the literal phrase...
+     don't rely on the explanation alone to imply it" instruction, not
+     just the two scattered worked examples this file already had.
+
+  Also bundled in the same re-verified pass: a **date-arithmetic**
+  paragraph for the real temporal category (category 2, 66% of its
+  zero-score misses were abstentions despite being literal date
+  questions) — two traced cases ("When did John get his dog Max?",
+  "When did John start his job in IT?") both had a duration and a dated
+  reference point correctly retrieved (`part_of_family_years: "10"` +
+  `date_of_passing: "2023-06-03"`; a message dated 2022-08-06 saying a
+  job ended "after 3 years") but the subtraction was never performed.
+
+  **Confirmed fix, full re-run
+  (`locomo_full10_combined_fix_predictions.json`, same 10 conversations,
+  same scopes, `-answer-only`):**
+
+  | Category | Post-PR #103 | v1 (regressed) | v2 (fixed) |
+  |---|---|---|---|
+  | 1 — multi-hop | 48.3% | 49.7% | 48.3% |
+  | 2 — temporal | 54.5% | 55.6% | 54.6% |
+  | 3 — open-domain | 34.8% | 34.8% | 34.2% |
+  | 4 — single-hop | 60.8% | 60.2% | 59.7% |
+  | 5 — adversarial | 66.6% | 61.2% | **76.9%** |
+  | **Overall** | **58.0%** | **57.0%** | **59.9%** |
+
+  Not just a recovery — category 5 ended up well above every prior
+  baseline in this investigation (76.9% vs. 66.6% post-PR #103 and
+  67.7% pre-regression v6/v7), most likely driven by the new general
+  "always include the literal phrase" instruction generalizing beyond
+  the two scattered examples that previously taught it only by
+  demonstration. Categories 1, 2, and 4 are flat (within ~1pp either
+  way). Category 3 (open-domain, this fix's original target) is also
+  flat (34.8% → 34.2%) — same as v1, its real-case fixes are offset by
+  new failures elsewhere in the same category; a 96-question category is
+  small enough that this isn't yet distinguished from noise. Overall:
+  58.0% → 59.9%.
