@@ -84,3 +84,24 @@ func TestConciseIncludesFalsePremiseOrderingGuidance(t *testing.T) {
 		}
 	}
 }
+
+// TestConciseIncludesNonPersonEntityAttributionGuidance is a real
+// regression test for 6ae235be: a LongMemEval single-session-assistant
+// question about one of three CITGO refineries' process lists, where the
+// predicted answer correctly matched the named refinery's first three
+// processes but substituted the fourth with a different, similarly-
+// structured refinery's extra process. The original "double-check WHO"
+// paragraph already covered this exact mechanism for two people; this
+// confirms it was generalized to any similar, enumerated entity, not
+// just people.
+func TestConciseIncludesNonPersonEntityAttributionGuidance(t *testing.T) {
+	for _, want := range []string{
+		"double-check WHO the retrieved information is actually about",
+		"The same risk applies to any set of similar, closely-related things, not just two people",
+		"use only the exact list that belongs to the one actually named",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected non-person entity-attribution guidance: %q", want)
+		}
+	}
+}
