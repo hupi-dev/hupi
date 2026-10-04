@@ -61,3 +61,26 @@ func TestConciseIncludesDerivedComparisonGuidance(t *testing.T) {
 		}
 	}
 }
+
+// TestConciseIncludesFalsePremiseOrderingGuidance is a real regression
+// test for gpt4_70e84552_abs: a LongMemEval temporal-reasoning question
+// ("which did I complete first, fixing the fence or purchasing three
+// cows from Peter?") where only one of the two named things was ever
+// actually mentioned, and the predicted answer named the one real item
+// as though it had won a real comparison. Distinct from
+// TestConciseIncludesDerivedComparisonGuidance above: that guards against
+// combining two real figures that were never stated together; this
+// guards against ordering two named things when only one of them is
+// real at all.
+func TestConciseIncludesFalsePremiseOrderingGuidance(t *testing.T) {
+	for _, want := range []string{
+		"which of two specific named things happened first",
+		"confirm that BOTH named things actually appear",
+		"finding one of them is not evidence about the other",
+		"say so explicitly and name which one is missing",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected false-premise-ordering guidance: %q", want)
+		}
+	}
+}

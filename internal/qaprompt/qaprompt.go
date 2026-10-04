@@ -100,6 +100,21 @@ package qaprompt
 // much bigger, less-verified change than the narrow conflation guard
 // below, recorded as a known residual in docs/LONGMEMEVAL_ACCURACY_PLAN.md
 // rather than risked here.
+//
+// The "which of two named things happened first" paragraph is a
+// distinct, related failure shape, found the same way: `gpt4_70e84552_abs`
+// (LongMemEval temporal-reasoning) asked "which did I complete first,
+// fixing the fence or purchasing three cows from Peter?" The real source
+// mentions fixing the fence; "purchasing three cows from Peter" never
+// appears anywhere — the question's second item is fabricated by
+// design, testing whether a false premise gets silently accepted. The
+// predicted answer, "fixing the fence," treated the one side it found as
+// though it had won an actual comparison, rather than noticing the other
+// side was never stated at all. Gold is an abstention. This is the
+// comparison-shaped sibling of the figure-conflation paragraph above:
+// that one guards against combining two real but mismatched figures,
+// this one guards against ordering two named things when only one of
+// them is real.
 const Concise = `Answer the following question directly, using a short phrase rather than a full sentence or explanation — but include every specific detail the question asks for (a complete name, date, or list), not just the first word or a truncated fragment.
 
 Always give dates as an absolute date (e.g. "7 May 2023"), never a relative term like "yesterday", "last year", or "this month".
@@ -111,5 +126,7 @@ Before answering, double-check WHO the retrieved information is actually about. 
 When two or more retrieved memories give different values for the same specific fact about the same person or thing — for example, one memory says a gym membership costs $40 a month and a later-dated one says $55 — treat the most recently dated memory's value as the current one and answer with it, briefly noting the earlier value in parentheses (e.g. "$55 a month (earlier: $40)"). This holds even when the later memory mentions the value only in passing or as a recollection, and regardless of which memory appears first, is repeated more often, or is marked "(most relevant)". Judge recency by the date on the memory that actually states the value; an entity's "last updated" date covers its whole record, not each value inside it. This is only for genuine updates of one fact: values that answer different questions are not a conflict, even on the same topic (a $40 membership fee and a $55 personal-training session are two separate prices), and hypothetical or example figures don't count. If the question explicitly asks for the original, first, or previous value, give that one instead — past tense alone ("what was...") doesn't mean that.
 
 When a question asks you to compute a value from two different figures together — a savings amount, a difference, "how much more/less" — only combine figures that were actually stated about the exact same specific scenario named in the question (the same airport, route, city, product, or person), ideally from the same statement or exchange. Do not pair a figure that answers the question with a different, only superficially-similar figure from a different scenario (a different airport, a different day's conversation, a different person's situation) just because it appeared nearby in what you were given — that produces a specific-looking number that doesn't correspond to anything either source actually said. If you can't find both figures stated about the same scenario, give the individual figures you do have, each labeled with which scenario it belongs to, rather than inventing a combined one.
+
+When a question asks which of two specific named things happened first, happened more recently, or came before/after the other, confirm that BOTH named things actually appear somewhere in what you were given before answering — finding one of them is not evidence about the other. If only one appears at all, say so explicitly and name which one is missing (e.g. "You mentioned fixing the fence, but purchasing three cows from Peter isn't mentioned — I can't say which came first"), rather than naming the one you did find as though it had won an actual comparison.
 
 When the answer is a list of items or a yes/no question, give ONLY the items or the yes/no verdict itself — do not add supporting context, dates, or an explanation for each item, even when that detail is available in what you were given. Having more detail available doesn't mean including it is more correct; match the specificity level the question actually asked for, not everything you know that's related.`
