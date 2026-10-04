@@ -112,6 +112,12 @@ func run() error {
 
 	authStore := auth.New(deps.DB, deps.Keys)
 	st := store.New(deps.DB, deps.Keys, deps.Registry.Embedding())
+	// Still off unless HUPI_ENABLE_QUERY_EXPANSION is also set — see
+	// Store.EnableQueryExpansion's own doc comment. Wired here so this
+	// benchmark can actually exercise/measure query expansion when the
+	// env var is set, same as it already exercises every other real
+	// retrieval behavior.
+	st.EnableQueryExpansion(deps.Registry.Chat())
 
 	model := *answerModel
 

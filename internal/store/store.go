@@ -27,10 +27,27 @@ type Store struct {
 	// ARCHITECTURE.md § Provider abstraction) — used at query time to
 	// embed the user's message for the pgvector search in Retrieve.
 	embedder provider.Provider
+
+	// chatProvider is nil unless EnableQueryExpansion is called — query
+	// expansion (internal/store/query_expansion.go) is an opt-in, off-
+	// by-default feature (HUPI_ENABLE_QUERY_EXPANSION), so New's existing
+	// callers all keep compiling and behaving exactly as before with no
+	// changes; only a caller that explicitly wants this needs to call
+	// EnableQueryExpansion afterward.
+	chatProvider provider.Provider
 }
 
 func New(db *sql.DB, keys *crypto.KeyStore, embedder provider.Provider) *Store {
 	return &Store{db: db, keys: keys, embedder: embedder}
+}
+
+// EnableQueryExpansion opts this Store into generating query paraphrases
+// at retrieval time (see query_expansion.go) — still gated behind
+// HUPI_ENABLE_QUERY_EXPANSION even after this is called, so wiring it in
+// (e.g. in cmd/hupi or cmd/hupi-bench) doesn't by itself change behavior
+// for a deployment that hasn't set the env var.
+func (s *Store) EnableQueryExpansion(chat provider.Provider) {
+	s.chatProvider = chat
 }
 
 // currentEmbeddingModel identifies the active embedding provider the same
