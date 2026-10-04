@@ -105,3 +105,25 @@ func TestConciseIncludesNonPersonEntityAttributionGuidance(t *testing.T) {
 		}
 	}
 }
+
+// TestConciseIncludesSimilarLivesAttributionEmphasis is a real
+// regression test for two LoCoMo adversarial misses traced to their
+// actual retrieved context (not just the final answer): a question
+// about Melanie answered with Caroline's own quote, and a question
+// about Caroline answered with Melanie's own quote, both between two
+// close friends with heavily overlapping interests (running, mental
+// health). In both cases the retrieved context was unambiguous — every
+// fact was explicitly labeled with the correct name — confirming this
+// isn't a retrieval gap, it's the answer step not reliably applying the
+// already-correct WHO guidance when two people's lives are similar
+// enough that a fact "sounds like it could belong to either."
+func TestConciseIncludesSimilarLivesAttributionEmphasis(t *testing.T) {
+	for _, want := range []string{
+		"This risk is HIGHEST, not lower, when two people's lives are similar",
+		"check the exact name actually attached to the specific fact you're using, every time",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected similar-lives attribution emphasis: %q", want)
+		}
+	}
+}
