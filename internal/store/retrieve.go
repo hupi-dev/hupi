@@ -406,11 +406,33 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		strongHit = true // an exact entity-key match is always a strong hit
 	}
 
-	// Embed the query once and reuse it for both searches below — no
-	// reason to pay for the same embedding call twice. Deliberately
-	// outside any transaction: this is a network call to the embedding
-	// provider.
-	embedResp, err := s.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(query)}})
+	// Query expansion (query_expansion.go): off unless both
+	// HUPI_ENABLE_QUERY_EXPANSION is set and EnableQueryExpansion was
+	// called on this Store (nil chatProvider otherwise) — the common,
+	// default case below is queryTexts staying a single-element slice,
+	// identical to this function's behavior before query expansion
+	// existed. Best-effort: a paraphrase-generation failure degrades to
+	// the single-query behavior rather than failing the turn.
+	queryTexts := []string{query}
+	if s.chatProvider != nil && queryExpansionEnabled() {
+		paraphrases, perr := s.generateQueryParaphrases(ctx, query)
+		if perr != nil {
+			slog.Default().Warn("query expansion: paraphrase generation failed, continuing with original query only", "error", perr)
+		} else {
+			queryTexts = append(queryTexts, paraphrases...)
+		}
+	}
+
+	// Embed the query (and any paraphrases) once, in a single batched
+	// call, and reuse the first (original-query) vector for every search
+	// below that doesn't participate in query expansion — no reason to
+	// pay for the same embedding call twice. Deliberately outside any
+	// transaction: this is a network call to the embedding provider.
+	embedInputs := make([]string, len(queryTexts))
+	for i, t := range queryTexts {
+		embedInputs[i] = provider.TruncateForEmbedding(t)
+	}
+	embedResp, err := s.embedder.Embed(ctx, provider.EmbedRequest{Input: embedInputs})
 	if err != nil {
 		return gateway.RetrievalResult{}, fmt.Errorf("store: embed query: %w", err)
 	}
@@ -418,6 +440,10 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		return gateway.RetrievalResult{}, errors.New("store: embedder returned no vectors")
 	}
 	queryVector := pgfmt.VectorLiteral(embedResp.Vectors[0])
+	queryVectors := make([]string, len(embedResp.Vectors))
+	for i, v := range embedResp.Vectors {
+		queryVectors[i] = pgfmt.VectorLiteral(v)
+	}
 
 	queryTerms := tokenize(query)
 	if len(queryTerms) == 0 && keywordSearchEnabled() {
@@ -485,7 +511,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// see orderingSummarySimilarityThreshold's own doc comment for
 		// the real evidence this stage, not final-selection, was the
 		// actual bottleneck.
-		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVector, queryTerms, &sb, &strongHit, &citations, summarySimilarityThreshold, summaryMaxResults, query, now, tier, matchedEntityIDs)
+		summaryRefs, err := s.fusedSearchSummaries(ctx, tx, workspace, queryVectors, queryTerms, &sb, &strongHit, &citations, summarySimilarityThreshold, summaryMaxResults, query, now, tier, matchedEntityIDs)
 		if err != nil {
 			return fmt.Errorf("fused search summaries: %w", err)
 		}
@@ -844,7 +870,7 @@ func reciprocalRank(rank int) float64 {
 // separates a true positive from a same-topic near-miss in practice, on
 // top of that cutoff. Re-measure if the tokenizer's stopword list or the
 // BM25 k1/b constants ever change.
-func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time, tier keywordSearchTier, matchedEntityIDs []string) ([]identity.Ref, error) {
+func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVectors []string, queryTerms []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time, tier keywordSearchTier, matchedEntityIDs []string) ([]identity.Ref, error) {
 	type candidate struct {
 		id          string
 		text        string
@@ -869,59 +895,98 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// nothing else catches the mismatch — a provider switch would
 	// silently degrade retrieval until a full hupi-reembed completes,
 	// with no error anywhere.
-	vecRows, err := q.QueryContext(ctx, `
-		select id, summary, key_version, period, (embedding <=> $1::vector) as distance
-		from summaries s
-		where embedding is not null
-		  and (embedding_model is null or embedding_model = $5)
-		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
-		  and scope_kind = $2 and scope_owner = $3
-		order by embedding <=> $1::vector
-		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor, s.currentEmbeddingModel())
-	if err != nil {
-		return nil, err
-	}
-	vecRank := 0
-	for vecRows.Next() {
-		var id string
-		var summaryCT []byte
-		var keyVersion int
-		var period string
-		var distance float64
-		if err := vecRows.Scan(&id, &summaryCT, &keyVersion, &period, &distance); err != nil {
+	//
+	// queryVectors has more than one entry only when query expansion is
+	// on (query_expansion.go) — the original query plus a couple of
+	// LLM-generated paraphrases, each searched separately and merged by
+	// taking each candidate's single best (lowest) distance across all
+	// of them before ranking. This targets the real, confirmed
+	// paraphrase-gap failure shape in docs/LONGMEMEVAL_ACCURACY_PLAN.md's
+	// 852ce960 case: a stored fact phrased as "pre-approved for $400,000
+	// from Wells Fargo" against a query phrased as "mortgage pre-approval
+	// amount" share little vocabulary, and a single query embedding can
+	// miss that gap even though the fact is exactly what's being asked
+	// for. With exactly one entry (query expansion off, the default),
+	// this loop runs exactly once — byte-for-byte the same query and
+	// ranking as before query expansion existed.
+	vecBestDistance := make(map[string]float64)
+	for _, qv := range queryVectors {
+		vecRows, err := q.QueryContext(ctx, `
+			select id, summary, key_version, period, (embedding <=> $1::vector) as distance
+			from summaries s
+			where embedding is not null
+			  and (embedding_model is null or embedding_model = $5)
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+			  and scope_kind = $2 and scope_owner = $3
+			order by embedding <=> $1::vector
+			limit $4
+		`, qv, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor, s.currentEmbeddingModel())
+		if err != nil {
+			return nil, err
+		}
+		for vecRows.Next() {
+			var id string
+			var summaryCT []byte
+			var keyVersion int
+			var period string
+			var distance float64
+			if err := vecRows.Scan(&id, &summaryCT, &keyVersion, &period, &distance); err != nil {
+				vecRows.Close()
+				return nil, err
+			}
+			// Cosine distance -> similarity for a normalized embedding space;
+			// see vectorSimilarityThreshold's doc comment for the cutoff.
+			similarity := 1 - distance
+			if similarity < similarityThreshold {
+				continue
+			}
+			if best, ok := vecBestDistance[id]; ok && best <= distance {
+				continue
+			}
+			vecBestDistance[id] = distance
+			if _, ok := byID[id]; ok {
+				continue
+			}
+			enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+			if err != nil {
+				vecRows.Close()
+				return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
+			}
+			text, err := enc.Decrypt(summaryCT)
+			if err != nil {
+				vecRows.Close()
+				return nil, err
+			}
+			byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: -1, keywordRank: -1, factRank: -1}
+		}
+		if err := vecRows.Err(); err != nil {
 			vecRows.Close()
 			return nil, err
 		}
-		// Cosine distance -> similarity for a normalized embedding space;
-		// see vectorSimilarityThreshold's doc comment for the cutoff.
-		similarity := 1 - distance
-		if similarity < similarityThreshold {
-			continue
-		}
-		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
-		if err != nil {
-			vecRows.Close()
-			return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
-		}
-		text, err := enc.Decrypt(summaryCT)
-		if err != nil {
-			vecRows.Close()
-			return nil, err
-		}
-		byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: vecRank, keywordRank: -1, factRank: -1}
-		vecRank++
-	}
-	if err := vecRows.Err(); err != nil {
+		// Fully drained and closed before the next variant's query (or
+		// the keyword query below) opens a new cursor on the same
+		// connection — q is often a single-connection *sql.Tx; see the
+		// "driver: bad connection" note this package's own existing tests
+		// already caught on this exact gotcha.
 		vecRows.Close()
-		return nil, err
 	}
-	// Fully drained and closed before the keyword query below opens a
-	// second cursor on the same connection — q is often a
-	// single-connection *sql.Tx; see the "driver: bad connection" note
-	// this package's own existing tests already caught on this exact
-	// gotcha.
-	vecRows.Close()
+	{
+		vecIDs := make([]string, 0, len(vecBestDistance))
+		for id := range vecBestDistance {
+			vecIDs = append(vecIDs, id)
+		}
+		// Tie-broken by id for the same reproducibility reason the
+		// keyword half's own sort already documents below.
+		sort.Slice(vecIDs, func(i, j int) bool {
+			if vecBestDistance[vecIDs[i]] != vecBestDistance[vecIDs[j]] {
+				return vecBestDistance[vecIDs[i]] < vecBestDistance[vecIDs[j]]
+			}
+			return vecIDs[i] < vecIDs[j]
+		})
+		for rank, id := range vecIDs {
+			byID[id].vectorRank = rank
+		}
+	}
 
 	if tier != keywordSearchDisabled && len(queryTerms) > 0 {
 		// keywordSearchNarrowed only narrows when stage 1 actually found an
@@ -1042,60 +1107,81 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 	// cutoff as the vector half above is the real false-positive guard:
 	// a summary only enters via this path when one of its facts is a
 	// genuinely close match, not merely the closest of a bad lot.
-	factRows, err := q.QueryContext(ctx, `
-		select s.id, s.summary, s.key_version, s.period, min(f.embedding <=> $1::vector) as best_distance
-		from summary_key_facts f
-		join summaries s on s.id = f.summary_id
-		where f.embedding is not null
-		  and (f.embedding_model is null or f.embedding_model = $5)
-		  and f.grounded = true
-		  and f.scope_kind = $2 and f.scope_owner = $3
-		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
-		group by s.id
-		order by best_distance
-		limit $4
-	`, queryVector, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor, s.currentEmbeddingModel())
-	if err != nil {
-		return nil, err
-	}
-	factRank := 0
-	for factRows.Next() {
-		var id string
-		var summaryCT []byte
-		var keyVersion int
-		var period string
-		var distance float64
-		if err := factRows.Scan(&id, &summaryCT, &keyVersion, &period, &distance); err != nil {
+	// Looped over queryVectors for the same reason the vector half above
+	// is — see that block's doc comment. With query expansion off (the
+	// default), this is exactly one query, same as before.
+	factBestDistance := make(map[string]float64)
+	for _, qv := range queryVectors {
+		factRows, err := q.QueryContext(ctx, `
+			select s.id, s.summary, s.key_version, s.period, min(f.embedding <=> $1::vector) as best_distance
+			from summary_key_facts f
+			join summaries s on s.id = f.summary_id
+			where f.embedding is not null
+			  and (f.embedding_model is null or f.embedding_model = $5)
+			  and f.grounded = true
+			  and f.scope_kind = $2 and f.scope_owner = $3
+			  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+			group by s.id
+			order by best_distance
+			limit $4
+		`, qv, scope.Kind, scope.Owner, maxResults*summaryOverfetchFactor, s.currentEmbeddingModel())
+		if err != nil {
+			return nil, err
+		}
+		for factRows.Next() {
+			var id string
+			var summaryCT []byte
+			var keyVersion int
+			var period string
+			var distance float64
+			if err := factRows.Scan(&id, &summaryCT, &keyVersion, &period, &distance); err != nil {
+				factRows.Close()
+				return nil, err
+			}
+			similarity := 1 - distance
+			if similarity < similarityThreshold {
+				continue
+			}
+			if best, ok := factBestDistance[id]; ok && best <= distance {
+				continue
+			}
+			factBestDistance[id] = distance
+			if _, ok := byID[id]; ok {
+				continue
+			}
+			enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+			if err != nil {
+				factRows.Close()
+				return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
+			}
+			text, err := enc.Decrypt(summaryCT)
+			if err != nil {
+				factRows.Close()
+				return nil, err
+			}
+			byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: -1, keywordRank: -1, factRank: -1}
+		}
+		if err := factRows.Err(); err != nil {
 			factRows.Close()
 			return nil, err
 		}
-		similarity := 1 - distance
-		if similarity < similarityThreshold {
-			continue
-		}
-		if c, ok := byID[id]; ok {
-			c.factRank = factRank
-			factRank++
-			continue
-		}
-		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
-		if err != nil {
-			factRows.Close()
-			return nil, fmt.Errorf("resolve encryption key for summary %s: %w", id, err)
-		}
-		text, err := enc.Decrypt(summaryCT)
-		if err != nil {
-			factRows.Close()
-			return nil, err
-		}
-		byID[id] = &candidate{id: id, text: text, period: period, enc: enc, vectorRank: -1, keywordRank: -1, factRank: factRank}
-		factRank++
-	}
-	if err := factRows.Err(); err != nil {
 		factRows.Close()
-		return nil, err
 	}
-	factRows.Close()
+	{
+		factIDs := make([]string, 0, len(factBestDistance))
+		for id := range factBestDistance {
+			factIDs = append(factIDs, id)
+		}
+		sort.Slice(factIDs, func(i, j int) bool {
+			if factBestDistance[factIDs[i]] != factBestDistance[factIDs[j]] {
+				return factBestDistance[factIDs[i]] < factBestDistance[factIDs[j]]
+			}
+			return factIDs[i] < factIDs[j]
+		})
+		for rank, id := range factIDs {
+			byID[id].factRank = rank
+		}
+	}
 
 	if len(byID) == 0 {
 		return nil, nil
@@ -1241,7 +1327,10 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		case c.keywordRank >= 0:
 			label = ", keyword match"
 		}
-		facts, err := loadKeyFacts(ctx, q, c.id, c.enc, queryVector, s.currentEmbeddingModel())
+		// queryVectors[0] (the original, unparaphrased query) — in-
+		// summary fact ranking is a separate mechanism from candidate
+		// selection above and deliberately isn't expanded.
+		facts, err := loadKeyFacts(ctx, q, c.id, c.enc, queryVectors[0], s.currentEmbeddingModel())
 		if err != nil {
 			return nil, err
 		}

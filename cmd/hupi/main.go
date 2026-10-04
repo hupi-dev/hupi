@@ -47,6 +47,9 @@ func run() error {
 	}
 
 	st := store.New(deps.DB, deps.Keys, deps.Registry.Embedding())
+	// Still off unless HUPI_ENABLE_QUERY_EXPANSION is also set — see
+	// Store.EnableQueryExpansion's own doc comment.
+	st.EnableQueryExpansion(deps.Registry.Chat())
 	teamAuth, err := resolveAuth(deps)
 	if err != nil {
 		return err

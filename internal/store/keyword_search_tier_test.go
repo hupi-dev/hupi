@@ -74,7 +74,7 @@ func TestFusedSearchSummaries_NarrowedTierFiltersByEntitiesTouched(t *testing.T)
 	strongHit := false
 	var citations []gateway.Citation
 	err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
-		_, err := s.fusedSearchSummaries(ctx, tx, scope, queryVector, []string{"zorbathon"}, &sb, &strongHit, &citations,
+		_, err := s.fusedSearchSummaries(ctx, tx, scope, []string{queryVector}, []string{"zorbathon"}, &sb, &strongHit, &citations,
 			0.4, 10, "what happened on the zorbathon trip?", time.Now(),
 			keywordSearchNarrowed, []string{"project:zorbathon"})
 		return err
@@ -113,7 +113,7 @@ func TestFusedSearchSummaries_NarrowedTierFallsBackToFullScanWithoutEntityMatch(
 	strongHit := false
 	var citations []gateway.Citation
 	err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
-		_, err := s.fusedSearchSummaries(ctx, tx, scope, queryVector, []string{"zorbathon"}, &sb, &strongHit, &citations,
+		_, err := s.fusedSearchSummaries(ctx, tx, scope, []string{queryVector}, []string{"zorbathon"}, &sb, &strongHit, &citations,
 			0.4, 10, "what happened on the zorbathon trip?", time.Now(),
 			keywordSearchNarrowed, nil)
 		return err
@@ -149,7 +149,7 @@ func TestFusedSearchSummaries_DisabledTierSkipsKeywordSearchEntirely(t *testing.
 		var refs []identity.Ref
 		err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
 			var err error
-			refs, err = s.fusedSearchSummaries(ctx, tx, scope, queryVector, []string{"zorbathon"}, &sb, &strongHit, &citations,
+			refs, err = s.fusedSearchSummaries(ctx, tx, scope, []string{queryVector}, []string{"zorbathon"}, &sb, &strongHit, &citations,
 				0.4, 10, "what happened on the zorbathon trip?", time.Now(),
 				keywordSearchDisabled, []string{"project:zorbathon"})
 			return err
