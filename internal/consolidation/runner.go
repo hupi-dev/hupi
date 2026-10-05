@@ -506,7 +506,8 @@ func (r *Runner) CurrentContent(ctx context.Context, scope identity.Scope, summa
 	var keyFacts []KeyFactOutput
 	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		rows, queryErr := tx.QueryContext(ctx, `
-			select fact, source_episode_ids from summary_key_facts where summary_id = $1
+			select fact, source_episode_ids, expires_at::text, expire_reason, source_count
+			from summary_key_facts where summary_id = $1
 		`, summaryID)
 		if queryErr != nil {
 			return queryErr
@@ -515,14 +516,27 @@ func (r *Runner) CurrentContent(ctx context.Context, scope identity.Scope, summa
 		for rows.Next() {
 			var factCT []byte
 			var sourceIDsLit string
-			if scanErr := rows.Scan(&factCT, &sourceIDsLit); scanErr != nil {
+			var expiresAt, expireReason sql.NullString
+			var sourceCount int
+			if scanErr := rows.Scan(&factCT, &sourceIDsLit, &expiresAt, &expireReason, &sourceCount); scanErr != nil {
 				return scanErr
 			}
 			factText, decErr := enc.Decrypt(factCT)
 			if decErr != nil {
 				return fmt.Errorf("decrypt key fact: %w", decErr)
 			}
-			keyFacts = append(keyFacts, KeyFactOutput{Fact: factText, SourceEpisodeIDs: pgfmt.ParseTextArray(sourceIDsLit)})
+			// expires_at/expire_reason/source_count round-trip here too
+			// (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md Phases 1-2) — a
+			// manual correction that doesn't touch a given fact must not
+			// silently lose its expiration or reset its reinforcement
+			// count back to 1.
+			keyFacts = append(keyFacts, KeyFactOutput{
+				Fact:             factText,
+				SourceEpisodeIDs: pgfmt.ParseTextArray(sourceIDsLit),
+				ExpiresAt:        expiresAt.String,
+				ExpireReason:     expireReason.String,
+				SourceCount:      sourceCount,
+			})
 		}
 		return rows.Err()
 	})

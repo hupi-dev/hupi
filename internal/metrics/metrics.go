@@ -174,17 +174,23 @@ var (
 		Buckets: []float64{0.5, 1, 2, 3, 4, 5, 7.5, 10, 15, 20},
 	})
 
-	// RedundancyFactsRemovedTotal covers cross-period redundancy removal
-	// (internal/consolidation/contradiction.go, HUPI_ENABLE_REDUNDANCY_DEDUP
-	// — off by default as of this metric's introduction, docs/BENCHMARKS.md
-	// §10's own documented limitation). Always zero while the flag is
-	// off; wired in now so enabling it later comes with observability
-	// already in place, not added after the fact once something's
-	// already gone wrong — the real risk here is silent over-removal,
-	// not a crash, so a sudden rate change is the signal to watch for.
-	RedundancyFactsRemovedTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "hupi_redundancy_facts_removed_total",
-		Help: "Key facts removed by cross-period redundancy detection (a pure restatement, not a contradiction) during consolidation.",
+	// RedundancyFactsReinforcedTotal covers cross-period redundancy
+	// detection (internal/consolidation/contradiction.go,
+	// HUPI_ENABLE_REDUNDANCY_DEDUP — off by default as of this metric's
+	// introduction, docs/BENCHMARKS.md §10's own documented limitation).
+	// Originally counted facts *removed* as pure restatements; Phase 2 of
+	// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md repointed that branch to
+	// increment source_count and keep the fact instead of deleting it,
+	// so this now counts reinforcements applied, not deletions — renamed
+	// (from RedundancyFactsRemovedTotal / hupi_redundancy_facts_removed_total)
+	// alongside that behavior change since the flag has always defaulted
+	// off (this counter has never been nonzero in a real deployment),
+	// making the rename's operational blast radius effectively nil.
+	// Always zero while the flag is off; wired in now so enabling it
+	// later comes with observability already in place.
+	RedundancyFactsReinforcedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "hupi_redundancy_facts_reinforced_total",
+		Help: "Key facts reinforced (source_count incremented, not deleted) by cross-period redundancy detection (a pure restatement, not a contradiction) during consolidation.",
 	})
 
 	// ConsolidationClusterMergesTotal covers
