@@ -365,15 +365,33 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 			// fact it meant.
 			continue
 		}
+		// Phase 2 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: a
+		// "redundant" classification used to delete the restatement
+		// outright (same as a contradiction with an empty replacement) —
+		// now it survives with source_count incremented instead,
+		// repointing what contradictionCheckPrompt's own doc comment
+		// still calls "the old copy is now pure duplication" into a
+		// reinforcement signal rather than discarding it. Only reachable
+		// when redundancyDedupEnabled() is on — that's the only time the
+		// prompt ever asks for (or the model ever returns) this reason,
+		// so a genuine "contradiction" (different value, not a
+		// restatement) keeps exactly its old delete-or-replace behavior
+		// below, unchanged.
+		if c.Reason == "redundant" {
+			if current.KeyFacts[idx].SourceCount <= 0 {
+				current.KeyFacts[idx].SourceCount = 1
+			}
+			current.KeyFacts[idx].SourceCount++
+			applied++
+			redundantApplied++
+			continue
+		}
 		if c.Replacement == "" {
 			current.KeyFacts = append(current.KeyFacts[:idx], current.KeyFacts[idx+1:]...)
 		} else {
 			current.KeyFacts[idx].Fact = c.Replacement
 		}
 		applied++
-		if c.Reason == "redundant" {
-			redundantApplied++
-		}
 	}
 	if applied == 0 {
 		return
@@ -407,7 +425,7 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 		return
 	}
 	if redundantApplied > 0 {
-		metrics.RedundancyFactsRemovedTotal.Add(float64(redundantApplied))
+		metrics.RedundancyFactsReinforcedTotal.Add(float64(redundantApplied))
 	}
 	slog.Info("consolidation: cross-period contradiction corrected", "corrected_summary", old.id, "triggering_period", newPeriod, "facts_replaced", applied, "redundant_removed", redundantApplied, "prose_rewritten", strings.TrimSpace(parsed.CorrectedProse) != "")
 

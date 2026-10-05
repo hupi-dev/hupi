@@ -43,6 +43,23 @@ type KeyFactOutput struct {
 	// are (parseOptionalDate) before storeSummary writes it.
 	ExpiresAt    string `json:"expires_at"`
 	ExpireReason string `json:"expire_reason"`
+	// SourceCount is Phase 2 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md
+	// — the reinforcement signal. Not part of summarySystemPrompt's own
+	// extraction instructions: the consolidation LLM never states this
+	// itself, it's computed by internal/consolidation/contradiction.go's
+	// redundant-handling branch (incrementing an existing fact's count
+	// instead of deleting it as pure duplication). A real json tag
+	// (not "-") is deliberate even though the model never sets it:
+	// cmd/hupi-correct's -dump-template/-content round-trip a
+	// ConsolidationOutput through a human-edited JSON file
+	// (json.MarshalIndent then later json.Unmarshal) via
+	// Runner.CurrentContent — omitting it from JSON entirely would mean
+	// every dump+resubmit cycle silently resets an accumulated count
+	// back to 1, the exact loss this field exists to prevent. Zero (the
+	// Go zero value, for every ordinary freshly-extracted fact) means
+	// storeSummary writes the schema's own default of 1, not a literal
+	// 0 — see that function's own doc comment.
+	SourceCount int `json:"source_count,omitempty"`
 }
 
 // EntityUpdate is one entity a consolidation run or correction says this

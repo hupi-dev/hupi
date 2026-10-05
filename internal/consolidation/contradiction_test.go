@@ -378,14 +378,16 @@ func TestContradictionCheckPrompt_IncludesRedundancyParagraphOnlyWhenEnabled(t *
 	}
 }
 
-// TestCheckCrossPeriodContradictions_AppliesRedundancyRemoval is the
-// real regression test for docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's
-// follow-up work: a NEW fact that pure-restates an OLD fact (no value
-// conflict, "reason": "redundant") must remove the old fact via the
-// exact same supersede-and-splice mechanism contradiction correction
-// already uses — not a new write path, same Correct call, same
-// candidate-selection plumbing.
-func TestCheckCrossPeriodContradictions_AppliesRedundancyRemoval(t *testing.T) {
+// TestCheckCrossPeriodContradictions_AppliesRedundancyReinforcement is
+// the real regression test for docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's
+// follow-up work, updated for Phase 2 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: a NEW fact that pure-restates
+// an OLD fact (no value conflict, "reason": "redundant") increments the
+// old fact's source_count via the exact same supersede-and-splice
+// mechanism contradiction correction already uses — not a new write
+// path, same Correct call, same candidate-selection plumbing — rather
+// than deleting it outright the way this test originally verified.
+func TestCheckCrossPeriodContradictions_AppliesRedundancyReinforcement(t *testing.T) {
 	redundancyJSON := `{"contradictions": [{"old_fact": "Nate did not make it to the finals in his last game tournament", "replacement": "", "reason": "redundant"}], "corrected_prose": "Nate mentioned his gaming hobby again."}`
 	groundingJSON := `{"grounded": [{"i":1,"ok":true}]}`
 	runner, db := testRunner(t, redundancyJSON, groundingJSON)
@@ -440,12 +442,12 @@ func TestCheckCrossPeriodContradictions_AppliesRedundancyRemoval(t *testing.T) {
 		t.Fatalf("load seeded ids: %v", err)
 	}
 
-	metricBefore := testutil.ToFloat64(metrics.RedundancyFactsRemovedTotal)
+	metricBefore := testutil.ToFloat64(metrics.RedundancyFactsReinforcedTotal)
 
 	runner.checkCrossPeriodContradictions(ctx, scope, newID, "2022-11-09", []string{"person:nate"})
 
-	if got := testutil.ToFloat64(metrics.RedundancyFactsRemovedTotal); got != metricBefore+1 {
-		t.Errorf("hupi_redundancy_facts_removed_total went from %v to %v, want exactly +1", metricBefore, got)
+	if got := testutil.ToFloat64(metrics.RedundancyFactsReinforcedTotal); got != metricBefore+1 {
+		t.Errorf("hupi_redundancy_facts_reinforced_total went from %v to %v, want exactly +1", metricBefore, got)
 	}
 
 	var supersededBy sql.NullString
@@ -455,15 +457,21 @@ func TestCheckCrossPeriodContradictions_AppliesRedundancyRemoval(t *testing.T) {
 		t.Fatalf("check supersession: %v", err)
 	}
 	if !supersededBy.Valid {
-		t.Fatal("old summary was not superseded — redundancy removal should have applied a correction")
+		t.Fatal("old summary was not superseded — redundancy reinforcement should have applied a correction")
 	}
 
+	// Phase 2 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: the redundant
+	// fact survives (source_count incremented to 2, the first restatement),
+	// not removed the way a real contradiction's empty replacement is.
 	corrected, err := runner.CurrentContent(ctx, scope, supersededBy.String)
 	if err != nil {
 		t.Fatalf("load corrected content: %v", err)
 	}
-	if len(corrected.KeyFacts) != 0 {
-		t.Errorf("corrected.KeyFacts = %+v, want the redundant fact removed with nothing replacing it", corrected.KeyFacts)
+	if len(corrected.KeyFacts) != 1 {
+		t.Fatalf("corrected.KeyFacts = %+v, want the redundant fact kept, not removed", corrected.KeyFacts)
+	}
+	if corrected.KeyFacts[0].SourceCount != 2 {
+		t.Errorf("corrected.KeyFacts[0].SourceCount = %d, want 2 (incremented from the implicit default of 1)", corrected.KeyFacts[0].SourceCount)
 	}
 }
 
