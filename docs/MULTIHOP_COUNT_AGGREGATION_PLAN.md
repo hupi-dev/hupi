@@ -117,8 +117,10 @@ to work or assumed to fail by analogy.
 
 ## Proposed design — two parts, different effort/leverage
 
-**Part A — attempted twice, both real attempts failed; the originally
-planned exhaustive per-entity fetch was never built.**
+**Part A — attempted twice: the first failed and was reverted, the
+second (the originally planned exhaustive per-entity fetch) is now
+built, tested, and verified — see the status update after Attempt 2
+below.**
 
 *Attempt 1 (tried, reverted): reuse the existing ordering-query
 retrieval-widening mechanism.* Added `looksLikeCountingRequest`
@@ -143,23 +145,34 @@ specifically on the category (adversarial) most sensitive to it. This
 approach was reverted, not shipped — see
 `docs/BENCHMARKS.md` for the full numbers.
 
-*Attempt 2 (designed, never built): exhaustive key_fact fetch for a
-resolved named entity.* The original plan here was: detect a counting
-question, resolve the named entity via `stage1EntityMatches`'s already-
-computed match, fetch every `grounded = true` `summary_key_facts` row
-for that entity (decrypt-then-filter in memory, mirroring
+*Attempt 2 (built and verified — see `docs/BENCHMARKS.md` §12): exhaustive
+key_fact fetch for a resolved named entity.* The plan here: detect a
+counting question, resolve the named entity via `stage1EntityMatches`'s
+already-computed match, fetch every `grounded = true` `summary_key_facts`
+row for that entity (decrypt-then-filter in memory, mirroring
 `keywordSearchEpisodes`'s existing pattern for encrypted content), and
 present the result as an explicit, deduplicated, numbered list rather
-than prose. This was not implemented — Attempt 1's negative result
-came first and consumed the verification budget for this round; it
-remains the more promising remaining option (narrower-gated than
-Attempt 1: requires both the counting shape *and* a specific resolved
-entity, so it wouldn't have fired on the Joanna/Nate adversarial case
-above, which had no clean single-entity match for "Joanna's party"
-specifically attributable before the fact was retrieved) but needs its
-own real implementation and the same full-rerun verification discipline
-before shipping, not an assumption that avoiding Attempt 1's specific
-failure mode is sufficient on its own.
+than prose. Narrower-gated than Attempt 1 as planned: requires both the
+counting shape *and* a specific resolved entity, so it doesn't fire on
+the Joanna/Nate adversarial case above (confirmed directly — that case
+still correctly abstains with this feature on).
+
+Implemented as `looksLikeCountingRequest` + `exhaustiveKeyFactsForEntity`
+(`internal/store/retrieve.go`), with one addition the original plan
+didn't anticipate: restricted to `level = 'daily'` summaries, because an
+unrestricted scope-wide scan has its own double-counting bug — a
+weekly/monthly/yearly rollup independently re-extracts its own key_facts
+from its daily sources' text, so it would multi-count the same
+occurrence once per rollup level it survives into. Five real-Postgres
+integration tests cover this plus grounded-only, superseded-summary
+exclusion, and exact-text dedup (`internal/store/counting_retrieve_test.go`).
+Verified against the real, already-studied `conv-42`/`person:nate` scope
+(the mechanism returns exactly what's grounded and stored, nothing
+duplicated, nothing missed) and against a full from-scratch re-ingest
+(real, question-by-question improvement on counting questions, no
+adversarial regression). Merged via PR #109; a full 10-conversation
+re-run confirming no regression at scale is in progress as of this
+writing.
 
 **Part B (smaller, consolidation-prompt-only, closes the
 attribute/key_fact inconsistency gap): extend the existing milestone
