@@ -3,6 +3,8 @@ package consolidation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -11,6 +13,7 @@ import (
 	"hupi/internal/dbscope"
 	"hupi/internal/identity"
 	"hupi/internal/metrics"
+	"hupi/internal/provider"
 )
 
 func TestBuildContradictionCheckPromptIncludesBothPeriodsAndEntities(t *testing.T) {
@@ -528,5 +531,131 @@ func TestCheckCrossPeriodContradictions_EmptyResponseLeavesBothFactsIntact(t *te
 	})
 	if err != sql.ErrNoRows {
 		t.Errorf("expected no supersession row (err=sql.ErrNoRows), got err=%v supersededBy=%v — the two distinct tournament wins should not have been merged", err, supersededBy)
+	}
+}
+
+// TestLiveContradictionCheckDoesNotMergeTwoDistinctTournamentWins is the
+// real-infra verification for docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md's
+// finding-1 follow-up. Every string below is copied verbatim from a real
+// re-ingested conv-42 scope (bench_locomo_calib), decrypted directly from
+// the database, not reconstructed from memory or guessed:
+//
+//   - EXISTING (2022-08-22 daily, v1): prose and facts state Nate WON an
+//     international gaming tournament on 2022-08-21.
+//   - NEW (2022-09-05 daily, v1, created ~9 seconds before the real
+//     correction fired): Nate recounts, in passing while talking about
+//     something unrelated (dairy-free baking), that he "participated in a
+//     video game tournament recently and did not do well" and shared a
+//     turtle photo he found comforting "after a disappointment in a video
+//     game tournament."
+//
+// In the real run, checkOneRelatedSummary's contradiction-check call,
+// given exactly this NEW/EXISTING pair, reported a contradiction and
+// rewrote 2022-08-22's prose to "Nate shares his experience of recently
+// participating in a video game tournament, expressing disappointment
+// with the outcome, and discusses turning to comforting hobbies like
+// photographing turtles to unwind" — deleting the win fact entirely. The
+// July win and the recounted-elsewhere loss are two distinct real
+// occurrences of a repeating event type (Nate's tournaments), not two
+// versions of the same specific claim — exactly the shape
+// `contradictionCheckPrompt`'s own "repeating TYPE of event... is a new,
+// distinct occurrence, not a restatement" guard already names, but
+// before this fix that guard only existed in the paragraph gated behind
+// HUPI_ENABLE_REDUNDANCY_DEDUP (off by default), leaving the always-on
+// contradiction path with no equivalent protection. This is the actual
+// mechanism behind finding 1's "attribute with no key_fact backing"
+// residual — not an extraction-completeness gap, and not (as an earlier,
+// less precise hypothesis this same investigation tried first and found
+// insufficient against an isolated two-fact test) two different roles at
+// the same event. An isolated two-fact version of this test — just the
+// one old fact and one new fact, without the surrounding real fact lists
+// and prose — did NOT reproduce the failure under the original prompt;
+// only the full, real context below does, which is why every fact here
+// is kept rather than trimmed to "just the relevant ones."
+//
+// Requires a real LLM, like this file's sibling grounding_test.go live
+// tests — the whole point is whether the prompt wording changes real
+// model behavior.
+func TestLiveContradictionCheckDoesNotMergeTwoDistinctTournamentWins(t *testing.T) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENAI_API_KEY not set; skipping live contradiction-check reproduction")
+	}
+
+	real := provider.NewOpenAICompat(provider.OpenAICompatConfig{
+		Name:    "live-gpt41",
+		Vendor:  "openai",
+		Model:   "gpt-4.1",
+		BaseURL: "https://api.openai.com/v1",
+		APIKey:  apiKey,
+	})
+	runner := New(nil, nil, real, nil, nil)
+
+	oldProse := "Nate shares his excitement about winning an international gaming tournament, highlighting his transition to making a living from gaming. He also discusses the happiness his pet fish bring him and celebrates upgrading their tank, sharing a related photo. Joanna talks about receiving positive feedback from her writers group for her book, celebrates with a dessert, and exchanges recommendations for book series with Nate. They both emphasize the importance of self-care and relaxation, displaying mutual support and encouragement throughout their chat, and trade images showcasing their hobbies and interests."
+	oldFacts := []string{
+		"Nate won an international gaming tournament on 2022-08-21.",
+		"Nate is able to make a living from gaming as of 2022-08-22.",
+		"Nate recommended a book series to Joanna that features awesome battles and interesting characters, and described it as one of his favorites.",
+		"Joanna suggests a fantasy series to Nate as a book recommendation.",
+		"The participants exchange book, movie, and series suggestions during their conversation.",
+		"They share photos of their current reads and interests in the discussion.",
+		"Nate's pet fish received a new, larger tank, as shown in a photo shared (57314282992ff77a40be8450c003b5c7.jpg) and described as making them happy.",
+		"Nate states that his pet fish are calming companions after a long day of gaming.",
+		"Joanna shared her book with her writers group and received positive feedback in the week prior to 2022-08-22.",
+		"Joanna celebrated positive feedback on her writing by making a dessert, shown in a photo (Keto_Krisp_January_Post.jpg).",
+		"Joanna shared a photo of her workspace, which includes a desk, chair, and computer (img_6976.jpg).",
+		"Nate shared a photo of his bookcase, which contains books and a toy car (k78gqk5c5kx71.jpg).",
+		"Joanna recommends reading a fantasy book series to Nate for relaxation.",
+		"Nate shared a photo of a stack of books on a wooden table (img_2043_jpg.jpg).",
+		"Nate recommends a series to Joanna, describing it as having awesome battles and interesting characters, and shares a photo of a poster of a man falling off a cliff (vx7o8gcqv01c1.jpg).",
+		"Nate won an international gaming tournament yesterday.",
+		"Nate is able to make a living from gaming.",
+		"Nate got a new tank for his fish ('little dudes').",
+		"Joanna shared her book with her writers group last week and got positive feedback.",
+		"Joanna celebrated by making a dessert.",
+		"Joanna recommended Nate find a fantasy book series to read for relaxation.",
+	}
+	newFacts := []string{
+		"Nate shared a photo of two turtles sitting on a rock in a pond, which he found comforting after a disappointment in a video game tournament.",
+		"Joanna shared a photo of a cake with strawberries and chocolate that she had recently made.",
+		"Joanna has been experimenting with dairy-free dessert recipes using flavors such as chocolate, raspberry, and coconut.",
+		"Joanna made dairy-free chocolate coconut cupcakes with raspberry frosting and shared a photo of them.",
+		"Joanna makes a variety of dairy-free desserts including cookies, pies, and cakes to accommodate different diets.",
+		"Nate suggested using dairy-free margarine or coconut oil as a butter substitute for dairy-free baking.",
+		"The user participated in a video game tournament recently and did not do well.",
+		"Joanna (in the conversation) has been revising old recipes and making desserts.",
+		"Joanna is lactose intolerant and is experimenting with dairy-free baking options such as coconut or almond milk.",
+		"Joanna made dairy-free chocolate coconut cupcakes with raspberry frosting.",
+		"Joanna has been making a range of desserts (cookies, pies, cakes) that are suitable for various diets.",
+		"The photo the user shared (8444279059_bbf0c79356_b.jpg) shows two turtles sitting on a rock in a pond.",
+		"The photo Joanna shared (IMG_8512.jpg) shows a piece of cake with strawberries and chocolate.",
+		"The photo Joanna shared (Mr6bqaNkSazxNPIxqCHyw-e1553202400166.jpg) shows a plate of cupcakes with different toppings.",
+		"Nate suggests using dairy-free margarine or coconut oil instead of butter for dairy-free baking.",
+	}
+	prompt := buildContradictionCheckPrompt(
+		"2022-09-05", newFacts,
+		"daily", "2022-08-22", oldProse, oldFacts,
+		[]string{"Nate"},
+	)
+
+	resp, err := runner.consolidation.ChatCompletion(context.Background(), provider.ChatRequest{
+		Messages: []provider.Message{
+			{Role: provider.RoleSystem, Content: contradictionCheckPrompt()},
+			{Role: provider.RoleUser, Content: prompt},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	t.Logf("raw response:\n%s", resp.Message.Content)
+
+	var parsed contradictionResponse
+	if err := json.Unmarshal([]byte(extractJSON(resp.Message.Content)), &parsed); err != nil {
+		t.Fatalf("could not parse response: %v", err)
+	}
+	for _, c := range parsed.Contradictions {
+		if c.OldFact == oldFacts[0] || c.OldFact == oldFacts[15] {
+			t.Errorf("model reported a contradiction for %q (replacement: %q) — Nate's real Aug-21 tournament win was merged with an unrelated, separately-recounted tournament disappointment instead of being kept as a distinct fact, the exact real failure this guard targets", c.OldFact, c.Replacement)
+		}
 	}
 }
