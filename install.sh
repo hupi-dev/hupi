@@ -469,6 +469,7 @@ migration_probe() {
     0023_dashboard_sessions.sql)       echo "select (to_regclass('public.dashboard_sessions') is not null)" ;;
     0024_summary_key_facts_embedding_index.sql) echo "select (to_regclass('public.summary_key_facts_embedding_idx') is not null)" ;;
     0025_unified_memories.sql)         echo "select (to_regclass('public.memories') is not null)" ;;
+    0026_backfill_memories_audit_event.sql) echo "select (select pg_get_constraintdef(oid) from pg_constraint where conname = 'audit_log_event_type_check') like '%backfill_memories%'" ;;
     *) die "no idempotency probe defined for migration $1 (add one to migration_probe)" ;;
   esac
 }
@@ -494,7 +495,8 @@ apply_all_migrations() {
            0014_demo_sessions.sql 0015_entity_relationships.sql 0016_demo_sessions_decouple_cap_from_cleanup.sql \
            0017_summaries_supersedes_unique.sql 0018_summary_key_facts_rls.sql 0019_entity_relationships_valid_date_order.sql \
            0020_audit_log_target_ref_index.sql 0021_summary_key_facts_embeddings.sql 0022_scope_corpus_size.sql \
-           0023_dashboard_sessions.sql 0024_summary_key_facts_embedding_index.sql 0025_unified_memories.sql; do
+           0023_dashboard_sessions.sql 0024_summary_key_facts_embedding_index.sql 0025_unified_memories.sql \
+           0026_backfill_memories_audit_event.sql; do
     apply_migration "$f"
   done
 }
