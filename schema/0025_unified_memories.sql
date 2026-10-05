@@ -31,6 +31,15 @@
 -- deliberately wasn't scope-qualified the way entities.id was), so no
 -- composite key is needed here either.
 --
+-- Not yet wired into internal/rotate/rotate.go's tableOrder
+-- (currently ["episodes", "summaries", "entities"], with
+-- summary_key_facts handled implicitly alongside summaries) —
+-- deliberately deferred, since this table is empty until the backfill
+-- tool and application code (later Phase 0 PRs) actually write to it.
+-- Must be added before memories carries real data, or a key rotation
+-- will silently skip this table entirely while still reporting success
+-- for the other four.
+--
 -- embedding/embedding_model mirror schema/0021's addition to
 -- summary_key_facts verbatim, including deliberately omitting an ANN
 -- index for the same reason that migration gives: ranking only ever
@@ -45,6 +54,23 @@ create table memories (
     summary_id          text references summaries(id),
 
     content             bytea not null,                 -- encrypted
+    key_version         int not null default 1,         -- same role as
+                                                          -- episodes/
+                                                          -- summaries/
+                                                          -- summary_key_facts/
+                                                          -- entities'
+                                                          -- own key_version
+                                                          -- (schema/0010) —
+                                                          -- which scope DEK
+                                                          -- version `content`
+                                                          -- is encrypted
+                                                          -- under, so
+                                                          -- internal/rotate
+                                                          -- can migrate this
+                                                          -- table the same
+                                                          -- way it already
+                                                          -- migrates the
+                                                          -- other four
 
     is_static           boolean not null default false, -- false = event
                                                           -- fact (today's
