@@ -249,6 +249,45 @@ func looksLikeOrderingRequest(query string) bool {
 	return false
 }
 
+// countingExcludedPhrases are "how many" phrasings already covered by
+// looksLikeOrderingRequest's own elapsed-time widening (orderingKeywords
+// above) — "how many days/weeks/months/years" between two known events
+// is an elapsed-time question, not a repeating-event-count one. Excluded
+// here so looksLikeCountingRequest stays narrowly scoped to this
+// detector's own distinct failure shape.
+var countingExcludedPhrases = []string{
+	"how many days", "how many weeks", "how many months", "how many years",
+}
+
+// looksLikeCountingRequest detects a question asking to count occurrences
+// of a repeating event for a named entity — "How many video game
+// tournaments has Nate participated in?", "How many tournaments has Nate
+// won?", "How many letters has Joanna received?"
+// (docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's Attempt 2). Deliberately a
+// looser substring check than looksLikeOrderingRequest's own set — this
+// alone never widens retrieval by itself; retrieve() only acts on it
+// combined with stage1EntityMatches resolving exactly one named entity,
+// which real tracing confirmed Attempt 1's breaking case (a "how many
+// people attended the gaming party hosted by Joanna" adversarial
+// question, actually about Nate, not Joanna) never had — there was no
+// clean single-entity match for "Joanna's party" specifically
+// attributable before the fact was retrieved. See that doc's own account
+// of why Attempt 1 (widening retrieval on this phrase alone, with no
+// entity-resolution gate) regressed the adversarial category and was
+// reverted.
+func looksLikeCountingRequest(query string) bool {
+	lower := strings.ToLower(query)
+	if !strings.Contains(lower, "how many") {
+		return false
+	}
+	for _, phrase := range countingExcludedPhrases {
+		if strings.Contains(lower, phrase) {
+			return false
+		}
+	}
+	return true
+}
+
 // Retrieve implements gateway.Retriever, delegating to retrieve for the
 // actual read and logging exactly one audit_log row per call regardless
 // of which of retrieve's return paths fired — see retrieve's doc comment
@@ -308,8 +347,11 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	var anchorCitations []gateway.Citation
 	var matchedEntities []entityMatch
 	var entityLines []string
+	var countingFacts []exhaustiveCountingFact
+	var countingEntityName string
 
 	query := lastUserMessage(messages)
+	isCountingQuery := looksLikeCountingRequest(query)
 
 	err := dbscope.Run(ctx, s.db, actingUser, workspace, func(tx *sql.Tx) error {
 		var err error
@@ -323,6 +365,25 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		matchedEntities, err = s.stage1EntityMatches(ctx, tx, workspace, query)
 		if err != nil {
 			return fmt.Errorf("stage1 entity scan: %w", err)
+		}
+
+		// docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's Attempt 2: gated on
+		// both a counting-shaped question AND stage 1 resolving exactly
+		// one named entity — not zero (nothing to count against), not
+		// more than one (ambiguous which entity the count is even about,
+		// the same ambiguity that made Attempt 1's phrase-only trigger
+		// unsafe). Captured here, before the timeframe hard filter below
+		// trims matchedEntities: a counting question wants every
+		// occurrence across the entity's whole history, deliberately NOT
+		// scoped to whatever timeframe (if any) resolveQueryTimeframe
+		// finds in the query.
+		if isCountingQuery && len(matchedEntities) == 1 {
+			facts, cfErr := s.exhaustiveKeyFactsForEntity(ctx, tx, workspace, matchedEntities[0].name)
+			if cfErr != nil {
+				return fmt.Errorf("exhaustive key facts for entity: %w", cfErr)
+			}
+			countingFacts = facts
+			countingEntityName = matchedEntities[0].name
 		}
 
 		// Same answer-time-reasoning hard filter fusedSearchSummaries/
@@ -404,6 +465,24 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		refs = append(refs, ref)
 		citations = append(citations, gateway.Citation{Ref: ref, Snippet: entityLines[i]})
 		strongHit = true // an exact entity-key match is always a strong hit
+	}
+
+	// Exhaustive, deduplicated enumeration for a resolved counting
+	// question (docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's Attempt 2) —
+	// presented as its own explicit, numbered list rather than folded
+	// into prose, so the model counts from a complete, visibly-labeled
+	// set instead of silently sampling from whatever fusedSearchSummaries
+	// would otherwise pick for a broad "how many" query.
+	if len(countingFacts) > 0 {
+		sb.WriteString(fmt.Sprintf("\nEvery recorded occurrence found for %s (%d total, deduplicated):", countingEntityName, len(countingFacts)))
+		for i, f := range countingFacts {
+			line := fmt.Sprintf("%d. %s: %s", i+1, f.period, f.text)
+			sb.WriteString("\n" + line)
+			ref := identity.Ref{Kind: identity.RefKindSummary, Scope: workspace, ID: f.summaryID}
+			refs = append(refs, ref)
+			citations = append(citations, gateway.Citation{Ref: ref, Snippet: line})
+		}
+		strongHit = true
 	}
 
 	// Query expansion (query_expansion.go): off unless both
@@ -570,11 +649,16 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	}
 
 	return gateway.RetrievalResult{
-		Gate:                 gate,
-		ContextMessage:       truncateToBudget(sb.String(), contextCharBudget()),
-		Refs:                 refs,
-		Citations:            citations,
-		NeedsAggregationPass: isOrderingQuery,
+		Gate:           gate,
+		ContextMessage: truncateToBudget(sb.String(), contextCharBudget()),
+		Refs:           refs,
+		Citations:      citations,
+		// len(countingFacts) > 0, not just isCountingQuery: the aggregation
+		// pass is only worth its own extra LLM call when the exhaustive
+		// enumeration above actually added something new to extract from —
+		// a counting-shaped question with no resolved single entity gets
+		// no special context, so there's nothing for it to add here.
+		NeedsAggregationPass: isOrderingQuery || len(countingFacts) > 0,
 	}, nil
 }
 
@@ -644,8 +728,16 @@ func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, 
 // (docs/CONSOLIDATION_COMPLETENESS_PLAN.md answer-time reasoning
 // follow-up). Kept local to this concern rather than widened into a
 // general "entity summary" struct other callers might expect more from.
+//
+// name is the entity's own display name (entities.name) — added for
+// docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's counting-question path,
+// which needs the literal name to filter summary_key_facts text by
+// (exhaustiveKeyFactsForEntity has no entity-id column to join against;
+// fact text is only ever matched by substring, same as every other
+// decrypt-then-filter search in this file).
 type entityMatch struct {
 	id          string
+	name        string
 	lastUpdated time.Time
 }
 
@@ -675,11 +767,11 @@ func (s *Store) stage1EntityMatches(ctx context.Context, q dbscope.Querier, scop
 			return nil, err
 		}
 		if name != "" && strings.Contains(lowerQuery, strings.ToLower(name)) {
-			matches = append(matches, entityMatch{id: id, lastUpdated: lastUpdated})
+			matches = append(matches, entityMatch{id: id, name: name, lastUpdated: lastUpdated})
 			continue
 		}
 		if slug := slugPart(id); slug != "" && strings.Contains(lowerQuery, strings.ToLower(slug)) {
-			matches = append(matches, entityMatch{id: id, lastUpdated: lastUpdated})
+			matches = append(matches, entityMatch{id: id, name: name, lastUpdated: lastUpdated})
 		}
 	}
 	return matches, rows.Err()
@@ -692,6 +784,95 @@ func slugPart(id string) string {
 		return id[i+1:]
 	}
 	return id
+}
+
+// exhaustiveCountingFact pairs one key_fact's decrypted text with the
+// summary it came from — summaryID becomes this fact's citation Ref,
+// mirroring how every other retrieval mechanism in this file cites back
+// to its source.
+type exhaustiveCountingFact struct {
+	summaryID string
+	period    string
+	text      string
+}
+
+// exhaustiveKeyFactsForEntity fetches every grounded key_fact mentioning
+// entityName, scope-wide and with no timeframe or top-K bound — the
+// direct fix for docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's confirmed
+// root cause: summary_key_facts already accumulates every occurrence of
+// a repeating event correctly (each is its own row, append-only), but
+// fusedSearchSummaries' bounded top-K relevance search only ever
+// surfaces a sample of them for a broad counting query like "how many
+// tournaments has Nate won" — and the model has no way to know its
+// sample is incomplete.
+//
+// Restricted to level = 'daily': a weekly/monthly/yearly rollup
+// regenerates its own prose AND its own key_facts from its source
+// summaries' text (Runner.RunRollup -> generateSummary), independently
+// re-extracting the same real-world occurrence as its own new
+// summary_key_facts row rather than referencing the daily row it came
+// from. An unrestricted scope-wide scan would therefore multi-count the
+// same single occurrence once per rollup level it survives into — exactly
+// backwards for a counting feature. Daily summaries are also the one
+// level grounded directly against raw episode text (source_episode_ids),
+// not against an already-summarized rollup's own prose.
+//
+// No SQL-level name filter: fact text is application-encrypted
+// (summary_key_facts.fact bytea), so Postgres can't filter on its
+// content — every current, grounded, daily key_fact in scope is decrypted
+// first, then filtered by substring in Go, the same decrypt-then-filter
+// shape keywordSearchEpisodes already uses for the same reason.
+func (s *Store) exhaustiveKeyFactsForEntity(ctx context.Context, q dbscope.Querier, scope identity.Scope, entityName string) ([]exhaustiveCountingFact, error) {
+	rows, err := q.QueryContext(ctx, `
+		select f.id, f.summary_id, f.fact, f.key_version, s.period
+		from summary_key_facts f
+		join summaries s on s.id = f.summary_id
+		where f.grounded = true
+		  and s.level = 'daily'
+		  and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+		  and f.scope_kind = $1 and f.scope_owner = $2
+		order by s.period, f.id
+	`, scope.Kind, scope.Owner)
+	if err != nil {
+		return nil, fmt.Errorf("load scope-wide key facts: %w", err)
+	}
+	defer rows.Close()
+
+	lowerName := strings.ToLower(entityName)
+	seenText := make(map[string]bool)
+	var facts []exhaustiveCountingFact
+	for rows.Next() {
+		var factID int64
+		var summaryID, period string
+		var factCT []byte
+		var keyVersion int
+		if err := rows.Scan(&factID, &summaryID, &factCT, &keyVersion, &period); err != nil {
+			return nil, err
+		}
+		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			return nil, fmt.Errorf("resolve encryption key for key fact %d: %w", factID, err)
+		}
+		text, err := enc.Decrypt(factCT)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt key fact %d: %w", factID, err)
+		}
+		if !strings.Contains(strings.ToLower(text), lowerName) {
+			continue
+		}
+		// The same single real-world occurrence can genuinely get
+		// key-facted twice — docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md's own
+		// root-cause section notes facts "sometimes re-confirmed across
+		// two consolidation passes after an initial grounded: false
+		// draft." Exact-text dedup here is what the plan's own
+		// "deduplicated... list" language calls for.
+		if seenText[text] {
+			continue
+		}
+		seenText[text] = true
+		facts = append(facts, exhaustiveCountingFact{summaryID: summaryID, period: period, text: text})
+	}
+	return facts, rows.Err()
 }
 
 func stage1KeywordSignal(query string) bool {
