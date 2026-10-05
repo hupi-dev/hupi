@@ -88,6 +88,33 @@ assert into one bucket versus another, the opposite direction of risk.
   land as `key_facts`. One conversation, one re-ingest, no benchmark
   scoring involved.
 
+**Verification result: real, but partial — not fully closed, same
+honest posture as PR #112's own "does not fully close Part B."** The
+exact original bug pattern did not reproduce: no ordinal-prefixed
+attribute key (`fourth_video_game_tournament_win_date`-style) appeared
+anywhere in `person:nate`'s re-ingested attributes. But a decrypted
+read of the same entity's attributes found `won_international_tournament_date:
+"2022-08-21"` and `won_major_gaming_tournament_week_before_2022_10_06:
+"true"` — two attributes describing tournament wins with **zero**
+corresponding `key_facts` row anywhere in the scope (confirmed by
+decrypting and substring-matching every grounded, daily-level
+`key_facts` row for "Nate" + "tournament" — neither "international" nor
+"major" appears in any of them). The underlying anti-pattern this
+finding targets — an attribute recording a repeating event's occurrence
+with no `key_facts` backing — still occurs, just no longer under a
+literal ordinal-counter key name. The new prompt sentence changed the
+surface form of the bug without fully closing the behavior it names.
+
+Not iterating further on the wording in this round — the open-domain
+inference-guard work earlier this session already showed what happens
+when a narrow prompt fix gets re-tightened repeatedly against one
+observed case without a wider control (a real regression that looked
+fixed, then wasn't). Shipping this as a real, partial, honestly-reported
+improvement; a future attempt should consider whether the instruction
+needs to name the pattern more generally (any attribute describing a
+specific past occurrence, not just one with a numbered key) rather than
+assume more wording will close the remaining gap.
+
 ## Finding 2: grounding checks a fact against the whole day, not its own cited source
 
 **Problem, grounded in direct reading**: `groundingCheck`

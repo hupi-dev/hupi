@@ -953,3 +953,43 @@ folding into §15: it changes how much weight any *future* category-level
 LoCoMo delta in this repo deserves, not just this one investigation's
 own numbers.
 
+## 17. Consolidation architecture review: entity-attribute/key-fact boundary — real, partial fix
+
+A full read-through of `internal/consolidation` (see
+`docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md`) found the real
+split worth making is by *output responsibility* (prose vs. key-facts
+vs. entity-attributes vs. relationships), not by input modality — every
+concrete consolidation failure this session traced back to a specific
+cause was a task-boundary confusion, never a text-vs-image-vs-question
+confusion.
+
+The clearest of the plan's four findings: `summarySystemPrompt` never
+told the model attributes are the wrong place for a repeating/countable
+event — confirmed, via `conv-42`'s own real data, to produce an
+attribute (`fourth_video_game_tournament_win_date`) with zero
+corresponding `key_facts` row anywhere in storage. Added one sentence
+stating attributes are for stable, singular facts only, and a
+repeating/countable event must always be its own `key_fact`.
+
+**Verified real, but partial.** A fresh from-scratch re-ingest of the
+same `conv-42` scope confirmed the exact original pattern (an
+ordinal-prefixed attribute key) did not reproduce — but a decrypted
+read of `person:nate`'s attributes found two different tournament-win
+attributes (`won_international_tournament_date`,
+`won_major_gaming_tournament_week_before_2022_10_06`) still had zero
+`key_facts` backing, just under non-ordinal key names this time. The
+new sentence changed the bug's surface form without fully closing the
+underlying behavior. Not re-tightening the wording further this round
+— the open-domain inference-guard work (§15) already showed what
+repeated re-tightening against one observed case can cost without a
+wider control. Shipped as a real, partial, honestly-reported
+improvement, same posture as PR #112's own "does not fully close Part
+B" conclusion.
+
+The other three findings from the same review — grounding scoped to a
+fact's own cited episode, rollups threaded with the known-entities
+supersession context daily consolidation already has, and a visibility
+metric for clustering's cluster-count cap — are documented in full in
+`docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md` itself (PRs #116-118,
+merged).
+

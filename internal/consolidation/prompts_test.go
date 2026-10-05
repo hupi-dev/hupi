@@ -227,3 +227,27 @@ func TestBuildSummaryPromptOmitsDateLabelWhenAbsent(t *testing.T) {
 		t.Errorf("buildSummaryPrompt() = %q, want the plain unlabeled format preserved", got)
 	}
 }
+
+// TestSummarySystemPromptWarnsAgainstAttributeCountingMisuse is the real
+// regression test for docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md
+// finding 1 / docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md: a real traced
+// conversation (conv-42) had an entity attribute
+// ("fourth_video_game_tournament_win_date") with zero corresponding
+// key_fact anywhere in storage — the model invented a per-occurrence
+// attribute key for a repeating event instead of (or in addition to)
+// recording it as its own key_fact, the one place a later "how many
+// times" question can actually be answered from. Only summarySystemPrompt
+// produces entities_touched/attributes at all — perEpisodeFactPrompt
+// never does, so it has nothing to misuse this way and needs no
+// equivalent change.
+func TestSummarySystemPromptWarnsAgainstAttributeCountingMisuse(t *testing.T) {
+	for _, want := range []string{
+		"stable, singular facts",
+		"Never invent a new attribute key to count or track",
+		"fourth_tournament_win_date",
+	} {
+		if !strings.Contains(summarySystemPrompt, want) {
+			t.Errorf("summarySystemPrompt missing expected attribute/key_fact boundary guidance: %q", want)
+		}
+	}
+}
