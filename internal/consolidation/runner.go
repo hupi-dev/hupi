@@ -686,6 +686,7 @@ func (r *Runner) embedHighImportanceEpisodes(ctx context.Context, scope identity
 func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sourceLevel, period string, sourcePeriods []string) error {
 	var sources []textSource
 	var existingCurrentID string
+	var knownEntities []knownEntityContext
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		var err error
 		existingCurrentID, err = r.currentSummaryID(ctx, tx, scope, level, period)
@@ -699,6 +700,19 @@ func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sou
 			}
 		}
 		sources, err = r.loadSummaries(ctx, tx, scope, sourceLevel, sourcePeriods)
+		if err != nil {
+			return err
+		}
+		// docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md finding 3: the
+		// same supersedes_keys continuity RunDaily gives raw episode
+		// text (Phase C sub-problem 1) — a rollup regenerating wholesale
+		// from its source summaries can reintroduce the exact same
+		// key-fragmentation problem (preapproval_amount vs.
+		// pre_approved_amount) daily consolidation now avoids, since
+		// generateSummary itself doesn't care whether its sources are
+		// raw episodes or lower-level summaries, and findKnownEntities
+		// is generic over its combined-text input either way.
+		knownEntities, err = r.findKnownEntities(ctx, tx, scope, joinSources(sources))
 		return err
 	})
 	if err != nil {
@@ -711,11 +725,8 @@ func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sou
 	// No establishedRecord: a rollup regenerates wholesale from its
 	// current sources every time, unlike RunDaily's own draft, which
 	// accumulates episodes incrementally within one day — there's no
-	// meaningful "partial rollup" to preserve continuity with. No
-	// knownEntities either — Phase C sub-problem 1 is scoped to raw
-	// daily episode text for now (see generateSummary's own doc
-	// comment).
-	output, err := r.generateSummary(ctx, scope, level, period, sources, "", nil)
+	// meaningful "partial rollup" to preserve continuity with.
+	output, err := r.generateSummary(ctx, scope, level, period, sources, "", knownEntities)
 	if err != nil {
 		return fmt.Errorf("consolidation: generate %s summary for %s: %w", level, period, err)
 	}
