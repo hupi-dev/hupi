@@ -25,6 +25,15 @@ Decision: two phases, not one.
   explained response, only paid when a caller explicitly asks for it
   (`X-Hupi-Explain: deep`, distinct from Phase 1's free `on`).
 
+**Since both phases shipped**: `Citation` has grown beyond the shape
+shown below — fact-granularity citations (`RefKindMemory`, not just
+summary/entity/episode-level), `IsInference`, `Relations`, and
+`ParentSummaryID` were added by `docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`
+(Phases 0, 3, and 4) once the underlying `memories`/`memory_relations`
+tables existed to back them. See that doc for the current, complete
+field list and how each one gets populated — this document is kept as
+the original Phase 1/2 design record, not updated in place.
+
 ## Design — Phase 1
 
 **New type**, `internal/gateway/handler.go` (alongside `RetrievalResult`):

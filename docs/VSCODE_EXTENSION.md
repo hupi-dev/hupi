@@ -85,7 +85,13 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
   additionally verifies which cited sources the answer actually relied
   on, at the cost of one extra real LLM call per answer. A gateway
   without citation support simply omits the field — nothing breaks,
-  there's just no Sources list.
+  there's just no Sources list. **Known gap**: `Citation` gained
+  `is_inference`/`relations`/`parent_summary_id` fields server-side
+  (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md) — the extension's own type
+  (`hupiClient.ts`) and rendering (`chatParticipant.ts`,
+  `chatViewProvider.ts`) only read `ref`/`snippet`/`used` today, so an
+  inferred fact or a relation edge isn't visually distinguished in the
+  Sources list yet, even though the data is already on the wire.
 - **File/image attachments**, both the chat sidebar and `@hupi` — a file
   or image attached to a message is read, base64-encoded, and sent as
   HUPI's additive `attachments` field (ARCHITECTURE.md § Attachments).

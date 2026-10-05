@@ -406,6 +406,14 @@ opposite tradeoff applies).
   to "unused" — a real, previously-fixed bug (`hupi_citations`'
   `nil`-means-"not checked" contract would otherwise be violated).
 
+Every fact-granularity citation also carries `is_inference` (a real,
+always-populated pointer — never nil once §3.7/§3.8's relation graph
+ships — never a loose guess) and `relations` (any `updates`/`extends`/
+`derives` edges touching that fact, §3.7). The `deep` judge prompt above
+prefixes an inferred snippet's line with `[inferred] ` and an explicit
+instruction that this doesn't change how reliance is judged — it's
+disclosure, not a different trust bar.
+
 ---
 
 ## 3. Nightly consolidation (`cmd/hupi-consolidate`, `internal/consolidation`)
@@ -565,14 +573,71 @@ related summaries checked:
 A real contradiction is applied via the same `Runner.Correct` path a
 human correction uses (new version, `supersedes` set, re-grounded against
 the *triggering* period's own sources, not the old summary's) — never an
-in-place edit.
+in-place edit. The corrected fact also gets a `memory_relations` row
+(`relation_type = 'updates'`, from the new fact back to the one it
+replaced — see §3.7's own graph below) — zero new LLM risk, since this
+just records the classification the same call above already made.
 
-### 3.7 Rollup staleness refresh
+`HUPI_ENABLE_REDUNDANCY_DEDUP` (off by default) adds a second, distinct
+verdict the same call can return: `"redundant"` — a NEW fact that
+restates an EXISTING one with no new information. Unlike a genuine
+contradiction, a redundant fact isn't discarded: its `source_count`
+(on both `summary_key_facts` and its `memories` mirror) is incremented
+instead, turning repeated mentions into a reinforcement signal
+(`rankKeyFacts`' tie-breaker, §2.2.8) rather than destroyed data.
+
+### 3.7 The memory relation graph (`memory_relations`, `updates`/`extends`/`derives`)
+
+A fact-to-fact graph, separate from the `entity_relationships` table
+(entity-to-entity, e.g. `sibling_of` — see
+[ENTITY_RELATIONSHIPS_PLAN.md](ENTITY_RELATIONSHIPS_PLAN.md)) — this one
+links two *facts*, not two entities. One row per edge:
+`from_memory_id`, `to_memory_id`, `relation_type` (`updates`/`extends`/
+`derives`), surfaced through `hupi_citations[].relations` (§2.7) via
+`loadMemoryRelations`. Three producers, each a dedicated LLM call with no
+shared framing (see each's own doc comment in source for why a bolt-on
+addition to an existing prompt reliably failed to fire before this):
+
+- **`updates`** — written by §3.6's contradiction check, above.
+- **`extends`** (`extendsCheckPrompt`, `internal/consolidation/extends.go`,
+  behind `HUPI_ENABLE_EXTENDS_DETECTION`, off by default) — a standalone
+  call run alongside §3.6 against the same NEW/EXISTING fact pairs,
+  answering a narrower, non-skeptical question: is a NEW fact a concrete,
+  specific follow-up development of an EXISTING one (a particular
+  training run developing a "training for a marathon" fact), without
+  contradicting it. No `Correct` call — neither fact's text changes, just
+  a graph edge (`recordExtendsRelations`).
+- **`derives`** — written by §3.8's inference extraction, below.
+
+### 3.8 Inference extraction (`inferenceExtractionPrompt`, `internal/consolidation/inference.go`)
+
+Behind `HUPI_ENABLE_INFERENCE_EXTRACTION` (off by default — this adds new,
+permanent key facts, not just a ranking change). Runs once per day after
+`generateDailySummary`, over the same `knownEntities` context §3.2's
+prompt already assembles — a wholly separate call, deliberately with no
+"extract only what's literally stated" framing at all:
+
+> *"You are looking at a list of known entities and their existing
+> recorded attributes, plus today's conversation mentioning them. Your
+> only job: check whether any entity's existing attributes, combined
+> together, directly and specifically imply an unstated medical or
+> general condition/classification... Only report an inference this
+> direct and this confident."*
+
+Each inferred fact is stored with `is_inference = true` and skips
+§3.4's grounding check entirely (it was never going to match raw source
+text — trusted on the extraction prompt's own verified precision bar
+instead), and gets a `derives` relation to every attribute row named in
+`inferred_from_attribute_keys` (§3.7). Surfaced at retrieval time as a
+`[inferred]`-prefixed snippet in the deep-attribution prompt (§2.7) and a
+non-nil `Citation.IsInference` on every fact citation.
+
+### 3.9 Rollup staleness refresh
 `refreshRollupsCovering`, always called (not just on re-consolidation) —
 a day backfilled out of order after its week's rollup already ran would
 otherwise never get revisited by the normal cron cadence.
 
-### 3.8 Embedding backfill
+### 3.10 Embedding backfill
 `embedHighImportanceEpisodes` + `entitiesMissingEmbeddings`/`embedEntities`
 — best-effort, logged on failure, never fails the day's consolidation
 (a real, previously-fixed bug: these used to propagate errors all the
@@ -601,7 +666,9 @@ can be wrong too.
 | `summarySystemPrompt` | `internal/consolidation/prompts.go` | Cron | Distill a day/period's episodes into summary + key facts + entities + relationships |
 | `perEpisodeFactPrompt` | `internal/consolidation/perepisode.go` | Cron | Narrow, per-episode "is there a standalone fact here" insurance pass |
 | `groundingSystemPrompt` | `internal/consolidation/grounding.go` | Cron | Independently fact-check every extracted claim against raw source text |
-| `contradictionCheckPrompt` | `internal/consolidation/contradiction.go` | Cron | Does a new fact contradict another current period's fact about the same entity |
+| `contradictionCheckPrompt` | `internal/consolidation/contradiction.go` | Cron | Does a new fact contradict (or, `HUPI_ENABLE_REDUNDANCY_DEDUP` on, restate) another current period's fact about the same entity |
+| `extendsCheckPrompt` | `internal/consolidation/extends.go` | Cron (opt-in, `HUPI_ENABLE_EXTENDS_DETECTION`) | Is a new fact a concrete follow-up development of an existing one, without contradicting it |
+| `inferenceExtractionPrompt` | `internal/consolidation/inference.go` | Cron (opt-in, `HUPI_ENABLE_INFERENCE_EXTRACTION`) | Do a known entity's existing attributes, combined, directly imply an unstated condition |
 | `aggregationExtractionSystemPrompt` | `internal/gateway/aggregation.go` | Live | Extract every dated fact relevant to an ordering/counting question |
 | `imageDescribeInstruction` | `internal/gateway/attachments.go` | Live | Caption a shared image factually, for memory |
 | `attributionSystemPrompt` | `internal/gateway/attribution.go` | Live (opt-in, `X-Hupi-Explain: deep`) | Which retrieved snippets did this specific answer actually rely on |
@@ -644,6 +711,9 @@ doc comment in source for the full, dated reasoning per rule.
 | `groundingCheckBatchSize` | 20 | — | Measured (reproduced count-mismatch above this) |
 | `guaranteedFactMaxCount` | 3 | — | Measured (9/10 wrong vs. 10/10 correct) |
 | `maxRelatedSummariesForContradictionCheck` | 5 | — | Reasoned cost bound |
+| `redundancyDedupEnabled` | off | `HUPI_ENABLE_REDUNDANCY_DEDUP` | Live-verified prompt, opt-in since a wrong call destroys data |
+| `extendsDetectionEnabled` | off | `HUPI_ENABLE_EXTENDS_DETECTION` | Live-verified (7/7, one false positive found and fixed during verification) |
+| `inferenceExtractionEnabled` | off | `HUPI_ENABLE_INFERENCE_EXTRACTION` | Live-verified (4/4) |
 | `defaultContextCharBudget` | 2,000 | `HUPI_CONTEXT_CHAR_BUDGET` | Reasoned (20,000 recommended for cloud models) |
 | `defaultMaxVectorResults` | 5 | `HUPI_MAX_VECTOR_RESULTS` | Reasoned |
 | `graphWalkMaxHops` / `-MaxResults` | 2 / 10 | `HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK` (off by default) | Measured: no benefit on either public benchmark |

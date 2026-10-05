@@ -50,8 +50,10 @@ Everything lives in four tables (`schema/0001_init.sql`):
 |---|---|---|
 | `episodes` | Every chat turn (`type='interaction'`) and every feedback submission (`type='feedback'`) | Append-only in practice — nothing updates `input_text`/`output_text` once written |
 | `summaries` | Grounding-checked rollups at `daily`/`weekly`/`monthly`/`yearly` level | Has its own `embedding vector(1536)` column — this is what retrieval actually vector-searches |
-| `summary_key_facts` | Per-fact citations + grounding result, child of `summaries` | Lets you query "every ungrounded fact ever produced" directly |
+| `summary_key_facts` | Per-fact citations + grounding result, child of `summaries` | Lets you query "every ungrounded fact ever produced" directly. Also carries `expires_at`/`expire_reason` (a fact that shouldn't read as current state forever — "dentist appointment tomorrow"), `source_count` (repeated-mention reinforcement instead of deletion), and `is_inference` |
 | `entities` | The long-lived knowledge graph: people, projects, preferences, skills, and the special `self_model` | Updated in place — it's current state, not history |
+| `memories` | Unified mirror of every key fact + static attribute, one row each, `is_static` distinguishing the two | What a `RefKindMemory` citation resolves back to; the only table `memory_relations` edges point at |
+| `memory_relations` | Fact-to-fact graph edges (`relation_type`: `updates`/`extends`/`derives`) | Never entity-to-entity (that's `entity_relationships`, a separate table) — see [MEMORY_MODEL_REARCHITECTURE_PLAN.md](MEMORY_MODEL_REARCHITECTURE_PLAN.md) |
 
 **Encrypted fields** (`bytea` columns: `input_text`, `output_text`, `note`,
 `summary`, `fact`, `attributes`) are AES-256-GCM ciphertext
@@ -209,12 +211,34 @@ getting written; it can't block or break a live conversation.
    - After commit (not inside the transaction — a failed embed shouldn't
      roll back an already-durable summary), embeds the summary text and
      writes it to the `embedding` column.
-5. Finally, `embedHighImportanceEpisodes` embeds any of that day's
-   episodes clearing an importance threshold (`0.6`) that don't have an
-   embedding yet — the write side of §4's episode-level vector search.
-   Runs after the summary is stored, not before: a failure here doesn't
-   block the summary, since summaries are the primary retrieval surface
-   and this is supplementary.
+5. `embedHighImportanceEpisodes` embeds any of that day's episodes
+   clearing an importance threshold (`0.6`) that don't have an embedding
+   yet — the write side of §4's episode-level vector search. Runs after
+   the summary is stored, not before: a failure here doesn't block the
+   summary, since summaries are the primary retrieval surface and this is
+   supplementary.
+6. Best-effort, after storage, never blocking the day's consolidation on
+   failure (see [PROCESS_REFERENCE.md §3.6-3.8](PROCESS_REFERENCE.md) for
+   the full detail on each):
+   - **Cross-period contradiction check** — does today's fact contradict
+     (or, opt-in, merely restate) another current period's fact about a
+     shared entity. A real contradiction is applied via the same
+     `Runner.Correct` path a human correction uses, and recorded as an
+     `updates` edge in `memory_relations`; a restatement increments the
+     older fact's `source_count` instead of deleting it.
+   - **Extends check** (opt-in, `HUPI_ENABLE_EXTENDS_DETECTION`) — a
+     separate, standalone call asking a narrower question over the same
+     fact pairs: is today's fact a concrete follow-up development of an
+     existing one, without contradicting it. Recorded as an `extends`
+     edge — no `Correct` call, since neither fact's own text changes.
+   - **Inference extraction** (opt-in, `HUPI_ENABLE_INFERENCE_EXTRACTION`)
+     — a separate call over the day's known entities, asking whether
+     their existing attributes, combined, directly imply an unstated
+     condition (an allergy profile implying asthma, say). A qualifying
+     inference is stored as a new key fact with `is_inference = true`,
+     skipping the grounding check (it was never going to match raw
+     source text) and getting a `derives` edge back to the attributes it
+     came from.
 
 **`Runner.RunRollup(ctx, level, sourceLevel, period, sourcePeriods)`** is
 the identical machinery one level up — it summarizes prior-level summaries

@@ -81,10 +81,36 @@ for f in schema/0001_init.sql \
          schema/0010_key_rotation.sql \
          schema/0011_key_rotation_audit_event.sql \
          schema/0012_entity_embeddings.sql \
-         schema/0013_embedding_model_tracking.sql; do
+         schema/0013_embedding_model_tracking.sql \
+         schema/0014_demo_sessions.sql \
+         schema/0015_entity_relationships.sql \
+         schema/0016_demo_sessions_decouple_cap_from_cleanup.sql \
+         schema/0017_summaries_supersedes_unique.sql \
+         schema/0018_summary_key_facts_rls.sql \
+         schema/0019_entity_relationships_valid_date_order.sql \
+         schema/0020_audit_log_target_ref_index.sql \
+         schema/0021_summary_key_facts_embeddings.sql \
+         schema/0022_scope_corpus_size.sql \
+         schema/0023_dashboard_sessions.sql \
+         schema/0024_summary_key_facts_embedding_index.sql \
+         schema/0025_unified_memories.sql \
+         schema/0026_backfill_memories_audit_event.sql \
+         schema/0027_memories_attribute_versioning.sql \
+         schema/0028_key_rotations_memories_cursor.sql \
+         schema/0029_summary_key_facts_expiration.sql \
+         schema/0030_memories_cascade_deletes.sql \
+         schema/0031_summary_key_facts_source_count.sql \
+         schema/0032_summary_key_facts_is_inference.sql; do
   psql "$HUPI_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
 done
 ```
+
+This list must be kept in sync with `schema/`'s actual contents by hand
+— `schema/migrate.sh`/`install.sh`'s own `apply_all_migrations` (see
+[The fast path](#the-fast-path-installsh) above) are the authoritative,
+self-updating path (idempotent, probe-then-apply); this manual block
+exists for anyone scripting their own deployment tooling around raw
+`psql` instead.
 
 Run these as the database owner or a superuser — `0004` creates the
 `hupi_app` role and grants, which requires elevated privileges the
@@ -322,7 +348,9 @@ needed. Each is independent of the others; none require each other.
 | `HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK` | off | Lets retrieval walk the stored entity-relationship graph (e.g. "spouse of", "sibling of") to pull in facts about an entity connected to, but not named in, the query. Defaults off because three independent measurements (see `docs/BENCHMARK_IMPROVEMENT_PLAN.md` step 2 and a dedicated LoCoMo category-1 ablation, 106 questions, 35.3% vs. 35.4%) found it contributes no measurable accuracy gain on either benchmark this project tracks, while still spending real cost competing for the same fixed context budget. Worth enabling only if your own deployment's relationship graph is denser or more load-bearing than either benchmark's. `graphWalkMaxHops`/`graphWalkMaxResults` (compile-time constants, `internal/store/retrieve.go`) bound the cost. |
 | `HUPI_ENABLE_QUERY_EXPANSION` | off | Adds one extra LLM call per retrieval to generate up to 2 paraphrases of the query in different concrete wording, then searches with all of them — targets the case where a stored fact's own phrasing ("pre-approved for $400,000 from Wells Fargo") shares little vocabulary with how the question is asked ("mortgage pre-approval amount"). Real cost: one extra LLM call and a couple of extra embedding searches per retrieval that opts in. |
 | `HUPI_ENABLE_LLM_RERANK` | off | Adds one extra LLM call, only for ordering-shaped retrievals (not every retrieval), that scores 0-10 how directly each candidate excerpt actually answers the question — rather than just how topically related it is — and reorders by that score. Real measured cost: ~3.5-4.3s per call at ~20 candidates (~10-12K prompt characters), which is why it's gated to the already-latency-accepting ordering case rather than applied everywhere. |
-| `HUPI_ENABLE_REDUNDANCY_DEDUP` | off | Consolidation's cross-period contradiction check normally only *corrects* an existing fact that's genuinely wrong. With this on, it can additionally flag an existing fact as **redundant** — a pure restatement of a new fact with no new information — and remove it outright (empty replacement). Off by default because this path destroys stored data on a wrong call, unlike a pure ranking/ordering toggle: a wrongly-flagged "redundant" fact is gone for good, so it stays opt-in until trusted in a given deployment. |
+| `HUPI_ENABLE_REDUNDANCY_DEDUP` | off | Consolidation's cross-period contradiction check normally only *corrects* an existing fact that's genuinely wrong. With this on, it can additionally flag an existing fact as **redundant** — a pure restatement of a new fact with no new information — and increments its `source_count` instead of leaving a duplicate. Off by default to keep this opt-in until trusted in a given deployment. |
+| `HUPI_ENABLE_EXTENDS_DETECTION` | off | Adds a second, standalone consolidation-time call asking whether a new fact is a concrete follow-up development of an existing one (a specific training run developing an ongoing "training for a marathon" fact), recording an `extends` edge in `memory_relations` if so — no fact text is ever changed by this check. Off by default: live-verified, but not yet run at benchmark scale. |
+| `HUPI_ENABLE_INFERENCE_EXTRACTION` | off | Adds a separate daily consolidation call that checks whether a known entity's existing attributes, combined, directly imply an unstated condition (an allergy profile implying asthma), storing a qualifying result as a new key fact marked `is_inference = true` with a `derives` relation back to the attributes it came from. Off by default: this mutates stored data (adds new, permanent key facts), not just ranking, same posture as `HUPI_ENABLE_REDUNDANCY_DEDUP`. |
 | `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` | off | Dashboard-only. Decrypts recent episode/summary text in-process to compute local keyword-frequency themes — no LLM call, decrypted text never leaves the process, only an aggregated term list is ever returned. This is the one place outside the normal retrieve/consolidate loop where plaintext conversation text touches a request path, which is why it's opt-in rather than on by default. |
 | `HUPI_ENABLE_DASHBOARD_LLM_THEMES` | off | Dashboard-only, independent of the flag above. Sends decrypted recent text to the configured LLM provider to generate a richer narrative theme summary, instead of (or alongside) the local keyword-frequency version. Only a model-generated narrative paragraph is ever returned — never the raw decrypted text itself, and neither this flag nor the one above ever logs decrypted content, only counts/errors. |
 

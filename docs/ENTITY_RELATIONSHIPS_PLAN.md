@@ -1,5 +1,12 @@
 # Entity Relationships Plan — closing the "limited temporal/relationship reasoning" gap
 
+**Not to be confused with** `memory_relations` (added later, see
+[MEMORY_MODEL_REARCHITECTURE_PLAN.md](MEMORY_MODEL_REARCHITECTURE_PLAN.md))
+— that table links two *facts* (`updates`/`extends`/`derives`), separate
+from `entity_relationships` below, which links two *entities*
+(`subject`/`predicate`/`object`, e.g. `sibling_of`). Similar names,
+different graphs.
+
 Prompted by an external comparison (ChatGPT's own read of HUPI vs.
 Mem0/Zep-Graphiti/Letta/Supermemory/Hindsight) rating HUPI "⚠️ Limited"
 on temporal/relationship reasoning, next to Zep/Graphiti's "✅ Core
