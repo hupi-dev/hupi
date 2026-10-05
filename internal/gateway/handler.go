@@ -86,6 +86,31 @@ type Citation struct {
 	// checked, so a caller can't mistake "not checked" for "checked and
 	// found unused."
 	Used *bool `json:"used,omitempty"`
+	// ParentSummaryID is memories.summary_id, carried onto a
+	// RefKindMemory citation so a caller/UI can group fact-level
+	// citations under their parent summary without a second lookup —
+	// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's citation model. Empty
+	// for a citation with no owning summary (an attribute, or a
+	// RefKindEpisode/RefKindSummary citation).
+	ParentSummaryID string `json:"parent_summary_id,omitempty"`
+	// IsInference is nil until Phase 4 (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md)
+	// wires memories.is_inference through — reserved now so Phase 4
+	// doesn't need another citation-model migration once it ships.
+	IsInference *bool `json:"is_inference,omitempty"`
+	// Relations is populated only when the cited memory has an
+	// updates/extends/derives link worth surfacing (Phase 3,
+	// memory_relations) — always empty until that phase ships, same
+	// forward-reservation reasoning as IsInference above.
+	Relations []RelationRef `json:"relations,omitempty"`
+}
+
+// RelationRef names one memory_relations edge from the cited memory to
+// another — Phase 3 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md. Defined
+// now, alongside the rest of the Phase 0 citation model, so Citation's
+// JSON shape is already stable by the time Phase 3 starts populating it.
+type RelationRef struct {
+	Type string       `json:"type"` // "updates" | "extends" | "derives"
+	Ref  identity.Ref `json:"ref"`
 }
 
 // Retriever is implemented by the retrieval engine — not sketched in this

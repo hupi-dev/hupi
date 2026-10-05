@@ -349,6 +349,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	var anchorCitations []gateway.Citation
 	var matchedEntities []entityMatch
 	var entityLines []string
+	var matchedEntityAttrsByID map[string][]entityattrs.Attribute
 	var countingFacts []exhaustiveCountingFact
 	var countingEntityName string
 
@@ -434,6 +435,15 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 			}
 			entityLines = append(entityLines, line)
 		}
+
+		matchedEntityIDs := make([]string, len(matchedEntities))
+		for i, m := range matchedEntities {
+			matchedEntityIDs[i] = m.id
+		}
+		matchedEntityAttrsByID, err = entityattrs.CurrentWithIDsForEntities(ctx, tx, s.keys, workspace, matchedEntityIDs)
+		if err != nil {
+			return fmt.Errorf("load matched entity attributes for citations: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
@@ -463,9 +473,23 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	for i, m := range matchedEntities {
 		matchedEntityIDs[i] = m.id
 		sb.WriteString("\n" + entityLines[i])
-		ref := identity.Ref{Kind: identity.RefKindEntity, Scope: workspace, ID: m.id}
-		refs = append(refs, ref)
-		citations = append(citations, gateway.Citation{Ref: ref, Snippet: entityLines[i]})
+		// A plain RefKindEntity ref, not a citation — refIDsOfKind reads
+		// this to seed graphWalkRelationships and to exclude
+		// already-matched entities from vectorSearchEntities/
+		// keywordSearchEntities, independent of whatever per-attribute
+		// citations below actually report.
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: workspace, ID: m.id})
+		// One RefKindMemory citation per live attribute, not one bundled
+		// whole-entity citation — see appendEntityAttributeCitations' own
+		// doc comment.
+		for _, attr := range matchedEntityAttrsByID[m.id] {
+			ref := identity.Ref{Kind: identity.RefKindMemory, Scope: workspace, ID: attr.ID}
+			refs = append(refs, ref)
+			citations = append(citations, gateway.Citation{
+				Ref:     ref,
+				Snippet: fmt.Sprintf("entity %s: %s = %s", m.id, attr.Key, attr.Value),
+			})
+		}
 		strongHit = true // an exact entity-key match is always a strong hit
 	}
 
@@ -480,9 +504,9 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		for i, f := range countingFacts {
 			line := fmt.Sprintf("%d. %s: %s", i+1, f.period, f.text)
 			sb.WriteString("\n" + line)
-			ref := identity.Ref{Kind: identity.RefKindSummary, Scope: workspace, ID: f.summaryID}
+			ref := identity.Ref{Kind: identity.RefKindMemory, Scope: workspace, ID: memoryIDForKeyFact(f.id)}
 			refs = append(refs, ref)
-			citations = append(citations, gateway.Citation{Ref: ref, Snippet: line})
+			citations = append(citations, gateway.Citation{Ref: ref, Snippet: f.text, ParentSummaryID: f.summaryID})
 		}
 		strongHit = true
 	}
@@ -677,32 +701,52 @@ func (s *Store) buildAnchor(ctx context.Context, q dbscope.Querier, actingUser, 
 	var refs []identity.Ref
 	var citations []gateway.Citation
 
-	var selfID, attrs string
-	var attrsCT []byte
-	var keyVersion int
+	var selfID string
 	err := q.QueryRowContext(ctx, `
-		select id, attributes, key_version from entities
+		select id from entities
 		where kind = 'self_model' and scope_kind = $1 and scope_owner = $2
 		limit 1
-	`, actingUser.Kind, actingUser.Owner).Scan(&selfID, &attrsCT, &keyVersion)
+	`, actingUser.Kind, actingUser.Owner).Scan(&selfID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		// no self_model configured yet — anchor is just the summary pointer
 	case err != nil:
 		return "", nil, nil, fmt.Errorf("load self_model: %w", err)
 	default:
-		actingEnc, keyErr := s.keys.GetVersion(ctx, actingUser, keyVersion)
-		if keyErr != nil {
-			return "", nil, nil, fmt.Errorf("resolve encryption key for self_model: %w", keyErr)
+		byEntity, attrErr := entityattrs.CurrentWithIDsForEntities(ctx, q, s.keys, actingUser, []string{selfID})
+		if attrErr != nil {
+			return "", nil, nil, fmt.Errorf("load self_model attributes: %w", attrErr)
 		}
-		attrs, err = actingEnc.Decrypt(attrsCT)
-		if err != nil {
-			return "", nil, nil, fmt.Errorf("decrypt self_model attributes: %w", err)
+		attrMap := make(map[string]string, len(byEntity[selfID]))
+		for _, attr := range byEntity[selfID] {
+			attrMap[attr.Key] = attr.Value
 		}
-		sb.WriteString("self_model: " + attrs + "\n")
-		ref := identity.Ref{Kind: identity.RefKindEntity, Scope: actingUser, ID: selfID}
-		refs = append(refs, ref)
-		citations = append(citations, gateway.Citation{Ref: ref, Snippet: "self_model: " + attrs})
+		// json.Marshal of a map[string]string sorts keys alphabetically,
+		// matching the exact text shape the old entities.attributes blob
+		// already had — same reasoning as formatEntity's own doc comment.
+		attrsJSON, jsonErr := json.Marshal(attrMap)
+		if jsonErr != nil {
+			return "", nil, nil, fmt.Errorf("marshal self_model attributes: %w", jsonErr)
+		}
+		sb.WriteString("self_model: " + string(attrsJSON) + "\n")
+		// A plain RefKindEntity ref, not a citation — same reasoning as
+		// the matched-entities loop below: refIDsOfKind reads this for
+		// graph-walk seeding/dedup, independent of whatever per-attribute
+		// citations report, and it must exist even when self_model has no
+		// attributes at all (a freshly-created, not-yet-populated one).
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: actingUser, ID: selfID})
+		// One RefKindMemory citation per live attribute, not one bundled
+		// whole-entity citation — see appendEntityAttributeCitations'
+		// own doc comment (not reused directly here since self_model is
+		// a single, already-known id, not a list to batch over).
+		for _, attr := range byEntity[selfID] {
+			ref := identity.Ref{Kind: identity.RefKindMemory, Scope: actingUser, ID: attr.ID}
+			refs = append(refs, ref)
+			citations = append(citations, gateway.Citation{
+				Ref:     ref,
+				Snippet: fmt.Sprintf("self_model: %s = %s", attr.Key, attr.Value),
+			})
+		}
 	}
 
 	var latestPeriod string
@@ -788,11 +832,13 @@ func slugPart(id string) string {
 	return id
 }
 
-// exhaustiveCountingFact pairs one key_fact's decrypted text with the
-// summary it came from — summaryID becomes this fact's citation Ref,
-// mirroring how every other retrieval mechanism in this file cites back
-// to its source.
+// exhaustiveCountingFact pairs one key_fact's decrypted text with its
+// own row id and the summary it came from — id becomes this fact's
+// RefKindMemory citation Ref (summaryID is carried onto the citation's
+// ParentSummaryID instead), the same per-fact citation granularity
+// every other retrieval mechanism in this file now uses.
 type exhaustiveCountingFact struct {
+	id        int64
 	summaryID string
 	period    string
 	text      string
@@ -872,7 +918,7 @@ func (s *Store) exhaustiveKeyFactsForEntity(ctx context.Context, q dbscope.Queri
 			continue
 		}
 		seenText[text] = true
-		facts = append(facts, exhaustiveCountingFact{summaryID: summaryID, period: period, text: text})
+		facts = append(facts, exhaustiveCountingFact{id: factID, summaryID: summaryID, period: period, text: text})
 	}
 	return facts, rows.Err()
 }
@@ -958,6 +1004,37 @@ func (s *Store) formatEntity(ctx context.Context, q dbscope.Querier, scope ident
 		return "", fmt.Errorf("marshal attributes for entity %s: %w", id, err)
 	}
 	return fmt.Sprintf("entity %s%s (%s): %s", id, dateLabel, name, attrsJSON), nil
+}
+
+// appendEntityAttributeCitations appends one RefKindMemory citation per
+// live attribute across entityIDs, replacing the single whole-entity
+// RefKindEntity citation every entity-citing retrieval mechanism in this
+// file used to build — docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's
+// citation model retires RefKindEntity entirely, since an attribute is
+// its own memories row now, not a single bundled entities.attributes
+// blob a citation could only point at as a whole. The displayed context
+// text (sb.WriteString elsewhere at each call site) is untouched by
+// this — still one line per entity with every current attribute folded
+// in; only the *citation* list granularity changes, per the plan doc's
+// own scope note distinguishing the two. An entity with no current
+// attributes contributes no citation at all, same as a summary with no
+// grounded facts contributing none.
+func (s *Store) appendEntityAttributeCitations(ctx context.Context, q dbscope.Querier, scope identity.Scope, entityIDs []string, refs *[]identity.Ref, citations *[]gateway.Citation) error {
+	byEntity, err := entityattrs.CurrentWithIDsForEntities(ctx, q, s.keys, scope, entityIDs)
+	if err != nil {
+		return fmt.Errorf("load current attributes for citations: %w", err)
+	}
+	for _, id := range entityIDs {
+		for _, attr := range byEntity[id] {
+			ref := identity.Ref{Kind: identity.RefKindMemory, Scope: scope, ID: attr.ID}
+			*refs = append(*refs, ref)
+			*citations = append(*citations, gateway.Citation{
+				Ref:     ref,
+				Snippet: fmt.Sprintf("entity %s: %s = %s", id, attr.Key, attr.Value),
+			})
+		}
+	}
+	return nil
 }
 
 // vectorSearchSummaries searches the current (non-superseded) summaries
@@ -1664,11 +1741,32 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		// rather than capping inside it. See summaryDepthCap's own doc
 		// comment for the real regression this exists to fix.
 		sb.WriteString("\n" + hardTruncate(depthText(p.c.text, p.facts, queryTerms), summaryDepthCap))
-		refs = append(refs, identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id})
-		*citations = append(*citations, gateway.Citation{
-			Ref:     identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id},
-			Snippet: summaryCitationSnippet(p.c.text, p.facts, queryTerms),
-		})
+
+		// Prose keeps its own RefKindSummary citation — a separate
+		// citation from any individual fact within it, not a replacement
+		// for one (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's citation
+		// model).
+		summaryRef := identity.Ref{Kind: identity.RefKindSummary, Scope: scope, ID: p.c.id}
+		refs = append(refs, summaryRef)
+		*citations = append(*citations, gateway.Citation{Ref: summaryRef, Snippet: p.c.text})
+
+		// One RefKindMemory citation per grounded key fact, not one
+		// bundled citation per summary picking a single "most relevant"
+		// fact (the old summaryCitationSnippet behavior) — Phase 4's
+		// is_inference marking and Phase 3's relation graph both need
+		// per-fact citation identity to attach to, not just per-summary.
+		// p.facts is already loadKeyFacts' full grounded-fact list for
+		// this summary (the same list depthText/writeKeyFacts already
+		// wrote to context above), so this adds no new query.
+		for _, kf := range p.facts {
+			factRef := identity.Ref{Kind: identity.RefKindMemory, Scope: scope, ID: memoryIDForKeyFact(kf.id)}
+			refs = append(refs, factRef)
+			*citations = append(*citations, gateway.Citation{
+				Ref:             factRef,
+				Snippet:         kf.text,
+				ParentSummaryID: p.c.id,
+			})
+		}
 		*strongHit = true
 	}
 	return refs, nil
@@ -1722,6 +1820,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 // rather than mixing two incomparable scales (see rankKeyFacts' own doc
 // comment).
 type keyFact struct {
+	id         int64
 	text       string
 	similarity sql.NullFloat64
 }
@@ -1739,7 +1838,7 @@ type keyFact struct {
 // noise, not a real signal, same reasoning as summaries/entities).
 func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryVector string, embeddingModel string) ([]keyFact, error) {
 	rows, err := q.QueryContext(ctx, `
-		select fact,
+		select id, fact,
 		       case when embedding is not null and embedding_model = $3
 		            then 1 - (embedding <=> $2::vector) end as similarity
 		from summary_key_facts
@@ -1753,18 +1852,31 @@ func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc 
 
 	var facts []keyFact
 	for rows.Next() {
+		var id int64
 		var factCT []byte
 		var similarity sql.NullFloat64
-		if err := rows.Scan(&factCT, &similarity); err != nil {
+		if err := rows.Scan(&id, &factCT, &similarity); err != nil {
 			return nil, err
 		}
 		fact, err := enc.Decrypt(factCT)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
 		}
-		facts = append(facts, keyFact{text: fact, similarity: similarity})
+		facts = append(facts, keyFact{id: id, text: fact, similarity: similarity})
 	}
 	return facts, rows.Err()
+}
+
+// memoryIDForKeyFact derives a key fact's citation id in the unified
+// memories table — same deterministic scheme
+// internal/backfillmemories.memoryIDForKeyFact and
+// internal/consolidation/store.go's storeSummary (which writes this
+// exact row live, not just via backfill) both use. Duplicated here
+// rather than imported, same precedent as internal/gateway/attribution.go's
+// extractJSON: a one-line, self-contained helper isn't worth a
+// cross-package dependency.
+func memoryIDForKeyFact(factID int64) string {
+	return "mem_fact_" + strconv.FormatInt(factID, 10)
 }
 
 // keyFactTexts extracts plain fact text, for the lexical scoring
@@ -1798,10 +1910,10 @@ func semanticFactRankingEnabled() bool {
 const factMarkerFusedMargin = 0.1
 
 // rankKeyFacts orders a summary's facts for both writeKeyFacts (every
-// fact, most relevant first) and guaranteedFact/summaryCitationSnippet
-// (just the top one) — one ranking shared by all three call sites, the
-// same "single scoring definition" invariant factScores already
-// establishes for the lexical path.
+// fact, most relevant first) and guaranteedFact (just the top one) —
+// one ranking shared by both call sites, the same "single scoring
+// definition" invariant factScores already establishes for the lexical
+// path.
 //
 // Semantic ranking (by cosine similarity to the query) is considered only
 // when *every* fact in this summary has a valid similarity — a mixed
@@ -2156,18 +2268,6 @@ func depthText(prose string, facts []keyFact, queryTerms []string) string {
 	return sb.String()
 }
 
-// summaryCitationSnippet builds a citation's Snippet for a summary: its
-// prose plus, when one stands out, its most query-relevant fact — reuses
-// rankKeyFacts rather than a second ranking scheme, so the citation
-// always agrees with what appendKeyFacts actually promoted in the
-// injected context.
-func summaryCitationSnippet(prose string, facts []keyFact, queryTerms []string) string {
-	if _, best := rankKeyFacts(facts, queryTerms); best >= 0 {
-		return prose + "\n  - (most relevant) " + facts[best].text
-	}
-	return prose
-}
-
 // factScores computes a per-fact query-relevance score — the one shared
 // metric behind both mostRelevantFactIndex (pick the single fact that
 // clearly stands out) and rankFactsByRelevance (order all of them). A
@@ -2280,7 +2380,7 @@ func rankFactsByRelevance(facts []string, queryTerms []string) []int {
 // something that should ever compete for a vector-search slot.
 func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryVector string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, similarityThreshold float64, maxResults int, query string, now time.Time) ([]identity.Ref, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, name, attributes, key_version, last_updated, (embedding <=> $1::vector) as distance
+		select id, name, last_updated, (embedding <=> $1::vector) as distance
 		from entities
 		where embedding is not null and kind != 'self_model'
 		  and (embedding_model is null or embedding_model = $6)
@@ -2292,7 +2392,6 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	// Same answer-time-reasoning hard filter stage1EntityMatches/
 	// keywordSearchEntities already apply
@@ -2309,14 +2408,17 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 	// backoff would restore precisely that match.
 	tfStart, tfEnd, hasTimeframe := resolveQueryTimeframe(query, now)
 
-	var refs []identity.Ref
+	type survivor struct {
+		id, name  string
+		dateLabel string
+	}
+	var survivors []survivor
 	for rows.Next() {
 		var id, name string
-		var attrsCT []byte
-		var keyVersion int
 		var lastUpdated time.Time
 		var distance float64
-		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion, &lastUpdated, &distance); err != nil {
+		if err := rows.Scan(&id, &name, &lastUpdated, &distance); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		similarity := 1 - distance
@@ -2326,27 +2428,59 @@ func (s *Store) vectorSearchEntities(ctx context.Context, q dbscope.Querier, sco
 		if hasTimeframe && !periodsOverlap(lastUpdated, lastUpdated.AddDate(0, 0, 1), tfStart, tfEnd) {
 			continue
 		}
-		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
-		if err != nil {
-			return nil, fmt.Errorf("resolve encryption key for entity %s: %w", id, err)
-		}
-		attrs, err := enc.Decrypt(attrsCT)
-		if err != nil {
-			return nil, err
-		}
 		dateLabel := ""
 		if rel := relativeDateLabel(lastUpdated, now); rel != "" {
 			dateLabel = fmt.Sprintf(", last updated %s (%s)", lastUpdated.Format("2006-01-02"), rel)
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s%s, %s): %s", id, dateLabel, name, attrs))
-		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
-		*citations = append(*citations, gateway.Citation{
-			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id},
-			Snippet: fmt.Sprintf("entity %s (%s): %s", id, name, attrs),
-		})
+		survivors = append(survivors, survivor{id: id, name: name, dateLabel: dateLabel})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// Attributes are loaded in a second pass, batched across every
+	// surviving entity, after the rows cursor above is fully closed —
+	// same two-pass convention internal/backfillmemories/internal/hpmf's
+	// exportEntities already use for the identical reason (issuing a
+	// second query on the same connection while the first result set is
+	// still open isn't safe to rely on).
+	ids := make([]string, len(survivors))
+	for i, sv := range survivors {
+		ids[i] = sv.id
+	}
+	byEntity, err := entityattrs.CurrentWithIDsForEntities(ctx, q, s.keys, scope, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load current attributes for vector-matched entities: %w", err)
+	}
+
+	var refs []identity.Ref
+	for _, sv := range survivors {
+		attrMap := make(map[string]string, len(byEntity[sv.id]))
+		for _, attr := range byEntity[sv.id] {
+			attrMap[attr.Key] = attr.Value
+		}
+		attrsJSON, err := json.Marshal(attrMap)
+		if err != nil {
+			return nil, fmt.Errorf("marshal attributes for entity %s: %w", sv.id, err)
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s%s, %s): %s", sv.id, sv.dateLabel, sv.name, attrsJSON))
+		// A plain RefKindEntity ref, not a citation — see the matched-entities
+		// loop's own comment on why refIDsOfKind needs this independent
+		// of per-attribute citations.
+		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: sv.id})
+		for _, attr := range byEntity[sv.id] {
+			ref := identity.Ref{Kind: identity.RefKindMemory, Scope: scope, ID: attr.ID}
+			refs = append(refs, ref)
+			*citations = append(*citations, gateway.Citation{
+				Ref:     ref,
+				Snippet: fmt.Sprintf("entity %s (%s): %s = %s", sv.id, sv.name, attr.Key, attr.Value),
+			})
+		}
 		*strongHit = true
 	}
-	return refs, rows.Err()
+	return refs, nil
 }
 
 // episodeExchangeCap bounds each matched episode's raw USER/ASSISTANT
@@ -3005,12 +3139,21 @@ func (s *Store) graphWalkRelationships(ctx context.Context, q dbscope.Querier, s
 		// the query, making it impossible to tell from ContextMessage
 		// alone whether the graph walk actually contributed anything.
 		sb.WriteString("\n" + line + ", relationship graph")
+		// A plain RefKindEntity ref, not a citation — see the matched-entities
+		// loop's own comment in retrieve() on why refIDsOfKind needs this
+		// independent of per-attribute citations (here it also matters
+		// for not re-discovering the same entity on a later hop).
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id})
-		*citations = append(*citations, gateway.Citation{
-			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: id},
-			Snippet: line + ", relationship graph",
-		})
 		*strongHit = true // a graph-connected entity is as strong a signal as a directly-matched one
+	}
+	// One RefKindMemory citation per live attribute across every
+	// discovered entity, not one bundled whole-entity citation — see
+	// appendEntityAttributeCitations' own doc comment. Batched once
+	// across all of discovered rather than per-id inside the loop
+	// above, same reasoning vectorSearchEntities' own two-pass
+	// restructure already applies.
+	if err := s.appendEntityAttributeCitations(ctx, q, scope, discovered, &refs, citations); err != nil {
+		return nil, fmt.Errorf("load graph-walked entity attributes for citations: %w", err)
 	}
 	return refs, nil
 }
@@ -3167,45 +3310,61 @@ func (s *Store) keywordSearchEpisodes(ctx context.Context, q dbscope.Querier, sc
 // nothing and lets a query matching an entity's name but not its stored
 // attribute values still score.
 func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, queryTerms []string, excludeIDs []string, sb *strings.Builder, strongHit *bool, citations *[]gateway.Citation, query string, now time.Time) ([]identity.Ref, error) {
+	// Deliberately no "attributes is not null" filter here anymore — that
+	// legacy column stops being populated the moment an entity is first
+	// touched after the unified-memories cutover
+	// (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md Phase 0), so it would
+	// silently exclude every new or recently-updated entity from BM25
+	// keyword search entirely, not just change what's displayed for it.
 	rows, err := q.QueryContext(ctx, `
-		select id, name, attributes, key_version, last_updated
+		select id, name, last_updated
 		from entities
-		where attributes is not null and kind != 'self_model'
+		where kind != 'self_model'
 		  and not (id = any($1::text[]))
 		  and scope_kind = $2 and scope_owner = $3
 	`, pgfmt.TextArray(excludeIDs), scope.Kind, scope.Owner)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	type entity struct {
-		name, attrs string
+		name        string
 		lastUpdated time.Time
 	}
 	byID := make(map[string]entity)
-	var docs []bm25Document
+	var ids []string
 	for rows.Next() {
 		var id, name string
-		var attrsCT []byte
-		var keyVersion int
 		var lastUpdated time.Time
-		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion, &lastUpdated); err != nil {
+		if err := rows.Scan(&id, &name, &lastUpdated); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
-		if err != nil {
-			return nil, fmt.Errorf("resolve encryption key for entity %s: %w", id, err)
-		}
-		attrs, err := enc.Decrypt(attrsCT)
-		if err != nil {
-			return nil, err
-		}
-		byID[id] = entity{name: name, attrs: attrs, lastUpdated: lastUpdated}
-		docs = append(docs, newBM25Document(id, name+" "+attrs))
+		byID[id] = entity{name: name, lastUpdated: lastUpdated}
+		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, err
+	}
+	rows.Close()
+
+	// Attributes loaded in a second pass, batched across every entity in
+	// scope, after the rows cursor above is fully closed — same two-pass
+	// convention vectorSearchEntities' own rewrite above already uses.
+	attrsByID, err := entityattrs.CurrentWithIDsForEntities(ctx, q, s.keys, scope, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load current attributes for keyword-searched entities: %w", err)
+	}
+
+	var docs []bm25Document
+	for _, id := range ids {
+		var docText strings.Builder
+		docText.WriteString(byID[id].name)
+		for _, attr := range attrsByID[id] {
+			docText.WriteString(" " + attr.Value)
+		}
+		docs = append(docs, newBM25Document(id, docText.String()))
 	}
 
 	matches := rankBM25(docs, queryTerms)
@@ -3246,12 +3405,27 @@ func (s *Store) keywordSearchEntities(ctx context.Context, q dbscope.Querier, sc
 		if rel := relativeDateLabel(e.lastUpdated, now); rel != "" {
 			dateLabel = fmt.Sprintf(", last updated %s (%s)", e.lastUpdated.Format("2006-01-02"), rel)
 		}
-		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s%s, %s, keyword match): %s", m, dateLabel, e.name, e.attrs))
+		attrMap := make(map[string]string, len(attrsByID[m]))
+		for _, attr := range attrsByID[m] {
+			attrMap[attr.Key] = attr.Value
+		}
+		attrsJSON, err := json.Marshal(attrMap)
+		if err != nil {
+			return nil, fmt.Errorf("marshal attributes for entity %s: %w", m, err)
+		}
+		sb.WriteString(fmt.Sprintf("\nrelated memory (entity %s%s, %s, keyword match): %s", m, dateLabel, e.name, attrsJSON))
+		// A plain RefKindEntity ref, not a citation — see the matched-entities
+		// loop's own comment in retrieve() on why refIDsOfKind needs this
+		// independent of per-attribute citations.
 		refs = append(refs, identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: m})
-		*citations = append(*citations, gateway.Citation{
-			Ref:     identity.Ref{Kind: identity.RefKindEntity, Scope: scope, ID: m},
-			Snippet: fmt.Sprintf("entity %s (%s): %s", m, e.name, e.attrs),
-		})
+		for _, attr := range attrsByID[m] {
+			ref := identity.Ref{Kind: identity.RefKindMemory, Scope: scope, ID: attr.ID}
+			refs = append(refs, ref)
+			*citations = append(*citations, gateway.Citation{
+				Ref:     ref,
+				Snippet: fmt.Sprintf("entity %s (%s): %s = %s", m, e.name, attr.Key, attr.Value),
+			})
+		}
 		*strongHit = true
 	}
 	return refs, nil

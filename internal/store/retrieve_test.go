@@ -3,11 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
 	"hupi/internal/pgfmt"
@@ -249,6 +251,90 @@ func TestRetrieve_SurfacesGroundedKeyFactsAlongsideSummary(t *testing.T) {
 	}
 }
 
+// TestRetrieve_CitesKeyFactsAtFactGranularity is the citation-model
+// regression docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's Phase 0 exists
+// for: a picked summary must produce its own RefKindSummary prose
+// citation *plus* one RefKindMemory citation per grounded key fact
+// (ParentSummaryID set to the owning summary) — not a single bundled
+// citation that only ever names one "most relevant" fact the old
+// summaryCitationSnippet produced.
+func TestRetrieve_CitesKeyFactsAtFactGranularity(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-retrieve-fact-citations"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	period := "2026-01-01"
+	summaryID := "sum_test-retrieve-fact-citations_2026-01-01_daily_v1"
+	insertSummary(t, s, scope, summaryID, period,
+		"Alex went on a family camping trip and found it relaxing.", "")
+	insertKeyFact(t, s, scope, summaryID, "Alex camped at the beach, in the mountains, and in the forest.", true)
+	insertKeyFact(t, s, scope, summaryID, "Alex found camping relaxing.", true)
+	insertKeyFact(t, s, scope, summaryID, "Alex camped on the moon.", false)
+
+	var factIDs []int64
+	if err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `select id from summary_key_facts where summary_id = $1 and grounded = true order by id`, summaryID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			factIDs = append(factIDs, id)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("load seeded key fact ids: %v", err)
+	}
+	if len(factIDs) != 2 {
+		t.Fatalf("seeded %d grounded fact ids, want 2", len(factIDs))
+	}
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "do you remember where Alex went camping?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	var sawProseCitation bool
+	factCitationsSeen := map[string]string{} // memory ref id -> snippet
+	for _, c := range result.Citations {
+		if c.Ref.Kind == identity.RefKindSummary && c.Ref.ID == summaryID {
+			sawProseCitation = true
+		}
+		if c.Ref.Kind == identity.RefKindMemory && c.ParentSummaryID == summaryID {
+			factCitationsSeen[c.Ref.ID] = c.Snippet
+		}
+	}
+	if !sawProseCitation {
+		t.Errorf("expected a RefKindSummary prose citation for %s alongside the fact citations, got: %+v", summaryID, result.Citations)
+	}
+	if len(factCitationsSeen) != 2 {
+		t.Fatalf("got %d RefKindMemory fact citations with ParentSummaryID=%s, want 2: %+v", len(factCitationsSeen), summaryID, result.Citations)
+	}
+	for _, factID := range factIDs {
+		wantRefID := memoryIDForKeyFact(factID)
+		snippet, ok := factCitationsSeen[wantRefID]
+		if !ok {
+			t.Errorf("no fact citation with Ref.ID = %q (fact row id %d)", wantRefID, factID)
+			continue
+		}
+		if snippet != "Alex camped at the beach, in the mountains, and in the forest." && snippet != "Alex found camping relaxing." {
+			t.Errorf("fact citation %s snippet = %q, want one of the two grounded fact texts", wantRefID, snippet)
+		}
+	}
+	// The ungrounded fact must never get a citation at all.
+	for _, snippet := range factCitationsSeen {
+		if strings.Contains(snippet, "moon") {
+			t.Errorf("ungrounded fact leaked into citations: %q", snippet)
+		}
+	}
+}
+
 // insertKeyFactWithEmbedding seeds a summary_key_facts row with an
 // explicit embedding and embedding_model — insertKeyFact doesn't set
 // either, since none of its own callers needed semantic fact ranking.
@@ -272,6 +358,64 @@ func insertKeyFactWithEmbedding(t *testing.T, s *Store, scope identity.Scope, su
 	})
 	if err != nil {
 		t.Fatalf("insert test key fact with embedding for %s: %v", summaryID, err)
+	}
+}
+
+// TestRetrieve_CitesEntityAttributesAtFactGranularity is the entity-side
+// counterpart of TestRetrieve_CitesKeyFactsAtFactGranularity: a stage1
+// substring-matched entity must produce one RefKindMemory citation per
+// live attribute, not the single bundled RefKindEntity citation the old
+// citation model produced for the whole entity at once.
+func TestRetrieve_CitesEntityAttributesAtFactGranularity(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-retrieve-entity-fact-citations"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	insertEntityWithEmbedding(t, s, scope, "person:zephyrbatch", "person", "Zephyrbatch",
+		`{"role":"engineer","team":"platform"}`)
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "tell me about Zephyrbatch"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	var byEntityRowIDs map[string][]entityattrs.Attribute
+	if err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
+		var err error
+		byEntityRowIDs, err = entityattrs.CurrentWithIDsForEntities(ctx, tx, s.keys, scope, []string{"person:zephyrbatch"})
+		return err
+	}); err != nil {
+		t.Fatalf("load real attribute row ids: %v", err)
+	}
+	attrs := byEntityRowIDs["person:zephyrbatch"]
+	if len(attrs) != 2 {
+		t.Fatalf("seeded entity has %d live attribute rows, want 2", len(attrs))
+	}
+
+	wantRefIDs := map[string]bool{}
+	for _, a := range attrs {
+		wantRefIDs[a.ID] = true
+	}
+
+	gotRefIDs := map[string]bool{}
+	var sawEntityRef bool
+	for _, c := range result.Citations {
+		if c.Ref.Kind == identity.RefKindMemory && wantRefIDs[c.Ref.ID] {
+			gotRefIDs[c.Ref.ID] = true
+		}
+	}
+	for _, r := range result.Refs {
+		if r.Kind == identity.RefKindEntity && r.ID == "person:zephyrbatch" {
+			sawEntityRef = true
+		}
+	}
+	if len(gotRefIDs) != 2 {
+		t.Errorf("got %d RefKindMemory attribute citations, want 2 (one per live attribute): %+v", len(gotRefIDs), result.Citations)
+	}
+	if !sawEntityRef {
+		t.Error("expected a plain RefKindEntity ref for person:zephyrbatch in Refs (for graph-walk seeding/dedup), independent of the attribute citations")
 	}
 }
 
@@ -427,13 +571,9 @@ func TestRetrieve_FactEmbeddedUnderDifferentModelFallsBackToLexical(t *testing.T
 // tests need vector search. Real encryption, like insertSummary.
 func insertEntityWithEmbedding(t *testing.T, s *Store, scope identity.Scope, id, kind, name, attrsJSON string) {
 	t.Helper()
-	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	_, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
 	if err != nil {
 		t.Fatalf("resolve test encryption key: %v", err)
-	}
-	attrsCT, err := enc.Encrypt(attrsJSON)
-	if err != nil {
-		t.Fatalf("encrypt test entity attrs: %v", err)
 	}
 	// Same content-independent fake vector insertSummary uses — this
 	// suite tests the SQL/wiring (does vector search fire, does it
@@ -445,13 +585,57 @@ func insertEntityWithEmbedding(t *testing.T, s *Store, scope identity.Scope, id,
 
 	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			insert into entities (id, kind, name, attributes, scope_kind, scope_owner, key_version, embedding)
-			values ($1, $2, $3, $4, $5, $6, $7, $8::vector)
-		`, id, kind, name, attrsCT, scope.Kind, scope.Owner, keyVersion, embeddingLiteral)
+			insert into entities (id, kind, name, scope_kind, scope_owner, key_version, embedding)
+			values ($1, $2, $3, $4, $5, $6, $7::vector)
+		`, id, kind, name, scope.Kind, scope.Owner, keyVersion, embeddingLiteral)
 		return err
 	})
 	if err != nil {
 		t.Fatalf("insert test entity %s: %v", id, err)
+	}
+	seedEntityAttributesAsMemories(t, s, scope, id, attrsJSON)
+}
+
+// seedEntityAttributesAsMemories inserts one live memories row per key
+// in attrsJSON — the shape internal/consolidation/store.go's
+// upsertEntities actually writes post-cutover
+// (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md Phase 0), not the legacy
+// entities.attributes blob these test helpers used to populate
+// directly. Shared by every test helper in this package that seeds an
+// entity with attributes (insertEntityWithEmbedding,
+// insertEntityWithEmbeddingIndex, scope_isolation_test.go's insertEntity).
+func seedEntityAttributesAsMemories(t *testing.T, s *Store, scope identity.Scope, entityID, attrsJSON string) {
+	t.Helper()
+	var attrs map[string]string
+	if attrsJSON != "" && attrsJSON != "{}" {
+		if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
+			t.Fatalf("parse test entity attrs JSON for %s: %v", entityID, err)
+		}
+	}
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	if err := dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		for key, value := range attrs {
+			ct, err := enc.Encrypt(value)
+			if err != nil {
+				return err
+			}
+			rowID, err := entityattrs.NewID()
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`
+				insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, key_version, is_static, grounded)
+				values ($1, $2, $3, $4, $5, $6, $7, true, true)
+			`, rowID, scope.Kind, scope.Owner, entityID, key, ct, keyVersion); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed memories for entity %s attributes: %v", entityID, err)
 	}
 }
 

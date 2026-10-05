@@ -58,13 +58,9 @@ func insertSummaryWithEmbeddingIndex(t *testing.T, s *Store, scope identity.Scop
 // insertSummaryWithEmbeddingIndex's doc comment for why.
 func insertEntityWithEmbeddingIndex(t *testing.T, s *Store, scope identity.Scope, id, kind, name, attrsJSON string, dim int) {
 	t.Helper()
-	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	_, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
 	if err != nil {
 		t.Fatalf("resolve test encryption key: %v", err)
-	}
-	attrsCT, err := enc.Encrypt(attrsJSON)
-	if err != nil {
-		t.Fatalf("encrypt test entity attrs: %v", err)
 	}
 	vec := make([]float32, 1536)
 	vec[dim] = 1
@@ -72,14 +68,15 @@ func insertEntityWithEmbeddingIndex(t *testing.T, s *Store, scope identity.Scope
 
 	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			insert into entities (id, kind, name, attributes, scope_kind, scope_owner, key_version, embedding)
-			values ($1, $2, $3, $4, $5, $6, $7, $8::vector)
-		`, id, kind, name, attrsCT, scope.Kind, scope.Owner, keyVersion, embeddingLiteral)
+			insert into entities (id, kind, name, scope_kind, scope_owner, key_version, embedding)
+			values ($1, $2, $3, $4, $5, $6, $7::vector)
+		`, id, kind, name, scope.Kind, scope.Owner, keyVersion, embeddingLiteral)
 		return err
 	})
 	if err != nil {
 		t.Fatalf("insert test entity %s: %v", id, err)
 	}
+	seedEntityAttributesAsMemories(t, s, scope, id, attrsJSON)
 }
 
 // TestRetrieve_KeywordSearchFindsEntityByAttributeContentVectorSearchMisses

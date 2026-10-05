@@ -92,6 +92,17 @@ func printTrace(t store.Trace) {
 		fmt.Printf("  - %s (scope=%s:%s)\n    USER: %s\n    ASSISTANT: %s\n",
 			eh.Ref.ID, eh.Ref.Scope.Kind, eh.Ref.Scope.Owner, eh.InputText, eh.OutputText)
 	}
+
+	fmt.Printf("\nretrieved memories (%d):\n", len(t.RetrievedMemories))
+	for _, m := range t.RetrievedMemories {
+		if m.IsStatic {
+			fmt.Printf("  - %s (scope=%s:%s, entity=%s, attribute=%s, grounded=%v)\n    %s\n",
+				m.Ref.ID, m.Ref.Scope.Kind, m.Ref.Scope.Owner, m.EntityID, m.AttributeKey, m.Grounded, m.Content)
+		} else {
+			fmt.Printf("  - %s (scope=%s:%s, summary=%s, grounded=%v)\n    %s\n",
+				m.Ref.ID, m.Ref.Scope.Kind, m.Ref.Scope.Owner, m.SummaryID, m.Grounded, m.Content)
+		}
+	}
 }
 
 func displayOr(s, fallback string) string {

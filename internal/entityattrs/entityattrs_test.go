@@ -187,6 +187,39 @@ func TestCurrentForEntities_BatchesAcrossMultipleEntities(t *testing.T) {
 	}
 }
 
+func TestCurrentWithIDsForEntities_ReturnsRowIDsAlongsideValues(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-entityattrs-withids"}
+	t.Cleanup(func() { cleanup(t, db, scope) })
+
+	seedEntity(t, ctx, db, scope, "project:widget")
+	insertAttr(t, ctx, db, keys, scope, "project:widget", "mem_1", "language", "Go", nil, true)
+	id1 := "mem_1"
+	insertAttr(t, ctx, db, keys, scope, "project:widget", "mem_2", "language", "Rust", &id1, true)
+	insertAttr(t, ctx, db, keys, scope, "project:widget", "mem_3", "status", "active", nil, true)
+	// A tombstone must not appear at all — same exclusion CurrentForEntities applies.
+	id3 := "mem_3"
+	insertAttr(t, ctx, db, keys, scope, "project:widget", "mem_4", "status", "", &id3, false)
+
+	var byEntity map[string][]Attribute
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		var err error
+		byEntity, err = CurrentWithIDsForEntities(ctx, tx, keys, scope, []string{"project:widget"})
+		return err
+	}); err != nil {
+		t.Fatalf("CurrentWithIDsForEntities: %v", err)
+	}
+
+	attrs := byEntity["project:widget"]
+	if len(attrs) != 1 {
+		t.Fatalf("got %d attributes, want exactly 1 (language — status is tombstoned): %+v", len(attrs), attrs)
+	}
+	if attrs[0].ID != "mem_2" || attrs[0].Key != "language" || attrs[0].Value != "Rust" {
+		t.Errorf("attrs[0] = %+v, want {ID: mem_2, Key: language, Value: Rust}", attrs[0])
+	}
+}
+
 func TestNewID_ProducesDistinctIDs(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
