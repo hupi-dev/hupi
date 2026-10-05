@@ -17,13 +17,24 @@ import (
 // docs/ANSWER_CITATIONS_PLAN.md. Phase 1's Citations show what memory
 // was *available* when the answer was generated; this verifies what the
 // answer actually *used*.
-const attributionSystemPrompt = `You will be given a generated answer and a numbered list of candidate memory snippets that were available when it was written. For each snippet, in order, decide whether the answer's content actually, specifically relies on it — not just topically related, but relied on to produce a detail in the answer. Respond with exactly one JSON object, nothing else: {"used": [true, false, ...]} — one boolean per snippet, same order and count as given.`
+const attributionSystemPrompt = `You will be given a generated answer and a numbered list of candidate memory snippets that were available when it was written. For each snippet, in order, decide whether the answer's content actually, specifically relies on it — not just topically related, but relied on to produce a detail in the answer. A snippet prefixed "[inferred]" is a conclusion the memory system drew from other recorded facts, not something directly stated — judge whether the answer relied on it the exact same way as any other snippet; its inferred status doesn't change this judgment. Respond with exactly one JSON object, nothing else: {"used": [true, false, ...]} — one boolean per snippet, same order and count as given.`
 
+// buildAttributionPrompt prefixes an inferred citation's line with
+// "[inferred] " — Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md.
+// attributionSystemPrompt's own instruction tells the judge what that
+// marker means and that it doesn't change how reliance is judged; this
+// is purely about giving the judge the same transparency a human
+// reviewer would have (knowing which snippets are conclusions, not
+// direct statements), not about changing the verdict itself.
 func buildAttributionPrompt(answer string, citations []Citation) string {
 	var sb strings.Builder
 	sb.WriteString("Generated answer:\n" + answer + "\n\nCandidate memory snippets:\n")
 	for i, c := range citations {
-		fmt.Fprintf(&sb, "%d. %s\n", i+1, c.Snippet)
+		prefix := ""
+		if c.IsInference != nil && *c.IsInference {
+			prefix = "[inferred] "
+		}
+		fmt.Fprintf(&sb, "%d. %s%s\n", i+1, prefix, c.Snippet)
 	}
 	return sb.String()
 }

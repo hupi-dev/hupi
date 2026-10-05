@@ -428,6 +428,83 @@ first; full re-ingest only after that passes; noise-floor-aware
 category-level comparison, never a single run's number taken at face
 value (this session's own established, hard-won discipline).
 
+**Update — live-tested, not shipped, same root cause as Phase 5's
+`extends`**: the "live prompt A/B on the specific real traced case"
+verification step above was run before writing any production code, the
+same discipline Phase 5 used. Two attempts against real GPT-4.1,
+temperature 0, the exact Joanna/asthma case:
+
+- First attempt: a new paragraph appended to `summarySystemPrompt`
+  describing the exception (KNOWN ENTITIES attributes implying an
+  unstated condition) with the allergy/asthma example worked through.
+  Result: not fired — the model extracted only the literal hiking fact,
+  no inference.
+- Second attempt: instead of appending a separate paragraph, the
+  exception was inserted as a carve-out directly adjacent to the
+  prompt's own foundational rule it needed to override ("Do not include
+  anything you are inferring, generalizing, or guessing beyond what the
+  source text states" — the very first key_facts instruction in the
+  whole prompt). Result: still not fired, identical output.
+- Isolated capability check (same technique that settled Phase 5's
+  question): the identical allergy pattern, asked directly with no
+  surrounding task framing at all ("what underlying condition does this
+  imply? One word") — gpt-4.1 answered "Asthma" immediately, temperature
+  0. This rules out a model-capability limitation; the suppression is
+  specific to the extraction prompt's own framing.
+
+**Conclusion**: this is the same failure mode as Phase 5's `extends`,
+not a coincidence — `summarySystemPrompt`'s entire design is "extract
+only what's literally stated," repeated and reinforced throughout
+(this is its very first instruction). A single exception, however
+precisely placed or worded, is fighting the prompt's own dominant,
+repeated framing, and loses. A reliable consolidation-time inference
+extractor needs its own separate, dedicated call — one whose system
+prompt doesn't carry the "never infer" framing to begin with — not an
+addition to `summarySystemPrompt`.
+
+**Shipped as a separate dedicated call — `extractInferences`
+(`inference.go`)**: a wholly standalone system prompt (no
+`summarySystemPrompt` framing at all — "You are looking at a list of
+known entities and their existing recorded attributes... your only job:
+check whether any entity's existing attributes... directly and
+specifically imply an unstated medical or general condition"), run
+after `generateDailySummary` using the same `knownEntities` already
+loaded for the main extraction. Live-verified, real GPT-4.1, before
+being wired into production code: fired correctly on the Joanna/asthma
+case (right entity id, right attribute keys named); correctly reported
+nothing for an entity with unrelated attributes (favorite_color,
+hometown); correctly reported nothing with no known entities at all;
+correctly declined a real near-miss (a marathon runner's high-protein
+diet — thematically health-adjacent but not an actual diagnostic
+pattern). Behind `HUPI_ENABLE_INFERENCE_EXTRACTION` (off by default,
+same posture as `redundancyDedupEnabled`/`queryExpansionEnabled` —
+mutates stored data, not just ranking).
+
+An inferred fact is never sent through `groundingCheck` (it checks a
+fact against raw conversation text, which an attribute-derived
+inference was never going to match) — marked `grounded=true`
+unconditionally instead, trusting the extraction prompt's own
+live-verified precision bar the same way a literal fact trusts
+`groundingCheck`'s. Each inferred fact gets a `derives`
+`memory_relations` edge to every attribute row named in
+`inferred_from_attribute_keys` (resolved via `entityattrs.CurrentRowIDs`,
+the same lookup `internal/store/retrieve.go` already uses) — Phase 4's
+own stated safety mechanism, now live. `Citation.IsInference` is a
+pointer to the real, known `memories.is_inference` value for every
+key-fact citation (never nil — that column always has a definite
+answer once this ships). `attribution.go`'s judge prompt marks an
+inferred snippet with a `[inferred]` prefix and an explicit instruction
+that this doesn't change how reliance is judged.
+
+**Not yet done**: the plan's own final verification step — a full
+re-ingest, noise-floor-aware category-level comparison — has not been
+run. What shipped is verified at the unit/integration level (real
+Postgres, the exact traced case against a real LLM) but not at
+benchmark scale. Flagging this plainly rather than claiming a category-
+level improvement that hasn't been measured, same discipline as Phase
+1's own "not yet done" live-prompt-check note before credentials became
+available.
+
 ### Phase 5 — `extends` classification (deferred from Phase 3, needs
 dedicated prompt engineering)
 

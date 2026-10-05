@@ -60,9 +60,35 @@ type storeSummaryInput struct {
 // docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md) to look up a just-written
 // key fact's own memories row id when recording an "updates" relation.
 func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) (string, error) {
-	grounded, err := r.groundingCheck(ctx, in.groundingSourceText, in.output.KeyFacts)
+	// Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: an inferred
+	// fact is never sent through groundingCheck — that check verifies a
+	// fact against the day's raw conversation text, which an inference
+	// drawn from an entity's existing attributes (not the conversation
+	// itself) was never going to match. Its own dedicated extraction
+	// prompt (inference.go) already enforces the precision bar a
+	// literal fact's groundingCheck exists to provide; marking it
+	// grounded unconditionally here is that bar's equivalent, not a
+	// bypass of it.
+	literalFacts := make([]KeyFactOutput, 0, len(in.output.KeyFacts))
+	literalIdx := make([]int, 0, len(in.output.KeyFacts))
+	for i, kf := range in.output.KeyFacts {
+		if !kf.IsInference {
+			literalFacts = append(literalFacts, kf)
+			literalIdx = append(literalIdx, i)
+		}
+	}
+	literalGrounded, err := r.groundingCheck(ctx, in.groundingSourceText, literalFacts)
 	if err != nil {
 		return "", fmt.Errorf("grounding check: %w", err)
+	}
+	grounded := make([]bool, len(in.output.KeyFacts))
+	for i, kf := range in.output.KeyFacts {
+		if kf.IsInference {
+			grounded[i] = true
+		}
+	}
+	for j, origIdx := range literalIdx {
+		grounded[origIdx] = literalGrounded[j]
 	}
 
 	enc, keyVersion, err := r.keys.GetOrCreate(ctx, in.scope)
@@ -211,10 +237,10 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) (string
 
 			var factRowID int64
 			err = tx.QueryRowContext(ctx, `
-				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner, expires_at, expire_reason, source_count)
-				values ($1, $2, $3::text[], $4, $5, $6, $7, $8::date, $9, $10)
+				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner, expires_at, expire_reason, source_count, is_inference)
+				values ($1, $2, $3::text[], $4, $5, $6, $7, $8::date, $9, $10, $11)
 				returning id
-			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner, expiresAt, expireReason, sourceCount).Scan(&factRowID)
+			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner, expiresAt, expireReason, sourceCount, kf.IsInference).Scan(&factRowID)
 			if err != nil {
 				return fmt.Errorf("insert key fact %d for summary %s: %w", i, id, err)
 			}
@@ -237,10 +263,43 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) (string
 			// today (schema/0025's own doc comment), so embedding it a
 			// second time would be pure cost with no reachable consumer.
 			if _, err := tx.ExecContext(ctx, `
-				insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded, source_episode_ids, expires_at, expire_reason, source_count)
-				values ($1, $2, $3, $4, $5, $6, false, $7, $8::text[], $9::date, $10, $11)
-			`, memoryIDForKeyFact(factRowID), in.scope.Kind, in.scope.Owner, id, factCT, keyVersion, grounded[i], pgfmt.TextArray(citeIDs), expiresAt, expireReason, sourceCount); err != nil {
+				insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded, source_episode_ids, expires_at, expire_reason, source_count, is_inference)
+				values ($1, $2, $3, $4, $5, $6, false, $7, $8::text[], $9::date, $10, $11, $12)
+			`, memoryIDForKeyFact(factRowID), in.scope.Kind, in.scope.Owner, id, factCT, keyVersion, grounded[i], pgfmt.TextArray(citeIDs), expiresAt, expireReason, sourceCount, kf.IsInference); err != nil {
 				return fmt.Errorf("mirror key fact %d for summary %s into memories: %w", i, id, err)
+			}
+
+			// Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: an
+			// inferred fact gets a derives relation back to each
+			// attribute it was inferred from — Phase 4's safety
+			// mechanism, so a future staleness check has something to
+			// follow if that attribute's value ever changes. Best-effort:
+			// a missing/renamed attribute key degrades to "no relation
+			// recorded for that key," never fails the whole insert —
+			// the fact itself is already durably stored by this point.
+			if kf.IsInference && kf.InferredFromEntityID != "" {
+				attrRowIDs, err := entityattrs.CurrentRowIDs(ctx, tx, in.scope, kf.InferredFromEntityID)
+				if err != nil {
+					slog.Warn("consolidation: load attribute row ids for derives relation failed", "entity", kf.InferredFromEntityID, "error", err)
+				} else {
+					for _, attrKey := range kf.InferredFromAttributeKeys {
+						attrMemID, ok := attrRowIDs[attrKey]
+						if !ok {
+							slog.Warn("consolidation: inferred-from attribute key not found, skipping its derives relation", "entity", kf.InferredFromEntityID, "attribute_key", attrKey)
+							continue
+						}
+						relID, err := newRelationshipID()
+						if err != nil {
+							return fmt.Errorf("generate memory_relations id for derives relation: %w", err)
+						}
+						if _, err := tx.ExecContext(ctx, `
+							insert into memory_relations (id, scope_kind, scope_owner, from_memory_id, to_memory_id, relation_type)
+							values ($1, $2, $3, $4, $5, 'derives')
+						`, relID, in.scope.Kind, in.scope.Owner, memoryIDForKeyFact(factRowID), attrMemID); err != nil {
+							return fmt.Errorf("insert derives relation for fact %d: %w", factRowID, err)
+						}
+					}
+				}
 			}
 
 			// Only grounded facts are ever retrieved (loadKeyFacts,

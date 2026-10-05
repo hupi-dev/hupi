@@ -157,6 +157,30 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		return fmt.Errorf("consolidation: generate daily summary for %s: %w", period, err)
 	}
 
+	// Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: a wholly
+	// separate call from generateDailySummary's own extraction (see
+	// inference.go's own doc comment on why — this must never be folded
+	// into summarySystemPrompt). Best-effort: a failure here means today
+	// just has no inferred facts, never blocks the literal ones already
+	// produced above.
+	if inferenceExtractionEnabled() && len(knownEntities) > 0 {
+		inferences, err := r.extractInferences(ctx, knownEntities, joinSources(sources))
+		if err != nil {
+			slog.Warn("consolidation: inference extraction failed, continuing without it", "period", period, "error", err)
+		}
+		for _, inf := range inferences {
+			if inf.EntityID == "" || inf.Fact == "" {
+				continue
+			}
+			output.KeyFacts = append(output.KeyFacts, KeyFactOutput{
+				Fact:                      inf.Fact,
+				IsInference:               true,
+				InferredFromEntityID:      inf.EntityID,
+				InferredFromAttributeKeys: inf.InferredFromAttributeKeys,
+			})
+		}
+	}
+
 	sourceIDs := make([]string, len(sources))
 	for i, s := range sources {
 		sourceIDs[i] = s.id

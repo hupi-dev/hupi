@@ -93,9 +93,15 @@ type Citation struct {
 	// for a citation with no owning summary (an attribute, or a
 	// RefKindEpisode/RefKindSummary citation).
 	ParentSummaryID string `json:"parent_summary_id,omitempty"`
-	// IsInference is nil until Phase 4 (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md)
-	// wires memories.is_inference through — reserved now so Phase 4
-	// doesn't need another citation-model migration once it ships.
+	// IsInference is set for a RefKindMemory key-fact citation (a
+	// pointer to the real, known memories.is_inference value, never left
+	// nil — that column is a definitive true/false for every fact, not
+	// "not yet evaluated") — Phase 4 of
+	// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md. Left nil for an entity-
+	// attribute citation: nothing sets is_inference=true for an
+	// attribute today (Phase 4's extraction only ever produces inferred
+	// key facts, not attributes), so there's no real answer to report
+	// there yet.
 	IsInference *bool `json:"is_inference,omitempty"`
 	// Relations is populated only when the cited memory has an
 	// updates/extends/derives link worth surfacing (Phase 3,

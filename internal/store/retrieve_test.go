@@ -587,6 +587,76 @@ func TestRetrieve_CitesEntityAttributesAtFactGranularity(t *testing.T) {
 	}
 }
 
+// TestRetrieve_CitationMarksInferredFact is the real-infra regression
+// for Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: a cited fact
+// with memories.is_inference=true must surface Citation.IsInference as
+// a pointer to true, and an ordinary literal fact must surface it as a
+// pointer to false (a real, known answer — never left nil, which would
+// read as "not evaluated").
+func TestRetrieve_CitationMarksInferredFact(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-retrieve-citation-inference"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	period := "2026-01-01"
+	summaryID := "sum_test-retrieve-citation-inference_2026-01-01_daily_v1"
+	insertSummary(t, s, scope, summaryID, period, "Joanna went hiking.", "")
+	insertKeyFact(t, s, scope, summaryID, "Joanna went on a hike near Fort Wayne.", true)
+
+	enc, keyVersion, err := s.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	inferredCT, err := enc.Encrypt("Joanna likely has asthma.")
+	if err != nil {
+		t.Fatalf("encrypt inferred fact: %v", err)
+	}
+	if err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into summary_key_facts (summary_id, fact, grounded, is_inference, key_version, scope_kind, scope_owner)
+			values ($1, $2, true, true, $3, $4, $5)
+		`, summaryID, inferredCT, keyVersion, scope.Kind, scope.Owner)
+		return err
+	}); err != nil {
+		t.Fatalf("seed inferred fact: %v", err)
+	}
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "do you remember Joanna's hike near Fort Wayne?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if result.Gate != gateway.GateFull {
+		t.Fatalf("gate = %q, want %q (context: %q)", result.Gate, gateway.GateFull, result.ContextMessage)
+	}
+
+	var sawInferred, sawLiteral bool
+	for _, c := range result.Citations {
+		if c.Ref.Kind != identity.RefKindMemory || c.ParentSummaryID != summaryID {
+			continue
+		}
+		switch {
+		case strings.Contains(c.Snippet, "asthma"):
+			sawInferred = true
+			if c.IsInference == nil || !*c.IsInference {
+				t.Errorf("inferred fact citation IsInference = %v, want a pointer to true", c.IsInference)
+			}
+		case strings.Contains(c.Snippet, "hike"):
+			sawLiteral = true
+			if c.IsInference == nil || *c.IsInference {
+				t.Errorf("literal fact citation IsInference = %v, want a pointer to false", c.IsInference)
+			}
+		}
+	}
+	if !sawInferred {
+		t.Error("expected a citation for the inferred asthma fact")
+	}
+	if !sawLiteral {
+		t.Error("expected a citation for the literal hike fact")
+	}
+}
+
 // TestRetrieve_SemanticFactRankingPromotesTheRealAnswerOverALexicalTie is
 // the DB-integration counterpart of
 // TestRankKeyFacts_SemanticSimilarityBreaksTheRealLexicalTie_gpt4_45189cb4
