@@ -2,6 +2,9 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"hupi/internal/provider"
@@ -92,6 +95,87 @@ func TestAttributionCheck_ErrorsOnUnparsableResponse(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("attributionCheck() = %v, want nil on error", got)
+	}
+}
+
+// batchCountingJudge returns one `true` verdict per citation actually
+// present in that call's own prompt (counting numbered snippet lines),
+// rather than a fixed-size canned response — so it works correctly
+// regardless of how large a batch attributionCheck hands it, and
+// batches records how many separate calls it was given.
+type batchCountingJudge struct {
+	batches [][]string // each call's own Candidate memory snippets lines, in order
+}
+
+func (j *batchCountingJudge) Name() string   { return "batch-counting-judge" }
+func (j *batchCountingJudge) Vendor() string { return "test" }
+func (j *batchCountingJudge) Model() string  { return "batch-counting-judge-model" }
+
+func (j *batchCountingJudge) ChatCompletion(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
+	prompt := req.Messages[1].Content
+	_, list, _ := strings.Cut(prompt, "Candidate memory snippets:\n")
+	var lines []string
+	for _, l := range strings.Split(strings.TrimRight(list, "\n"), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	j.batches = append(j.batches, lines)
+	used := make([]bool, len(lines))
+	for i := range used {
+		used[i] = true
+	}
+	b, _ := json.Marshal(struct {
+		Used []bool `json:"used"`
+	}{Used: used})
+	return provider.ChatResponse{Message: provider.Message{Role: provider.RoleAssistant, Content: string(b)}}, nil
+}
+
+func (j *batchCountingJudge) StreamChatCompletion(ctx context.Context, req provider.ChatRequest) (<-chan provider.StreamChunk, error) {
+	panic("not used by attributionCheck")
+}
+
+func (j *batchCountingJudge) Embed(ctx context.Context, req provider.EmbedRequest) (provider.EmbedResponse, error) {
+	panic("not used by attributionCheck")
+}
+
+// TestAttributionCheck_SplitsIntoBatchesAboveTheCap is the fact-
+// granularity regression this cap exists for: a request with more
+// citations than attributionCheckBatchSize must split into multiple
+// judge calls, not send one oversized list — and the results must still
+// line up index-for-index with the original citations slice regardless
+// of the split.
+func TestAttributionCheck_SplitsIntoBatchesAboveTheCap(t *testing.T) {
+	n := attributionCheckBatchSize*2 + 3 // two full batches plus a partial one
+	citations := make([]Citation, n)
+	for i := range citations {
+		citations[i] = Citation{Snippet: fmt.Sprintf("snippet %d", i)}
+	}
+	judge := &batchCountingJudge{}
+
+	got, err := attributionCheck(context.Background(), judge, "the answer", citations)
+	if err != nil {
+		t.Fatalf("attributionCheck: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d verdicts, want %d", len(got), n)
+	}
+	for i, v := range got {
+		if !v {
+			t.Errorf("verdict[%d] = false, want true", i)
+		}
+	}
+	if len(judge.batches) != 3 {
+		t.Fatalf("judge received %d calls, want 3 (two full batches of %d plus one of 3)", len(judge.batches), attributionCheckBatchSize)
+	}
+	if len(judge.batches[0]) != attributionCheckBatchSize || len(judge.batches[1]) != attributionCheckBatchSize || len(judge.batches[2]) != 3 {
+		t.Errorf("batch sizes = %d, %d, %d — want %d, %d, 3", len(judge.batches[0]), len(judge.batches[1]), len(judge.batches[2]), attributionCheckBatchSize, attributionCheckBatchSize)
+	}
+	// Each batch's own prompt must renumber from 1, not continue the
+	// global count — same per-batch-fresh-numbering convention
+	// groundingCheck's own batching already uses.
+	if !strings.HasPrefix(judge.batches[1][0], "1. ") {
+		t.Errorf("second batch's first line = %q, want it renumbered starting at 1", judge.batches[1][0])
 	}
 }
 

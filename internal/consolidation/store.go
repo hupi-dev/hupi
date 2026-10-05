@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -191,6 +192,31 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			if err != nil {
 				return fmt.Errorf("insert key fact %d for summary %s: %w", i, id, err)
 			}
+
+			// Mirrored into the unified memories table under the same
+			// deterministic id internal/backfillmemories.memoryIDForKeyFact
+			// derives from a fact's own row id ("mem_fact_<id>", duplicated
+			// here rather than imported — see internal/gateway/attribution.go's
+			// extractJSON for this codebase's established precedent on a
+			// small, single-line helper not justifying a cross-package
+			// dependency). Citation construction (internal/store/retrieve.go)
+			// needs a real RefKindMemory id for every fact it cites, not just
+			// ones an operator has gotten around to backfilling — writing
+			// this alongside summary_key_facts, under the same ciphertext
+			// and key version (no re-encryption: it's the same plaintext,
+			// not new content), keeps that id valid from the moment the
+			// fact exists rather than only after a later batch job runs.
+			// embedding/embedding_model are deliberately left unset here —
+			// nothing queries memories by vector distance for a key fact
+			// today (schema/0025's own doc comment), so embedding it a
+			// second time would be pure cost with no reachable consumer.
+			if _, err := tx.ExecContext(ctx, `
+				insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded, source_episode_ids)
+				values ($1, $2, $3, $4, $5, $6, false, $7, $8::text[])
+			`, "mem_fact_"+strconv.FormatInt(factRowID, 10), in.scope.Kind, in.scope.Owner, id, factCT, keyVersion, grounded[i], pgfmt.TextArray(citeIDs)); err != nil {
+				return fmt.Errorf("mirror key fact %d for summary %s into memories: %w", i, id, err)
+			}
+
 			// Only grounded facts are ever retrieved (loadKeyFacts,
 			// checkCrossPeriodContradictions), so only grounded facts need
 			// an embedding — embedding an ungrounded fact would be pure

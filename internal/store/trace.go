@@ -23,6 +23,7 @@ type Trace struct {
 	RetrievedSummaries []TraceSummary
 	RetrievedEntities  []TraceEntity
 	RetrievedEpisodes  []TraceEpisodeHit
+	RetrievedMemories  []TraceMemory
 }
 
 type TraceEpisode struct {
@@ -48,6 +49,23 @@ type TraceEntity struct {
 	Kind       string
 	Name       string
 	Attributes string
+}
+
+// TraceMemory resolves a RefKindMemory ref (schema/0025) — a per-fact or
+// per-attribute citation, docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's
+// citation model. Exactly one of (EntityID, AttributeKey) or SummaryID
+// is set, mirroring memories' own is_static split: a static row (an
+// entity attribute) has an entity_id and attribute_key and no
+// summary_id; an event row (a key fact) has a summary_id and neither of
+// the other two.
+type TraceMemory struct {
+	Ref          identity.Ref
+	IsStatic     bool
+	EntityID     string
+	AttributeKey string
+	SummaryID    string
+	Content      string
+	Grounded     bool
 }
 
 // TraceEpisodeHit is a *different* episode this turn's vector search
@@ -151,6 +169,12 @@ func (s *Store) Trace(ctx context.Context, scope identity.Scope, episodeID, acto
 				return Trace{}, err
 			}
 			trace.RetrievedEpisodes = append(trace.RetrievedEpisodes, teh)
+		case identity.RefKindMemory:
+			tm, err := s.loadTraceMemory(ctx, ref)
+			if err != nil {
+				return Trace{}, err
+			}
+			trace.RetrievedMemories = append(trace.RetrievedMemories, tm)
 		default:
 			return Trace{}, fmt.Errorf("store: unknown ref kind %q for episode %s", ref.Kind, episodeID)
 		}
@@ -209,6 +233,39 @@ func (s *Store) loadTraceEpisodeHit(ctx context.Context, ref identity.Ref) (Trac
 		return TraceEpisodeHit{}, fmt.Errorf("store: decrypt episode %s output_text: %w", ref.ID, err)
 	}
 	return TraceEpisodeHit{Ref: ref, InputText: input, OutputText: output}, nil
+}
+
+func (s *Store) loadTraceMemory(ctx context.Context, ref identity.Ref) (TraceMemory, error) {
+	var isStatic, grounded bool
+	var entityID, attributeKey, summaryID sql.NullString
+	var contentCT []byte
+	var keyVersion int
+	err := dbscope.Run(ctx, s.db, ref.Scope, ref.Scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select is_static, grounded, entity_id, attribute_key, summary_id, content, key_version
+			from memories where id = $1 and scope_kind = $2 and scope_owner = $3
+		`, ref.ID, ref.Scope.Kind, ref.Scope.Owner).Scan(&isStatic, &grounded, &entityID, &attributeKey, &summaryID, &contentCT, &keyVersion)
+	})
+	if err != nil {
+		return TraceMemory{}, fmt.Errorf("store: load referenced memory %s: %w", ref.ID, err)
+	}
+	enc, err := s.keys.GetVersion(ctx, ref.Scope, keyVersion)
+	if err != nil {
+		return TraceMemory{}, fmt.Errorf("store: resolve encryption key for memory %s: %w", ref.ID, err)
+	}
+	content, err := enc.Decrypt(contentCT)
+	if err != nil {
+		return TraceMemory{}, fmt.Errorf("store: decrypt memory %s: %w", ref.ID, err)
+	}
+	return TraceMemory{
+		Ref:          ref,
+		IsStatic:     isStatic,
+		EntityID:     entityID.String,
+		AttributeKey: attributeKey.String,
+		SummaryID:    summaryID.String,
+		Content:      content,
+		Grounded:     grounded,
+	}, nil
 }
 
 func (s *Store) loadTraceEntity(ctx context.Context, ref identity.Ref) (TraceEntity, error) {

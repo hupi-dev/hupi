@@ -94,6 +94,60 @@ func CurrentForEntities(ctx context.Context, q dbscope.Querier, keys *crypto.Key
 	return out, rows.Err()
 }
 
+// Attribute is one entity's current attribute row: a decrypted value
+// plus the memories.id it lives in. CurrentForEntities' flattened
+// map[string]string has nowhere to carry the row id, which citation
+// construction (internal/store/retrieve.go) needs to build a
+// RefKindMemory Ref — see CurrentWithIDsForEntities below.
+type Attribute struct {
+	ID    string
+	Key   string
+	Value string
+}
+
+// CurrentWithIDsForEntities is CurrentForEntities's citation-construction
+// sibling — identical "current, non-tombstoned" row selection, but
+// keyed by entity id to a slice of Attribute (id + key + value) instead
+// of a flattened map, so a caller building one RefKindMemory citation
+// per attribute has each row's own id to put in Ref.ID.
+func CurrentWithIDsForEntities(ctx context.Context, q dbscope.Querier, keys *crypto.KeyStore, scope identity.Scope, entityIDs []string) (map[string][]Attribute, error) {
+	out := make(map[string][]Attribute, len(entityIDs))
+	if len(entityIDs) == 0 {
+		return out, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+		select m.id, m.entity_id, m.attribute_key, m.content, m.key_version
+		from memories m
+		where m.scope_kind = $1 and m.scope_owner = $2
+		  and m.entity_id = any($3::text[]) and m.is_static = true
+		  and m.attribute_key is not null and m.grounded = true
+		  and not exists (select 1 from memories newer where newer.supersedes = m.id)
+		order by m.entity_id, m.attribute_key
+	`, scope.Kind, scope.Owner, pgfmt.TextArray(entityIDs))
+	if err != nil {
+		return nil, fmt.Errorf("query current attribute rows: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, entityID, key string
+		var ct []byte
+		var keyVersion int
+		if err := rows.Scan(&id, &entityID, &key, &ct, &keyVersion); err != nil {
+			return nil, fmt.Errorf("scan attribute row: %w", err)
+		}
+		enc, err := keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			return nil, fmt.Errorf("resolve encryption key for entity %s attribute %s: %w", entityID, key, err)
+		}
+		plain, err := enc.Decrypt(ct)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt entity %s attribute %s: %w", entityID, key, err)
+		}
+		out[entityID] = append(out[entityID], Attribute{ID: id, Key: key, Value: plain})
+	}
+	return out, rows.Err()
+}
+
 // CurrentRowIDs returns entityID's live attribute rows' own ids, keyed
 // by attribute name — not the decrypted values. The write path
 // (internal/consolidation/store.go's upsertEntities) needs this, not

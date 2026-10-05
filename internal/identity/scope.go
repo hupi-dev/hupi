@@ -28,8 +28,31 @@ var DefaultScope = Scope{Kind: ScopeKindPrivate, Owner: DefaultUserID}
 
 const (
 	RefKindSummary = "summary"
+	// RefKindEntity no longer appears in any gateway.Citation —
+	// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's citation model retired
+	// it from citation-reporting entirely in favor of RefKindMemory, one
+	// per live attribute (an attribute is its own memories row now, not
+	// a single bundled entities.attributes blob a citation could only
+	// point at as a whole). It still appears in RetrievalResult.Refs,
+	// unrelated to citations: internal/store/retrieve.go's
+	// refIDsOfKind reads a plain RefKindEntity ref per matched entity to
+	// seed graphWalkRelationships and to exclude already-matched
+	// entities from later search passes, independent of however many
+	// (or how few — zero, for an entity with no current attributes)
+	// RefKindMemory citations that entity actually produced.
 	RefKindEntity  = "entity"
 	RefKindEpisode = "episode"
+	// RefKindMemory is the fact-level citation type —
+	// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's "Decided: citations
+	// move to fact granularity." ID is a memories.id (schema/0025). It
+	// replaces RefKindEntity entirely for entity-attribute citations
+	// (an attribute is a memories row now, not a bundled entities.attributes
+	// blob) and replaces RefKindSummary's old fact-bundling role — a
+	// summary's key facts are now cited one RefKindMemory per fact, not
+	// folded into a single RefKindSummary citation. RefKindSummary
+	// itself stays for a summary's *prose* paragraph, a separate citation
+	// from any individual fact within it, not replaced by this.
+	RefKindMemory = "memory"
 )
 
 // Ref is a scope-qualified reference to a summary, entity, or episode —

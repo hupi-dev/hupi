@@ -28,13 +28,53 @@ func buildAttributionPrompt(answer string, citations []Citation) string {
 	return sb.String()
 }
 
+// attributionCheckBatchSize caps how many citations go into one
+// attribution call — the identical reasoning
+// internal/consolidation/grounding.go's groundingCheckBatchSize already
+// applies to grounding checks. Citations moved to fact granularity in
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's Phase 0 (one per key fact/
+// attribute, not one per summary/entity), which can turn what used to
+// be a handful of bundled citations per request into several times
+// that many — the same "large count overwhelms one LLM call, discard
+// everything on a count mismatch" failure mode grounding checks were
+// already hardened against, now reachable here too.
+const attributionCheckBatchSize = 20
+
 // attributionCheck asks judge which of citations the given answer
-// actually relies on. judge is typically the same Provider that
+// actually relies on, splitting into attributionCheckBatchSize-sized
+// batches (same pattern as internal/consolidation/grounding.go's
+// groundingCheck) so one oversized request can't degrade every
+// citation's verdict at once — a failure confined to one batch no
+// longer costs the others. judge is typically the same Provider that
 // generated the answer (handleNonStream passes target) — no separate
 // "judge" provider role exists for this, unlike consolidation's
 // grounding check, since this only runs when a caller explicitly asks
 // for deep attribution and reusing the answer model needs no new
 // config.
+func attributionCheck(ctx context.Context, judge provider.Provider, answer string, citations []Citation) ([]bool, error) {
+	if len(citations) == 0 {
+		return nil, nil
+	}
+	if len(citations) > attributionCheckBatchSize {
+		all := make([]bool, 0, len(citations))
+		for start := 0; start < len(citations); start += attributionCheckBatchSize {
+			end := start + attributionCheckBatchSize
+			if end > len(citations) {
+				end = len(citations)
+			}
+			batch, err := attributionCheckOne(ctx, judge, answer, citations[start:end])
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, batch...)
+		}
+		return all, nil
+	}
+	return attributionCheckOne(ctx, judge, answer, citations)
+}
+
+// attributionCheckOne is one LLM call's worth of attributionCheck —
+// never more than attributionCheckBatchSize citations.
 //
 // A verdict this can't parse, or that comes back the wrong length,
 // returns an error rather than silently defaulting every citation to
@@ -50,11 +90,7 @@ func buildAttributionPrompt(answer string, citations []Citation) string {
 // this change just routes the other two failure modes through that
 // same, already-correct path instead of inventing a third, wrong
 // outcome.
-func attributionCheck(ctx context.Context, judge provider.Provider, answer string, citations []Citation) ([]bool, error) {
-	if len(citations) == 0 {
-		return nil, nil
-	}
-
+func attributionCheckOne(ctx context.Context, judge provider.Provider, answer string, citations []Citation) ([]bool, error) {
 	resp, err := judge.ChatCompletion(ctx, provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: attributionSystemPrompt},
