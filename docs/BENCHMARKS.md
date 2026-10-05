@@ -722,3 +722,70 @@ dominated by the same re-ingest noise, not a gate misfire) but isn't a
 substitute for the full run. Recommended next step before raising any
 default or merging this as "done" rather than "narrowly verified."
 
+## 13. Consolidation-time temperature — real, partial fix for Part B's run-to-run non-determinism
+
+Follow-up to §12 and `docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md`'s Part B
+(dated 2026-10-04/05): that plan's own recommended next step, never done
+until now, was reading `conv-42`'s raw LoCoMo source text directly to
+settle whether the two tournaments its prompt-change trial disputed
+(international, 2022-08-21; Valorant final, 2022-11-05) were genuinely
+ambiguous in the source, before attempting any further consolidation
+prompt change.
+
+**They are not ambiguous.** Both are explicit, unhedged wins in the raw
+dialogue ("Woah Joanna, I won an international tournament yesterday!";
+"I was in the final of a big Valorant tournament last Saturday, and I
+won!"), each immediately congratulated by the other speaker. Reading
+every tournament mention across all 29 sessions reconstructs exactly
+seven explicit wins — the gold count is correct and fully
+reconstructable from the source text, contrary to this doc's own prior
+"may not be reliably reconstructable" framing (retracted; see the plan
+doc's own updated Part B section for the full ledger).
+
+**Real contributor found: no consolidation LLM call set `Temperature`.**
+`generateSummary`, `groundingCheckOneAttempt`, `extractPerEpisodeFacts`,
+and the contradiction check all left it nil, falling back to the
+provider's default (1.0) — tuned for creative variety, not a
+faithfulness judgment against a fixed source text. Consistent with three
+different investigation sessions' own from-scratch re-ingests of this
+same unmodified scope landing on three different "tournaments won"
+counts (2, 6, 4) with no prompt change between them — a single-run
+before/after comparison (Part B's first attempt) could never have told a
+real effect apart from this baseline variance.
+
+**Fixed: `consolidationTemperature = 0.0` pinned across all four call
+sites.** Real-infra verified — a full from-scratch re-ingest of `conv-42`
+(not `-answer-only`), checked against the raw-text ledger via
+`hupi-export-memory`, not either run's own say-so:
+
+- 4 of 7 real wins now land as grounded `summary_key_facts` (up from 2 of
+  7 in §12's established baseline) — CS:GO, the Street Fighter win, the
+  "really big" tournament, and the Valorant final (reconfirmed across
+  three separate consolidation passes).
+- The prior run's specific failure — confidently asserting the
+  international tournament as a loss — did not reproduce. It's absent
+  from key_facts this run (a different, smaller gap below) but never
+  misasserted; entity attributes still correctly record
+  `international_tournament_win_date: 2022-08-21`.
+- 3 of 7 wins still don't land as grounded key_facts, but the gap is now
+  specific rather than "the model guesses": one is a clean extraction
+  miss (session 14's "another regional" win, missing from both
+  key_facts and attributes), one is misdated (the "fourth" win's key
+  fact gets attached to the wrong day, correctly rejected by grounding
+  there, while its own day either omits it or once drafted the opposite
+  outcome, also correctly rejected), and one is selective omission (the
+  international tournament's own day keeps only a vague "makes a living
+  from gaming" paraphrase instead of the specific win sentence it
+  paraphrased).
+
+**Shipped on its own merits — a real, verified, low-risk improvement —
+but does not fully close Part B.** The remaining gap (misdating,
+selective omission) is a different, more specific diagnosis than "the
+model doesn't know to extract every occurrence of a repeating event,"
+which is what the reverted prompt sentence targeted. Not re-attempting
+that exact change on this evidence; a future attempt should target
+event-to-day attribution and the paraphrase-vs-specific-fact tradeoff
+directly, and — now that temperature is pinned and repeat trials are
+actually comparable — verify with 2-3 repeat from-scratch re-ingests,
+not one run per side as before.
+

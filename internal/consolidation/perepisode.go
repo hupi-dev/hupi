@@ -111,11 +111,13 @@ func (r *Runner) extractPerEpisodeFacts(ctx context.Context, sources []textSourc
 	var facts []KeyFactOutput
 	for _, s := range sources {
 		for _, chunk := range chunkText(s.text, perEpisodeChunkCharLimit) {
+			temperature := consolidationTemperature
 			req := provider.ChatRequest{
 				Messages: []provider.Message{
 					{Role: provider.RoleSystem, Content: perEpisodeFactPrompt},
 					{Role: provider.RoleUser, Content: chunk},
 				},
+				Temperature: &temperature,
 			}
 			resp, err := r.consolidation.ChatCompletion(ctx, req)
 			if err != nil {

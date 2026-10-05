@@ -188,11 +188,13 @@ func (v groundingVerdicts) resolve(facts []KeyFactOutput) []bool {
 }
 
 func (r *Runner) groundingCheckOneAttempt(ctx context.Context, sourceText string, facts []KeyFactOutput) (groundingVerdicts, error) {
+	temperature := consolidationTemperature
 	resp, err := r.grounding.ChatCompletion(ctx, provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: groundingSystemPrompt},
 			{Role: provider.RoleUser, Content: buildGroundingPrompt(sourceText, facts)},
 		},
+		Temperature: &temperature,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("grounding LLM call: %w", err)
