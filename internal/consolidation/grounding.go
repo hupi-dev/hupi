@@ -11,11 +11,29 @@ import (
 	"hupi/internal/provider"
 )
 
-// groundingSystemPrompt deliberately does not see the model's own citation
-// (source_episode_ids) — only the raw source text and the bare fact
-// strings — so a plausible-looking but unsupported self-citation can't
-// talk its way past the check. See MEMORY_FORMAT.md § Grounding &
-// correction.
+// groundingSystemPrompt does not let the model's own citation
+// (source_episode_ids) substitute for independent verification — a
+// plausible-looking but unsupported self-citation must never talk its
+// way past the check merely by naming a real-sounding id. See
+// MEMORY_FORMAT.md § Grounding & correction.
+//
+// docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md finding 2 extends this:
+// buildGroundingPrompt now shows each fact's own claimed citation (when
+// it has one — only daily-level facts ever do, see storeSummary's own
+// comment on why) alongside the fact text, and this prompt asks the
+// model to specifically re-check that cited source's own labeled text,
+// not just confirm the fact is supported by *something* somewhere in
+// the combined day. This is strictly stricter than before, not a trust
+// shortcut: a fact whose citation is wrong (names a real source that
+// doesn't actually say this) or whose citation is bogus (names an id
+// that doesn't appear among the labeled sources at all) should now be
+// caught even when the same fact happens to be supported by some other,
+// uncited part of the day's text — which the original whole-day check
+// could never distinguish from a correct citation. A fact with no
+// citation shown (empty source_episode_ids, or any rollup-level fact)
+// still gets exactly today's behavior: checked against the full source
+// text as a whole, since there's nothing more specific to check it
+// against.
 //
 // Verdicts are index-tagged ({"i": N, "ok": bool}), not a bare positional
 // boolean array. A live reproduction against the real gpt-4.1 grounding
@@ -27,7 +45,9 @@ import (
 // do. Tagging each verdict with the fact number it judges lets
 // groundingCheckOne realign by index and salvage every fact whose index
 // resolves cleanly instead.
-const groundingSystemPrompt = `You are a fact-checker. You will be given source text and a numbered list of claimed facts. For each fact, in order, decide whether the source text actually, specifically supports it — not just plausible, not just related, but stated. Respond with exactly one JSON object, nothing else: {"grounded": [{"i": 1, "ok": true}, {"i": 2, "ok": false}, ...]} — one entry per fact, "i" matching that fact's number in the list above, "ok" the true/false verdict. Return exactly one entry per fact number, 1 through the last number shown — never merge two fact numbers into one entry, never split one fact number across two entries, never add an entry for a number that wasn't listed.
+const groundingSystemPrompt = `You are a fact-checker. You will be given source text (each block labeled with its own source id) and a numbered list of claimed facts. For each fact, in order, decide whether the source text actually, specifically supports it — not just plausible, not just related, but stated. Respond with exactly one JSON object, nothing else: {"grounded": [{"i": 1, "ok": true}, {"i": 2, "ok": false}, ...]} — one entry per fact, "i" matching that fact's number in the list above, "ok" the true/false verdict. Return exactly one entry per fact number, 1 through the last number shown — never merge two fact numbers into one entry, never split one fact number across two entries, never add an entry for a number that wasn't listed.
+
+Some facts are shown with "(claims source: <id>)" after the fact text — this is that fact's own self-reported citation, not something to trust at face value. When a fact names a citation, specifically re-check it against that exact labeled source block's own text, independently — do not mark it grounded just because the fact is plausible or because some other, uncited source elsewhere happens to support it. Mark it ungrounded if the cited source's own text doesn't actually state it, or if the cited id doesn't correspond to any labeled source block shown above at all. A fact shown with no "(claims source: ...)" annotation has no specific citation to check — for that one, fall back to checking it against the full source text as a whole, the same way as any fact in this file always has.
 
 A source's own labeled date ("(date: YYYY-MM-DD)" after its id, when present) is part of what it states. If a fact gives an absolute date (e.g. "2023-05-07") that is the correct resolution of a relative reference in that labeled source ("yesterday", "last week", etc. relative to that source's own date), treat the date as grounded — the source is stating that day, just not spelling out the calendar date itself. Only mark it ungrounded if the resolution is wrong (the arithmetic doesn't match the source's own date) or the source has no date label to resolve against at all.
 
@@ -37,7 +57,11 @@ func buildGroundingPrompt(sourceText string, facts []KeyFactOutput) string {
 	var sb strings.Builder
 	sb.WriteString("Source text:\n" + sourceText + "\n\nClaimed facts:\n")
 	for i, f := range facts {
-		fmt.Fprintf(&sb, "%d. %s\n", i+1, f.Fact)
+		if len(f.SourceEpisodeIDs) > 0 {
+			fmt.Fprintf(&sb, "%d. %s (claims source: %s)\n", i+1, f.Fact, strings.Join(f.SourceEpisodeIDs, ", "))
+		} else {
+			fmt.Fprintf(&sb, "%d. %s\n", i+1, f.Fact)
+		}
 	}
 	return sb.String()
 }

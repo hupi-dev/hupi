@@ -566,3 +566,103 @@ func TestBuildGroundingPromptIncludesSourceAndNumberedFacts(t *testing.T) {
 		t.Errorf("buildGroundingPrompt() = %q, want numbered facts", prompt)
 	}
 }
+
+// TestBuildGroundingPromptAnnotatesFactsWithTheirOwnCitation is the unit
+// test for docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md finding 2: a
+// fact with a non-empty SourceEpisodeIDs must be shown with its own
+// citation inline, so the grounding model can check it against that
+// specific labeled source block instead of the combined text as a
+// whole; a fact with no citation (the rollup-level case, or any daily
+// fact the model chose not to cite) must render exactly as before.
+func TestBuildGroundingPromptAnnotatesFactsWithTheirOwnCitation(t *testing.T) {
+	prompt := buildGroundingPrompt("the source text", []KeyFactOutput{
+		{Fact: "fact with one citation", SourceEpisodeIDs: []string{"ep_1"}},
+		{Fact: "fact with two citations", SourceEpisodeIDs: []string{"ep_1", "ep_2"}},
+		{Fact: "fact with no citation"},
+	})
+	if !strings.Contains(prompt, "1. fact with one citation (claims source: ep_1)") {
+		t.Errorf("buildGroundingPrompt() = %q, want fact 1 annotated with its own citation", prompt)
+	}
+	if !strings.Contains(prompt, "2. fact with two citations (claims source: ep_1, ep_2)") {
+		t.Errorf("buildGroundingPrompt() = %q, want fact 2 annotated with both its citations", prompt)
+	}
+	if !strings.Contains(prompt, "3. fact with no citation\n") {
+		t.Errorf("buildGroundingPrompt() = %q, want fact 3 rendered exactly as before (no citation annotation)", prompt)
+	}
+}
+
+// TestLiveGroundingCheckCatchesMisattributedCitation is finding 2's own
+// real-infra verification, matching this file's existing
+// TestLiveGroundingCheckReproducesBatchMismatch's real-API, fixture-based
+// style rather than a full conversation replay. Two short synthetic
+// "episodes" in one day: ep_1 states Alice's fact, ep_2 states Bob's
+// fact. One claimed fact falsely cites ep_1 for something only ep_2
+// actually states — the pre-finding-2 prompt could only ever check this
+// against the combined text as a whole, where it's still true somewhere,
+// so it would have passed; this test confirms the cited-source-specific
+// check now catches the misattribution. A second fact genuinely
+// supported by its own correctly-cited source confirms the tightening
+// doesn't produce false negatives on the ordinary case.
+func TestLiveGroundingCheckCatchesMisattributedCitation(t *testing.T) {
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		t.Skip("OPENAI_API_KEY not set; skipping live grounding citation-scope reproduction")
+	}
+
+	real := provider.NewOpenAICompat(provider.OpenAICompatConfig{
+		Name:    "live-gpt41",
+		Vendor:  "openai",
+		Model:   "gpt-4.1",
+		BaseURL: "https://api.openai.com/v1",
+		APIKey:  apiKey,
+	})
+	runner := New(nil, nil, nil, real, nil)
+
+	sourceText := "--- id: ep_1 (date: 2023-06-01) ---\nAlice said she adopted a cat named Whiskers last week.\n\n" +
+		"--- id: ep_2 (date: 2023-06-01) ---\nBob said he ran a marathon in Chicago the same week.\n\n"
+	facts := []KeyFactOutput{
+		{Fact: "Bob ran a marathon in Chicago.", SourceEpisodeIDs: []string{"ep_1"}},                                    // misattributed: true, but not ep_1's content
+		{Fact: "Alice adopted a cat named Whiskers.", SourceEpisodeIDs: []string{"ep_1"}},                               // correctly attributed
+		{Fact: "Bob ran his marathon the same week Alice adopted her cat.", SourceEpisodeIDs: []string{"ep_1", "ep_2"}}, // legitimate cross-source synthesis, correctly cites both
+	}
+
+	resp, err := runner.grounding.ChatCompletion(context.Background(), provider.ChatRequest{
+		Messages: []provider.Message{
+			{Role: provider.RoleSystem, Content: groundingSystemPrompt},
+			{Role: provider.RoleUser, Content: buildGroundingPrompt(sourceText, facts)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	t.Logf("raw response:\n%s", resp.Message.Content)
+
+	var result struct {
+		Grounded []struct {
+			I  int  `json:"i"`
+			OK bool `json:"ok"`
+		} `json:"grounded"`
+	}
+	if err := json.Unmarshal([]byte(extractJSON(resp.Message.Content)), &result); err != nil {
+		t.Fatalf("could not parse response: %v", err)
+	}
+	if len(result.Grounded) != len(facts) {
+		t.Fatalf("sent %d facts, got %d verdicts", len(facts), len(result.Grounded))
+	}
+	for _, v := range result.Grounded {
+		switch v.I {
+		case 1:
+			if v.OK {
+				t.Errorf("fact 1 (misattributed to ep_1, actually ep_2's content) was marked grounded — citation-specific check did not catch it")
+			}
+		case 2:
+			if !v.OK {
+				t.Errorf("fact 2 (correctly attributed to ep_1) was marked ungrounded — citation-specific check produced a false negative")
+			}
+		case 3:
+			if !v.OK {
+				t.Errorf("fact 3 (legitimate synthesis correctly citing both ep_1 and ep_2) was marked ungrounded — the tightening produced the real false-negative risk this test exists to catch")
+			}
+		}
+	}
+}
