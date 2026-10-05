@@ -133,9 +133,17 @@ type wireMessage struct {
 }
 
 type wireChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []wireMessage `json:"messages"`
+	Model       string        `json:"model"`
+	Messages    []wireMessage `json:"messages"`
+	Temperature *float64      `json:"temperature,omitempty"`
 }
+
+// answerTemperature mirrors cmd/hupi-bench's own constant of the same
+// name and reason (docs/BENCHMARKS.md §14) — pins this tool's QA-style
+// answer calls to a low, deterministic temperature instead of silently
+// falling back to the provider's own default (1.0), the same fix PR #112
+// applied to consolidation's extraction/grounding calls.
+const answerTemperature = 0.0
 
 type wireChoice struct {
 	Message wireMessage `json:"message"`
@@ -163,7 +171,8 @@ func sendChatTurn(handler *gateway.Handler, userID, model, systemPrompt, stylePr
 		msgs = append(msgs, wireMessage{Role: "system", Content: stylePrompt})
 	}
 	msgs = append(msgs, wireMessage{Role: "user", Content: content})
-	reqBody, err := json.Marshal(wireChatRequest{Model: model, Messages: msgs})
+	temperature := answerTemperature
+	reqBody, err := json.Marshal(wireChatRequest{Model: model, Messages: msgs, Temperature: &temperature})
 	if err != nil {
 		return "", fmt.Errorf("answer-question: marshal request: %w", err)
 	}
