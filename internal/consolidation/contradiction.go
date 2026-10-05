@@ -323,11 +323,13 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 		return
 	}
 
+	temperature := consolidationTemperature
 	req := provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: contradictionCheckPrompt()},
 			{Role: provider.RoleUser, Content: buildContradictionCheckPrompt(newPeriod, newFacts, old.level, old.period, current.Summary, oldFacts, sharedEntityNames)},
 		},
+		Temperature: &temperature,
 	}
 	resp, err := r.consolidation.ChatCompletion(ctx, req)
 	if err != nil {

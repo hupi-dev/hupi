@@ -1005,6 +1005,42 @@ func (r *Runner) loadSummaries(ctx context.Context, q dbscope.Querier, scope ide
 // ever truncates against this new ceiling too.
 const consolidationMaxTokens = 8192
 
+// consolidationTemperature pins every consolidation-time extraction and
+// verification LLM call (generateSummary, groundingCheckOneAttempt,
+// extractPerEpisodeFacts, checkOneRelatedSummary's contradiction check)
+// to a low, deterministic temperature instead of leaving Temperature nil
+// and silently falling back to the provider's own default — 1.0 for both
+// OpenAI's and Anthropic's chat completion APIs, a value tuned for
+// creative variety, not for "did the source text state X." These calls
+// are all the same kind of task: a faithfulness judgment against a fixed
+// source text, which should get the same answer on the same input, not a
+// stochastic sample.
+//
+// Found this was unset at all while investigating a real run-to-run
+// non-determinism bug (docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md Part B):
+// two independent from-scratch re-ingests of the identical LoCoMo
+// conv-42 conversation, same prompt, same code, read the exact same
+// explicit, unambiguous source sentence ("I won an international
+// tournament yesterday!", session dated 2022-08-22) as a win in one run
+// and a loss in the other — confirmed by reading conv-42's raw source
+// text directly, not either run's own extraction, that the source itself
+// is not ambiguous here. That made the prior Part B prompt-wording
+// experiment's single-run before/after comparison statistically
+// meaningless: with no temperature control, a single baseline run and a
+// single changed-prompt run can't be told apart from two baseline runs
+// against each other, and separate investigation sessions' own
+// unmodified baselines of this same scope independently landed on
+// "tournaments won: 2" and "tournaments won: 6" with no prompt change at
+// all (docs/BENCHMARKS.md §12 and this doc's Part B section).
+//
+// 0.0 is not a literal guarantee of bit-identical output across runs —
+// providers don't commit to deterministic sampling even at temperature
+// 0 (token-level ties, server-side batching jitter, etc. can still
+// differ) — but it removes the one source of variance actually under
+// this codebase's control, and is the right default for an extraction
+// task regardless of whether it fully closes this specific gap.
+const consolidationTemperature = 0.0
+
 // generateSummary picks a scope-appropriate system prompt (team-neutral
 // voice for shared scope, per docs/TIER3_PLAN.md §5, via
 // Runner.TeamPromptOverride) before calling the consolidation LLM.
@@ -1023,12 +1059,14 @@ func (r *Runner) generateSummary(ctx context.Context, scope identity.Scope, leve
 	}
 
 	maxTokens := consolidationMaxTokens
+	temperature := consolidationTemperature
 	req := provider.ChatRequest{
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: systemPrompt},
 			{Role: provider.RoleUser, Content: buildSummaryPrompt(level, period, sources, establishedRecord, knownEntities)},
 		},
-		MaxTokens: &maxTokens,
+		MaxTokens:   &maxTokens,
+		Temperature: &temperature,
 	}
 
 	var lastErr error

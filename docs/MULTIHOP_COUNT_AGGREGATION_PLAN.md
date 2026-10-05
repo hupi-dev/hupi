@@ -224,6 +224,113 @@ reverted. If this is revisited, start by reading the raw conversation
 text for `conv-42` directly to establish real ground truth on these two
 specific tournaments before trying another prompt change.
 
+**Follow-up (this session): raw text read directly — not ambiguous, gold
+of seven is correct. Root cause of the run-to-run disagreement found and
+partly (not fully) fixed.**
+
+Read `bench/data/locomo/data/locomo10.json`'s `conv-42` conversation
+turns directly (not either prior run's extraction) around both disputed
+dates. Neither is ambiguous:
+
+- Session 19 (dated 2022-08-22): "Woah Joanna, I won an international
+  tournament yesterday! It was wild." — Joanna: "Congrats, Nate! So proud
+  of you for winning that tournament." Unambiguous win, dated 2022-08-21.
+- Session 27 (dated 2022-11-07): "I was in the final of a big Valorant
+  tournament last Saturday, and I won! It was the best feeling to see my
+  name as the champion." — Joanna: "Congrats on winning the tournament."
+  Unambiguous win, dated 2022-11-05.
+
+Reading every "tournament" mention across all 29 sessions end to end
+reconstructs exactly **seven** explicit, unambiguous wins (gold is
+correct, fully reconstructable from the raw text, not an unreliable
+annotation): (1) CS:GO, session 1, ~2022-01-14; (2) a local Street
+Fighter tournament explicitly called his "second," session 10,
+~2022-04-25; (3) "another regional" tournament, session 14, ~2022-05-27;
+(4) explicitly his "fourth," session 17, 2022-07-08; (5) the
+international tournament above, 2022-08-21; (6) a "really big" tournament
+he made significant money from, session 22, ~2022-09-29; (7) the Valorant
+final above, 2022-11-05. A separate, genuine non-win — "didn't make it to
+the finals," session 28, 2022-11-09 — is textually distinct from the
+Valorant win two days earlier and was never confused with it in any run
+traced this session.
+
+**Verdict: the prior run's "read the international tournament as a
+loss" was a real extraction hallucination, not a defensible alternative
+reading of ambiguous text.** This retracts this doc's own earlier
+"the gold count of seven may not be reliably reconstructable" framing —
+that framing was built on trusting two runs' own extractions against
+each other, never the source itself; reading the source resolves it.
+
+**A real, previously-unexamined mechanical contributor: no consolidation
+LLM call anywhere set `Temperature`.** `generateSummary`
+(`runner.go`), `groundingCheckOneAttempt` (`grounding.go`),
+`extractPerEpisodeFacts` (`perepisode.go`), and
+`checkOneRelatedSummary`'s contradiction check (`contradiction.go`) all
+left `provider.ChatRequest.Temperature` nil, falling back to the
+provider's own default (1.0 for both OpenAI's and Anthropic's chat
+APIs) — tuned for creative variety, not for "did the source text state
+X." This is consistent with, and likely a real contributor to, the
+non-determinism this doc already documented: three different
+investigation sessions' own from-scratch re-ingests of this identical,
+unmodified `conv-42` scope landed on three different "tournaments won"
+counts (2, this doc's Part B section's "6," and this follow-up's own
+"4," below) with no prompt change between them.
+
+**Fixed (shipped this round): pinned `consolidationTemperature = 0.0`
+across all four call sites above.** Real-infra verification, same
+discipline as Part A — a full from-scratch re-ingest of `conv-42` (not
+`-answer-only`) with the fix applied, checked against the real raw-text
+ledger above via `hupi-export-memory`:
+
+- **4 of 7 real wins now land as grounded `summary_key_facts`** — CS:GO,
+  the Street Fighter win (worded as "another regional... tournament,"
+  correctly dated 2022-05-02), the "really big" tournament (correctly
+  dated 2022-10-06), and the Valorant final (correctly dated and
+  reconfirmed across three separate consolidation passes, 2022-10-21/
+  11-04/11-07) — up from 2 of 7 in the established baseline mechanism
+  check (`docs/BENCHMARKS.md` §12).
+- **The specific prior failure mode — confidently asserting the wrong
+  outcome — did not reproduce.** The international tournament is not
+  asserted as a loss anywhere in this run; it's absent from key_facts
+  entirely (see gap below) but entity attributes still correctly record
+  `international_tournament_win_date: 2022-08-21`, and no key_fact
+  anywhere in the scope claims Nate lost it.
+- **3 of 7 real wins still don't land as grounded key_facts — a
+  different, more specific gap than "the model doesn't know to extract
+  every occurrence."** Two distinct, concrete bugs, not non-determinism:
+  - *Misdating*: the "fourth" win (2022-07-08, session 17) gets drafted
+    as a key_fact attached to the wrong day (2022-06-03, session 14's
+    day, which never mentions it) — correctly rejected by the grounding
+    check since that day's source doesn't support it — while session
+    17's own day either omits the event or (once, in this run)
+    hallucinates the opposite outcome ("experienced a setback... did not
+    do well"), which the grounding check also correctly rejects. Net:
+    the real win is never recorded as a key_fact, but it's also never
+    wrongly asserted as a loss — the grounding safety net is working,
+    the upstream drafting isn't.
+  - *Selective omission*: the international tournament's own day
+    (2022-08-22) never attempts a key_fact naming the event at all —
+    its key_facts for that day include a vague paraphrase ("Nate is able
+    to make a living from gaming and is passionate about it") that drops
+    the concrete, checkable "won an international tournament yesterday"
+    sentence it was paraphrasing. The June "another regional" win
+    (session 14) is missing from both key_facts and entity attributes in
+    this run — a clean miss, not a misattribution.
+
+**Recommendation: do not re-attempt the reverted "each occurrence must
+get its own key_fact" prompt sentence yet.** That wording targets "the
+model doesn't realize a repeating event needs its own fact" — but the
+gap this follow-up found is different and more specific: event-to-day
+misattribution, and a paraphrase silently standing in for a specific
+fact within the correct day. A future attempt should target those two
+mechanisms directly (why does a drafted fact sometimes cite the wrong
+day's sources, and why does `generateSummary` sometimes keep only the
+vaguer of two candidate phrasings for the same sentence), and now that
+`consolidationTemperature = 0.0` makes repeat trials of the same scope
+actually comparable to each other, verify with at least 2-3 repeat
+from-scratch re-ingests before shipping, not a single run on each side
+of the change as Part B's first attempt did.
+
 ## Explicitly not recommended
 
 **Building a structured list/counter-valued entity-attribute mechanism**
