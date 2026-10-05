@@ -1740,3 +1740,94 @@ func TestRunDaily_BackfillsMissingEntityEmbeddings(t *testing.T) {
 		t.Error("pre-existing entity project:legacy still has no embedding after RunDaily — the backfill should have caught it")
 	}
 }
+
+// TestRunRollup_ThreadsKnownEntitiesIntoPrompt is the real regression
+// test for docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md finding 3:
+// RunRollup used to call generateSummary with knownEntities always nil
+// ("Phase C sub-problem 1 is scoped to raw daily episode text for now"),
+// so a rollup regenerating its own entities_touched/attributes straight
+// from its source summaries' prose had no visibility into what a
+// touched entity's existing attributes already are — the same
+// key-fragmentation risk (preapproval_amount vs. pre_approved_amount)
+// RunDaily's own findKnownEntities call already prevents at the daily
+// level. Asserts on prompt *content* via capturedRequests (the same
+// established pattern used elsewhere in this file to check
+// established-record threading) rather than relying on a real LLM's
+// judgment, which this session repeatedly found to be non-deterministic
+// for exactly this kind of attribute-naming decision.
+func TestRunRollup_ThreadsKnownEntitiesIntoPrompt(t *testing.T) {
+	consolidationJSON := `{
+		"summary": "Rolled up the week.",
+		"key_facts": [],
+		"entities_touched": []
+	}`
+	groundingJSON := `{"grounded": []}`
+	var captured []provider.ChatRequest
+	runner, db := testRunner(t, consolidationJSON, groundingJSON)
+	runner.consolidation = fakeConsolidationProvider{response: consolidationJSON, capturedRequests: &captured}
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-rollup-known-entities"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	enc, keyVersion, err := runner.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+
+	// A pre-existing entity whose name appears in the rollup's own
+	// source summary text below — findKnownEntities' substring match is
+	// what's supposed to pick this up now.
+	attrsCT, err := enc.Encrypt(`{"preapproval_amount":"$400,000"}`)
+	if err != nil {
+		t.Fatalf("encrypt entity attrs: %v", err)
+	}
+	dailyText := "Jolene mentioned her mortgage pre-approval again this week."
+	dailyCT, err := enc.Encrypt(dailyText)
+	if err != nil {
+		t.Fatalf("encrypt daily summary text: %v", err)
+	}
+
+	sourcePeriods := []string{"2026-09-07", "2026-09-08"}
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`
+			insert into entities (id, kind, name, attributes, scope_kind, scope_owner, key_version)
+			values ('person:jolene', 'person', 'Jolene', $1, $2, $3, $4)
+		`, attrsCT, scope.Kind, scope.Owner, keyVersion); err != nil {
+			return err
+		}
+		for _, p := range sourcePeriods {
+			if _, err := tx.ExecContext(ctx, `
+				insert into summaries (id, period, level, summary, scope_kind, scope_owner, key_version)
+				values ($1, $2, 'daily', $3, $4, $5, $6)
+			`, "sum_test_"+p, p, dailyCT, scope.Kind, scope.Owner, keyVersion); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed entity and daily summaries: %v", err)
+	}
+
+	if err := runner.RunRollup(ctx, scope, "weekly", "daily", "2026-W37", sourcePeriods); err != nil {
+		t.Fatalf("RunRollup: %v", err)
+	}
+
+	if len(captured) != 1 {
+		t.Fatalf("got %d captured consolidation requests, want exactly 1", len(captured))
+	}
+	prompt := captured[0].Messages[len(captured[0].Messages)-1].Content
+	if !strings.Contains(prompt, "KNOWN ENTITIES") {
+		t.Errorf("rollup prompt = %q, want it to include a KNOWN ENTITIES section now that findKnownEntities runs for rollups too", prompt)
+	}
+	if !strings.Contains(prompt, "Jolene") || !strings.Contains(prompt, "preapproval_amount") {
+		t.Errorf("rollup prompt = %q, want it to include Jolene's existing preapproval_amount attribute", prompt)
+	}
+}

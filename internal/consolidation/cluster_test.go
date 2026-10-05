@@ -4,7 +4,10 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 )
 
 // clusterIDs collects the ids from one cluster in source order, for
@@ -102,6 +105,7 @@ func TestClusterSourcesRespectsMaxClustersPerDay(t *testing.T) {
 		vectors[i] = v
 	}
 
+	before := testutil.ToFloat64(metrics.ConsolidationClusterMergesTotal)
 	clusters := clusterSources(sources, vectors)
 	if len(clusters) > maxClustersPerDay() {
 		t.Fatalf("clusterSources() produced %d clusters, want at most %d (maxClustersPerDay)", len(clusters), maxClustersPerDay())
@@ -113,6 +117,14 @@ func TestClusterSourcesRespectsMaxClustersPerDay(t *testing.T) {
 	}
 	if total != n {
 		t.Errorf("clusterSources() merged clusters lost sources: got %d total, want %d", total, n)
+	}
+
+	// docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md finding 4: 10
+	// orthogonal sources into a cap of 6 forces exactly 4 merge events
+	// (10 clusters -> 6), each one real dilution risk worth counting.
+	wantMerges := n - maxClustersPerDay()
+	if got := testutil.ToFloat64(metrics.ConsolidationClusterMergesTotal) - before; got != float64(wantMerges) {
+		t.Errorf("ConsolidationClusterMergesTotal increased by %v, want %d", got, wantMerges)
 	}
 }
 
