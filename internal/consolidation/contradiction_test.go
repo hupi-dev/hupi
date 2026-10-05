@@ -45,6 +45,7 @@ func TestFindRelatedSummaries_MatchesSharedEntityExcludesOthers(t *testing.T) {
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -116,6 +117,7 @@ func TestFindRelatedSummaries_PrefersSpecificSharedEntityOverHub(t *testing.T) {
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -193,6 +195,7 @@ func TestFindRelatedSummaries_ExcludesSupersededIncludesCorrection(t *testing.T)
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from summary_key_facts where summary_id in (select id from summaries where scope_kind = $1 and scope_owner = $2)`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -281,6 +284,7 @@ func TestCheckCrossPeriodContradictions_AppliesCorrection(t *testing.T) {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from summary_key_facts where summary_id in (select id from summaries where scope_kind = $1 and scope_owner = $2)`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -392,6 +396,7 @@ func TestCheckCrossPeriodContradictions_AppliesRedundancyRemoval(t *testing.T) {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from summary_key_facts where summary_id in (select id from summaries where scope_kind = $1 and scope_owner = $2)`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -480,6 +485,7 @@ func TestCheckCrossPeriodContradictions_EmptyResponseLeavesBothFactsIntact(t *te
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from summary_key_facts where summary_id in (select id from summaries where scope_kind = $1 and scope_owner = $2)`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})

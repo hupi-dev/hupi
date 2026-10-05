@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/identity"
 )
 
@@ -42,7 +43,7 @@ type knownEntityContext struct {
 // own established pattern.
 func (r *Runner) findKnownEntities(ctx context.Context, q dbscope.Querier, scope identity.Scope, combinedSourceText string) ([]knownEntityContext, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, name, attributes, key_version from entities
+		select id, name from entities
 		where kind != 'self_model' and scope_kind = $1 and scope_owner = $2
 	`, scope.Kind, scope.Owner)
 	if err != nil {
@@ -51,37 +52,38 @@ func (r *Runner) findKnownEntities(ctx context.Context, q dbscope.Querier, scope
 	defer rows.Close()
 
 	lowerText := strings.ToLower(combinedSourceText)
-	var out []knownEntityContext
+	var matchedIDs []string
+	entryByID := map[string]*knownEntityContext{}
 	for rows.Next() {
 		var id, name string
-		var attrsCT []byte
-		var keyVersion int
-		if err := rows.Scan(&id, &name, &attrsCT, &keyVersion); err != nil {
+		if err := rows.Scan(&id, &name); err != nil {
 			return nil, err
 		}
 		if name == "" || !strings.Contains(lowerText, strings.ToLower(name)) {
 			continue
 		}
-
-		entry := knownEntityContext{id: id, name: name}
-		if len(attrsCT) > 0 {
-			enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
-			if err != nil {
-				return nil, fmt.Errorf("resolve encryption key for entity %s: %w", id, err)
-			}
-			attrsJSON, err := enc.Decrypt(attrsCT)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt attributes for entity %s: %w", id, err)
-			}
-			if attrsJSON != "" {
-				if err := json.Unmarshal([]byte(attrsJSON), &entry.attributes); err != nil {
-					return nil, fmt.Errorf("parse attributes for entity %s: %w", id, err)
-				}
-			}
-		}
-		out = append(out, entry)
+		matchedIDs = append(matchedIDs, id)
+		entryByID[id] = &knownEntityContext{id: id, name: name}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Attributes are decrypted only for entities that actually matched
+	// (matchedIDs), not the whole scope — bounding real decrypt cost to
+	// genuine candidates, same as before this read moved to the unified
+	// memories table.
+	attrsByID, err := entityattrs.CurrentForEntities(ctx, q, r.keys, scope, matchedIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load current attributes for known entities: %w", err)
+	}
+	out := make([]knownEntityContext, 0, len(matchedIDs))
+	for _, id := range matchedIDs {
+		entry := entryByID[id]
+		entry.attributes = attrsByID[id]
+		out = append(out, *entry)
+	}
+	return out, nil
 }
 
 // formatKnownEntities renders knownEntityContext entries for

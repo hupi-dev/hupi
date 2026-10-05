@@ -11,6 +11,7 @@ import (
 	"hupi/internal/audit"
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/identity"
 	"hupi/internal/pgfmt"
 )
@@ -308,13 +309,26 @@ func loadKeyFacts(ctx context.Context, q dbscope.Querier, keys *crypto.KeyStore,
 func exportEntities(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scope identity.Scope, dir string, m *ScopeManifest) error {
 	return dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-			select id, kind, name, first_seen, last_updated, attributes, key_version
+			select id, kind, name, first_seen, last_updated
 			from entities where scope_kind = $1 and scope_owner = $2 order by id
 		`, scope.Kind, scope.Owner)
 		if err != nil {
 			return fmt.Errorf("hpmf: query entities: %w", err)
 		}
-		defer rows.Close()
+		var records []EntityRecord
+		for rows.Next() {
+			var r EntityRecord
+			if err := rows.Scan(&r.ID, &r.Kind, &r.Name, &r.FirstSeen, &r.LastUpdated); err != nil {
+				rows.Close()
+				return fmt.Errorf("hpmf: scan entity: %w", err)
+			}
+			records = append(records, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
 
 		w, err := newJSONLWriter(filepath.Join(dir, "entities.jsonl"))
 		if err != nil {
@@ -322,30 +336,31 @@ func exportEntities(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scop
 		}
 		defer w.Close()
 
-		for rows.Next() {
-			var r EntityRecord
-			var attrsCT []byte
-			var keyVersion int
-			if err := rows.Scan(&r.ID, &r.Kind, &r.Name, &r.FirstSeen, &r.LastUpdated, &attrsCT, &keyVersion); err != nil {
-				return fmt.Errorf("hpmf: scan entity: %w", err)
-			}
-			enc, err := keys.GetVersion(ctx, scope, keyVersion)
+		// Attributes are read from the unified memories table
+		// (entityattrs.Current), not entities.attributes — queried one
+		// entity at a time, after the entities rows cursor above is fully
+		// closed, same two-pass convention internal/backfillmemories
+		// already uses for the identical reason (issuing a second query
+		// on the same tx while the first rows set is still open isn't
+		// safe to rely on).
+		for _, r := range records {
+			attrs, err := entityattrs.Current(ctx, tx, keys, scope, r.ID)
 			if err != nil {
-				return fmt.Errorf("hpmf: resolve encryption key for entity %s: %w", r.ID, err)
+				return fmt.Errorf("hpmf: load current attributes for entity %s: %w", r.ID, err)
 			}
-			attrs, err := enc.Decrypt(attrsCT)
-			if err != nil {
-				return fmt.Errorf("hpmf: decrypt entity %s attributes: %w", r.ID, err)
-			}
-			if attrs != "" {
-				r.Attributes = json.RawMessage(attrs)
+			if len(attrs) > 0 {
+				attrsJSON, err := json.Marshal(attrs)
+				if err != nil {
+					return fmt.Errorf("hpmf: marshal entity %s attributes: %w", r.ID, err)
+				}
+				r.Attributes = attrsJSON
 			}
 			if err := w.Write(r); err != nil {
 				return err
 			}
 			m.EntityCount++
 		}
-		return rows.Err()
+		return nil
 	})
 }
 
