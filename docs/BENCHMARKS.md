@@ -953,3 +953,60 @@ folding into §15: it changes how much weight any *future* category-level
 LoCoMo delta in this repo deserves, not just this one investigation's
 own numbers.
 
+## 17. Consolidation attribute/key_fact boundary — real partial fix, then the actual mechanism traced and fixed
+
+Follow-up to `docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md` finding 1
+(the review requested after §§14-16's investigations kept surfacing the
+same consolidation subsystem from different angles).
+
+**First pass (PR #119)**: `summarySystemPrompt` didn't tell the model
+that a repeating/countable event (a tournament win, a trip) must always
+be recorded as a `key_fact`, never a newly-invented attribute key — a
+real traced case (`docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md`) had
+produced exactly that: an entity attribute
+(`fourth_video_game_tournament_win_date`) with zero `key_facts` backing
+it anywhere in storage. Added the missing instruction; verified via a
+fresh re-ingest of `conv-42` that the model stopped inventing the
+per-occurrence attribute key. **But the same re-ingest still produced an
+attribute with no matching key_fact** — the naming bug was fixed, the
+underlying symptom wasn't. Shipped as a real, honestly-documented
+partial fix rather than iterated further on an unverified guess at the
+time.
+
+**Second pass, asked to find the real cause (PR #120)**: direct
+decrypted queries against a live re-ingested `conv-42` scope — the full
+supersession chain, every version's prose and key_facts across the
+whole run, not a sample — showed this was never an extraction gap at
+all. `person:nate`'s attribute recording a specific tournament win
+survived untouched; the `key_fact` that used to back it ("Nate won an
+international gaming tournament on 2022-08-21") was deleted by
+`checkOneRelatedSummary`'s cross-period contradiction check, which
+wrongly treated an unrelated later recollection — "Nate participated in
+a video game tournament recently and did not do well," recounted in a
+conversation about something else entirely — as a contradiction
+overwriting the win. Two distinct real occurrences of a repeating event
+type (one win, one separately-recounted loss) got merged into one vague
+fact, and the win was deleted.
+
+The codebase already had the correct guard language for exactly this
+("a repeating TYPE of event... happening again is a new, distinct
+occurrence, not a restatement") but it only existed in the paragraph
+gated behind `HUPI_ENABLE_REDUNDANCY_DEDUP` — off by default, and not
+changed by this fix — leaving the always-on contradiction-check path
+with no equivalent protection. Promoted an adapted version of that
+guard into the always-on prompt, anchored to the real traced fact pair.
+
+**Verified by live A/B against real gpt-4.1**, using the exact real fact
+lists and prose decrypted from the re-ingest (an earlier, simplified
+two-fact version of this test did not reproduce the failure — only the
+full real context did, which is why the test keeps every fact rather
+than trimming to "just the relevant ones"): the original prompt
+reproduces the failure (reports the false contradiction, would delete
+the win fact); the fixed prompt does not
+(`{"contradictions": [], "corrected_prose": ""}`). An earlier, less
+precise hypothesis for this same residual (two different *roles* at the
+same named event, rather than two distinct *occurrences* of a repeating
+event type) was tried first and found, via the same kind of isolated
+live A/B test, not to discriminate — ruled out before this more precise
+diagnosis was reached.
+

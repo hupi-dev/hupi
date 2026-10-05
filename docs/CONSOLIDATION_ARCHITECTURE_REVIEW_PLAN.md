@@ -88,6 +88,51 @@ assert into one bucket versus another, the opposite direction of risk.
   land as `key_facts`. One conversation, one re-ingest, no benchmark
   scoring involved.
 
+**Verified: real, but partial** (PR #119, `docs/BENCHMARKS.md` §17). The
+prompt fix stops the model from inventing a new per-occurrence attribute
+key — confirmed via a fresh re-ingest of `conv-42`. But the same
+re-ingest's `person:nate` still ended up with one entity attribute
+(`fourth_video_game_tournament_win_date` or its equivalent for that
+run) with **no matching `key_facts` row** — the literal naming bug was
+fixed, but the underlying "attribute survives, its backing key_fact
+doesn't" symptom wasn't, so this was shipped as a real but incomplete
+fix rather than over-iterated on unverified guesses at the time.
+
+**Follow-up — the actual mechanism, traced precisely (PR #120)**: asked
+to go back and find the real cause of that residual symptom. Direct
+decrypted queries against a live re-ingested `conv-42` scope (full
+supersession chain, every version's prose and key_facts, not a sample)
+showed the orphaned attribute was never an extraction-completeness gap
+at all: `person:nate`'s entity attribute recording a specific tournament
+win survived untouched (attributes aren't rewritten by this path), but
+the `key_fact` that used to back it — "Nate won an international gaming
+tournament on 2022-08-21" — was deleted by
+`checkOneRelatedSummary`'s cross-period contradiction check. That check
+was given, as a later "new" fact from an unrelated conversation, "Nate
+participated in a video game tournament recently and did not do well" —
+a separately-recounted, genuinely different tournament occasion — and
+wrongly treated it as a contradiction overwriting the win, rewriting the
+day's prose to a vague merged narrative in the process.
+
+The codebase already had the right guard language for exactly this
+shape ("a repeating TYPE of event... happening again is a new, distinct
+occurrence, not a restatement"), but it only existed in the paragraph
+gated behind `HUPI_ENABLE_REDUNDANCY_DEDUP` (off by default — this flag
+itself was not touched or enabled). `contradiction.go`'s always-on base
+prompt had no equivalent protection. Fixed by promoting an adapted
+version of that guard into the always-on prompt, anchored to the real
+traced fact pair above rather than a guessed one. Verified with a live
+A/B against gpt-4.1 using the exact real fact lists and prose decrypted
+from the re-ingest: the original prompt reproduces the failure (reports
+the false contradiction, would delete the win fact); the fixed prompt
+does not (`{"contradictions": [], "corrected_prose": ""}`). An earlier,
+less precise hypothesis for this same residual (two different *roles*
+at the same named event, rather than two distinct *occurrences* of a
+repeating event type) was tried first and found, via the same kind of
+isolated live A/B test, not to discriminate — i.e. it wasn't the real
+mechanism — before this more precise, real-data-traced diagnosis was
+reached.
+
 ## Finding 2: grounding checks a fact against the whole day, not its own cited source
 
 **Problem, grounded in direct reading**: `groundingCheck`
