@@ -351,6 +351,9 @@ func (r *Runner) checkCrossPeriodContradictions(ctx context.Context, scope ident
 
 	for _, old := range related {
 		r.checkOneRelatedSummary(ctx, scope, newSummaryID, newPeriod, newFacts, old, entitiesTouched)
+		if extendsDetectionEnabled() {
+			r.checkOneRelatedSummaryForExtends(ctx, scope, newSummaryID, old, newFacts)
+		}
 	}
 }
 

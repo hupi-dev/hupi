@@ -505,8 +505,8 @@ level improvement that hasn't been measured, same discipline as Phase
 1's own "not yet done" live-prompt-check note before credentials became
 available.
 
-### Phase 5 — `extends` classification (deferred from Phase 3, needs
-dedicated prompt engineering)
+### Phase 5 — `extends` classification (deferred from Phase 3, shipped
+via dedicated prompt engineering)
 
 **Why split out, not shipped with Phase 3**: Phase 3 shipped `updates`
 only — recording the *already-verified* contradiction/replacement
@@ -541,38 +541,64 @@ classifier needs its own dedicated, separately-tuned prompt (and likely
 its own LLM call, not appended to the skeptical contradiction-check
 call) — real scope, not a quick addition.
 
-**Scope**: design and live-test a standalone `extends`-detection prompt,
-independent of `contradictionCheckPrompt`'s existing skeptical framing
-— starting from first principles (what does the model reliably
-recognize as "a follow-up development" without the contradiction-check
-task's own framing pulling it toward non-reporting), not by continuing
-to bolt onto the existing prompt. Once a prompt reliably fires on a
-battery of real, traced extends-shaped cases (mirroring this session's
-`updates` verification: genuine positives, unrelated negatives, and the
-repeating-event near-miss), wire `memory_relations` population
-(`relation_type = 'extends'`) the same way `recordUpdateRelations`
-already does for `updates`, and extend `loadMemoryRelations`'s existing
-query (already selects any `relation_type`, no code change needed there)
-to surface it through `Citation.Relations`.
+**Shipped as a from-scratch standalone call — `checkExtends`
+(`extends.go`)**: a wholly separate system prompt
+(`extendsCheckPrompt`), with no `contradictionCheckPrompt` framing at
+all — "Your only job: decide whether the NEW fact is a specific,
+concrete follow-up development of one of the EXISTING facts... without
+changing or contradicting what the EXISTING fact itself states," two
+worked positive examples (marathon training -> a specific training run;
+learning guitar -> a specific practice session), and explicit negative
+guidance covering the three already-known false-positive shapes
+(value-change contradictions, repeating distinct event occurrences,
+and merely-same-topic facts). Live-verified, real GPT-4.1, before being
+wired into production code, against a 7-case battery: both worked
+positive examples fired correctly; a genuine value-change, an unrelated
+fact pair, and the PR #120 repeating-tournament shape all correctly
+reported nothing; one EXISTING fact with two different NEW facts both
+developing it correctly produced two separate pairs. The first
+iteration of this prompt had one real false positive, found by a
+deliberately adversarial case not in the original battery (a vague "I
+love running and find it relaxing" NEW fact against the marathon
+EXISTING fact) — the prompt's own "concrete step" language wasn't yet
+explicit that a vague restatement of general interest in the same topic
+doesn't qualify; adding one more explicit negative worked example fixed
+it on the next pass with no regression to the positives, confirmed by
+re-running the full battery, not just the failing case.
+
+Runs as an independent second opinion alongside `checkOneRelatedSummary`
+in `checkCrossPeriodContradictions`'s existing per-related-summary loop
+— same `newFacts`/`oldFacts` already loaded for the contradiction
+check, reused rather than re-queried, gated by its own
+`HUPI_ENABLE_EXTENDS_DETECTION` toggle (off by default, same posture as
+`inferenceExtractionEnabled`: this writes new `memory_relations` rows,
+even though unlike `updates`/inference it never mutates a fact's own
+text). Unlike `updates`, there is no `Correct` call at all — both facts
+already exist exactly as stored, so a genuine pair is just a graph edge,
+written by `recordExtendsRelations` the same text-join way
+`recordUpdateRelations` already does for `updates` (`from` = the NEW
+fact's own `memories` row, `to` = the EXISTING fact it develops).
+`loadMemoryRelations`'s existing query needed no changes to surface
+this through `Citation.Relations` — it already selects any
+`relation_type`, exactly as anticipated below.
 
 **Complexity: Medium**, concentrated entirely in prompt design and live
-verification — the plumbing (`memory_relations` table, citation
-rendering) already exists from Phase 3's `updates` work and needs no
-changes to carry `extends` once a prompt actually produces one.
+verification, confirmed in practice — the plumbing (`memory_relations`
+table, citation rendering, the text-join relation-recording pattern)
+already existed from Phase 3's `updates` work and needed no changes to
+carry `extends` once a prompt actually produced one.
 
 **Risk**: same shape Phase 3's own section already flagged — a looser
-classifier has more surface area to misfire than a narrow binary one.
-The two failed attempts above lean the risk toward false negatives
-(never firing) rather than false positives (misclassifying), which is
-the safer failure direction, but a from-scratch prompt removes that
-accidental safety net too, so the full verification battery (not just
-the cases a new prompt was written to pass) still applies.
+classifier has more surface area to misfire than a narrow binary one,
+and the from-scratch prompt did produce exactly one real false positive
+during verification (see above), caught by deliberately testing beyond
+the cases the prompt was written to pass, not just by trusting a clean
+first run.
 
-**Verification**: same live-prompt-battery discipline as the two
-attempts above — construct cases from actually-observed real
-consolidation output, not synthetic ones, before considering any
-redesigned prompt done; full from-scratch re-ingest only after the
-targeted live checks pass.
+**Not yet done**: same caveat as Phase 4's own — this is verified at the
+unit/integration level (real Postgres, an expanded real-LLM battery) but
+a full re-ingest, noise-floor-aware category-level comparison has not
+been run.
 
 ## Dependency graph (why this order, restated plainly)
 
