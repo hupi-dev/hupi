@@ -1820,9 +1820,10 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 // rather than mixing two incomparable scales (see rankKeyFacts' own doc
 // comment).
 type keyFact struct {
-	id         int64
-	text       string
-	similarity sql.NullFloat64
+	id          int64
+	text        string
+	similarity  sql.NullFloat64
+	sourceCount int
 }
 
 // loadKeyFacts loads a summary's grounded, not-yet-expired facts along
@@ -1847,7 +1848,7 @@ type keyFact struct {
 // "Citation impact: none" note for this phase).
 func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryVector string, embeddingModel string, now time.Time) ([]keyFact, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, fact,
+		select id, fact, source_count,
 		       case when embedding is not null and embedding_model = $3
 		            then 1 - (embedding <=> $2::vector) end as similarity
 		from summary_key_facts
@@ -1864,15 +1865,16 @@ func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc 
 	for rows.Next() {
 		var id int64
 		var factCT []byte
+		var sourceCount int
 		var similarity sql.NullFloat64
-		if err := rows.Scan(&id, &factCT, &similarity); err != nil {
+		if err := rows.Scan(&id, &factCT, &sourceCount, &similarity); err != nil {
 			return nil, err
 		}
 		fact, err := enc.Decrypt(factCT)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
 		}
-		facts = append(facts, keyFact{id: id, text: fact, similarity: similarity})
+		facts = append(facts, keyFact{id: id, text: fact, similarity: similarity, sourceCount: sourceCount})
 	}
 	return facts, rows.Err()
 }
@@ -1987,6 +1989,19 @@ func rankKeyFacts(facts []keyFact, queryTerms []string) (order []int, bestIdx in
 	texts := keyFactTexts(facts)
 	lexOrder := rankFactsByRelevance(texts, queryTerms)
 	lexBest := mostRelevantFactIndex(texts, queryTerms)
+	// source_count (Phase 2 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md)
+	// only ever breaks an exact lexical tie, never overrides a real
+	// relevance difference — same "secondary signal, not primary"
+	// lesson this function's own doc comment already learned the hard
+	// way from semantic ranking's first, reverted attempt. Guarded on
+	// queryTerms being non-empty: with no query terms, factScores would
+	// score every fact 0, which breakTiesBySourceCount would see as one
+	// all-tied group and resort entirely by source_count — overriding
+	// rankFactsByRelevance's own documented "no query terms -> original
+	// insertion order" contract, not just tie-breaking within it.
+	if len(queryTerms) > 0 {
+		lexOrder = breakTiesBySourceCount(lexOrder, factScores(texts, queryTerms), facts)
+	}
 
 	if !semanticFactRankingEnabled() || len(facts) == 0 {
 		return lexOrder, lexBest
@@ -2024,12 +2039,42 @@ func rankKeyFacts(facts []keyFact, queryTerms []string) (order []int, bestIdx in
 	// Stable on ties, same as rankFactsByRelevance — falls through to
 	// original insertion order rather than an arbitrary one.
 	sort.SliceStable(order, func(a, b int) bool { return fused[order[a]] > fused[order[b]] })
+	order = breakTiesBySourceCount(order, fused, facts)
 
 	best := -1
 	if len(order) >= 2 && fused[order[0]]-fused[order[1]] >= factMarkerFusedMargin {
 		best = order[0]
 	}
 	return order, best
+}
+
+// breakTiesBySourceCount re-sorts order's exact-score tie groups by
+// descending source_count — Phase 2 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: a fact reinforced across
+// several separate mentions ranks above an equally-scored one mentioned
+// only once, but this never promotes a lower-scored fact over a
+// higher-scored one — only entries already judged exactly equal by the
+// primary score get reordered, preserving every ranking decision the
+// primary score already made. order and scores must be the same
+// ordering/indexing pair rankFactsByRelevance's or rankKeyFacts' own
+// sort already produced (scores indexed by the original facts slice
+// position, same as factScores/fused).
+func breakTiesBySourceCount(order []int, scores []float64, facts []keyFact) []int {
+	result := append([]int{}, order...)
+	for start := 0; start < len(result); {
+		end := start + 1
+		for end < len(result) && scores[result[end]] == scores[result[start]] {
+			end++
+		}
+		if end-start > 1 {
+			group := result[start:end]
+			sort.SliceStable(group, func(a, b int) bool {
+				return facts[group[a]].sourceCount > facts[group[b]].sourceCount
+			})
+		}
+		start = end
+	}
+	return result
 }
 
 // writeKeyFacts is appendKeyFacts' original writing half — one bullet

@@ -194,13 +194,24 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			if expiresAt != nil && kf.ExpireReason != "" {
 				expireReason = kf.ExpireReason
 			}
+			// Phase 2 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: every
+			// ordinary, freshly-extracted fact (the consolidation LLM
+			// never sets KeyFactOutput.SourceCount itself) gets the
+			// schema's own default of 1, not a literal Go zero value —
+			// only contradiction.go's redundant-handling branch (via a
+			// dump-template-and-resubmit Correct cycle) ever sets this
+			// above 1.
+			sourceCount := kf.SourceCount
+			if sourceCount <= 0 {
+				sourceCount = 1
+			}
 
 			var factRowID int64
 			err = tx.QueryRowContext(ctx, `
-				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner, expires_at, expire_reason)
-				values ($1, $2, $3::text[], $4, $5, $6, $7, $8::date, $9)
+				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner, expires_at, expire_reason, source_count)
+				values ($1, $2, $3::text[], $4, $5, $6, $7, $8::date, $9, $10)
 				returning id
-			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner, expiresAt, expireReason).Scan(&factRowID)
+			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner, expiresAt, expireReason, sourceCount).Scan(&factRowID)
 			if err != nil {
 				return fmt.Errorf("insert key fact %d for summary %s: %w", i, id, err)
 			}
@@ -223,9 +234,9 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			// today (schema/0025's own doc comment), so embedding it a
 			// second time would be pure cost with no reachable consumer.
 			if _, err := tx.ExecContext(ctx, `
-				insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded, source_episode_ids, expires_at, expire_reason)
-				values ($1, $2, $3, $4, $5, $6, false, $7, $8::text[], $9::date, $10)
-			`, "mem_fact_"+strconv.FormatInt(factRowID, 10), in.scope.Kind, in.scope.Owner, id, factCT, keyVersion, grounded[i], pgfmt.TextArray(citeIDs), expiresAt, expireReason); err != nil {
+				insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded, source_episode_ids, expires_at, expire_reason, source_count)
+				values ($1, $2, $3, $4, $5, $6, false, $7, $8::text[], $9::date, $10, $11)
+			`, "mem_fact_"+strconv.FormatInt(factRowID, 10), in.scope.Kind, in.scope.Owner, id, factCT, keyVersion, grounded[i], pgfmt.TextArray(citeIDs), expiresAt, expireReason, sourceCount); err != nil {
 				return fmt.Errorf("mirror key fact %d for summary %s into memories: %w", i, id, err)
 			}
 

@@ -567,6 +567,42 @@ func TestRankKeyFacts_MixedEmbeddingStateFallsBackToLexical(t *testing.T) {
 	}
 }
 
+// TestRankKeyFacts_SourceCountBreaksExactLexicalTie is Phase 2 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: two facts sharing identical
+// query vocabulary (an exact factScores tie, same as the real
+// NFL-playoffs-vs-climate-change tie rankKeyFacts' own doc comment
+// describes) must resolve in favor of the one reinforced across more
+// separate mentions, not whichever happened to be extracted first.
+func TestRankKeyFacts_SourceCountBreaksExactLexicalTie(t *testing.T) {
+	facts := []keyFact{
+		{text: "Melanie went to the beach once.", sourceCount: 1},
+		{text: "Melanie went to the beach many times.", sourceCount: 5},
+	}
+	queryTerms := []string{"melanie", "beach"}
+	order, _ := rankKeyFacts(facts, queryTerms)
+	if order[0] != 1 {
+		t.Errorf("rankKeyFacts() order = %v, want index 1 (source_count=5) ranked first over an exactly-tied lexical score", order)
+	}
+}
+
+// TestRankKeyFacts_SourceCountNeverOverridesARealRelevanceDifference
+// confirms source_count only ever breaks an *exact* tie — the same
+// "secondary signal, not primary" lesson rankKeyFacts' own doc comment
+// already learned from semantic ranking's first, reverted attempt. A
+// fact genuinely more relevant to the query must still win even against
+// a much higher source_count on a less relevant fact.
+func TestRankKeyFacts_SourceCountNeverOverridesARealRelevanceDifference(t *testing.T) {
+	facts := []keyFact{
+		{text: "Melanie collects stamps.", sourceCount: 50},
+		{text: "Melanie went camping at the beach in the mountains.", sourceCount: 1},
+	}
+	queryTerms := []string{"melanie", "camping", "beach", "mountains"}
+	order, _ := rankKeyFacts(facts, queryTerms)
+	if order[0] != 1 {
+		t.Errorf("rankKeyFacts() order = %v, want index 1 (the clearly more relevant fact) ranked first despite its much lower source_count", order)
+	}
+}
+
 // TestRankKeyFacts_KillSwitchForcesLexical confirms
 // HUPI_ENABLE_SEMANTIC_FACT_RANKING=false reproduces the pre-embedding
 // behavior exactly, even when every fact has a real similarity score —
