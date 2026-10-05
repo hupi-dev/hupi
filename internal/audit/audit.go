@@ -36,6 +36,10 @@ const (
 	// see cmd/hupi-dashboard/queries.go's securityPosture, which this
 	// gives a real signal to show.
 	EventDashboardLogin = "dashboard_login"
+	// EventBackfillMemories was added in schema/0026 — see
+	// internal/backfillmemories, Phase 0 of
+	// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md.
+	EventBackfillMemories = "backfill_memories"
 )
 
 // Entry is one audit_log row. ActingScope/WorkspaceScope follow the same
