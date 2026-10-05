@@ -38,9 +38,25 @@ type wireMessage struct {
 }
 
 type wireChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []wireMessage `json:"messages"`
+	Model       string        `json:"model"`
+	Messages    []wireMessage `json:"messages"`
+	Temperature *float64      `json:"temperature,omitempty"`
 }
+
+// answerTemperature pins QA-phase answer calls to a low, deterministic
+// temperature instead of leaving it unset and silently falling back to
+// the provider's own default (1.0) — the same fix PR #112 applied to
+// consolidation's extraction/grounding calls, for the same reason: a
+// real noise-floor measurement (docs/BENCHMARKS.md §14) found that
+// re-running this benchmark against *identical* code and consolidated
+// data moved category-level scores by several percentage points purely
+// from re-sampling, large enough to swamp any real signal from an
+// actual code change. Scoped to the QA-answering calls specifically
+// (answerQuestions, runBaselineConversation) — not session replay
+// (replayConversation), which generates a simulated conversational
+// reply, not a faithfulness judgment, so the creative-variety default
+// is the more appropriate one there.
+const answerTemperature = 0.0
 
 type wireChoice struct {
 	Message wireMessage `json:"message"`
@@ -72,15 +88,16 @@ type wireChatResponse struct {
 // (replayConversation), which should capture normally — that's
 // simulating the real conversation history this benchmark measures
 // recall against, not a diagnostic call.
-func sendChatTurn(handler *gateway.Handler, userID, model, systemPrompt, content string, skipCapture bool) (string, error) {
+func sendChatTurn(handler *gateway.Handler, userID, model, systemPrompt, content string, skipCapture bool, temperature *float64) (string, error) {
 	msgs := []wireMessage{}
 	if systemPrompt != "" {
 		msgs = append(msgs, wireMessage{Role: "system", Content: systemPrompt})
 	}
 	msgs = append(msgs, wireMessage{Role: "user", Content: content})
 	reqBody, err := json.Marshal(wireChatRequest{
-		Model:    model,
-		Messages: msgs,
+		Model:       model,
+		Messages:    msgs,
+		Temperature: temperature,
 	})
 	if err != nil {
 		return "", fmt.Errorf("bench: marshal request: %w", err)
@@ -139,7 +156,7 @@ func replayConversation(handler *gateway.Handler, userID, answerModel string, co
 		if content == "" {
 			continue
 		}
-		if _, err := sendChatTurn(handler, userID, answerModel, "", content, false); err != nil {
+		if _, err := sendChatTurn(handler, userID, answerModel, "", content, false, nil); err != nil {
 			return nil, fmt.Errorf("bench: replay session %d of %s: %w", i+1, conv.id, err)
 		}
 		day := sess.date.Truncate(24 * time.Hour)
@@ -210,7 +227,8 @@ func runBaselineConversation(handler *gateway.Handler, userID, answerModel strin
 		content := fmt.Sprintf("%s\n\nQuestion: %s", fullTranscript, qa.question)
 		var context string
 		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
-		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), content, true)
+		temperature := answerTemperature
+		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), content, true, &temperature)
 		if aerr != nil {
 			// Log and continue rather than aborting the whole
 			// conversation: a single transient failure (rate limit,
@@ -250,7 +268,8 @@ func answerQuestions(handler *gateway.Handler, userID, answerModel string, conv 
 		handler.Now = func() time.Time { return qt }
 		var context string
 		handler.OnRetrieve = func(r gateway.RetrievalResult) { context = r.ContextMessage }
-		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), qa.question, true)
+		temperature := answerTemperature
+		answer, aerr := sendChatTurn(handler, userID, answerModel, answerPromptFor(qa), qa.question, true, &temperature)
 		if aerr != nil {
 			// Log and continue rather than aborting the whole
 			// conversation — see runBaselineConversation's identical
