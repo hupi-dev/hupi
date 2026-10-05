@@ -1037,3 +1037,45 @@ event type) was tried first and found, via the same kind of isolated
 live A/B test, not to discriminate — ruled out before this more precise
 diagnosis was reached.
 
+## 19. Full 10-conversation re-ingest with every fix from this session stacked (not yet noise-floor-controlled)
+
+A genuine from-scratch wipe + replay + consolidate + answer pass across
+all 10 LoCoMo conversations, real GPT-4.1, against code with every fix
+from §§9-18 stacked together — including the just-added contradiction-
+check guard (§18/PR #120) and PR #119's attribute/key_fact boundary
+clarification, both of which hadn't been through a full rescore before
+this, per the earlier decision to verify each targeted rather than
+re-running the whole pipeline per finding.
+
+| Category | Questions | Accuracy |
+|---|---|---|
+| 1 — multi-hop | 282 | 0.473 |
+| 2 — temporal | 321 | 0.572 |
+| 3 — open-domain | 96 | 0.342 |
+| 4 — single-hop | 841 | 0.629 |
+| 5 — adversarial | 446 | 0.758 |
+| **Overall** | **2,186** | **0.613** |
+
+**Read this as one data point, not a confirmed delta.** This is a
+single run, not a noise-floor-paired pair of runs — §13's own finding
+(a fresh re-ingest's fact extraction is non-deterministic run to run)
+still applies in principle, even though §14/§16's temperature pins
+measurably shrank that noise ~3-4x. Compared to §13's last full-category
+table (overall 0.601; cat 1 0.482, cat 2 0.549, cat 3 0.336, cat 4
+0.600, cat 5 0.774) — itself already flagged as confounded — every
+category except 5 (adversarial) moved in the favorable direction, with
+cat 4 (single-hop) and overall the largest moves. Adversarial (cat 5)
+moved backward, 0.774 → 0.758, which given the established noise floor
+is not distinguishable from re-sampling noise on its own; nothing in
+this session's changes specifically targeted adversarial behavior in a
+way that would predict a regression there, so the honest read is
+"unexplained small movement within noise," not a regression to chase.
+
+Prediction/log artifacts: `bench/results/locomo_full10_final_predictions.json`,
+`bench/results/locomo_full10_final_stats.json`,
+`bench/results/locomo_full10_final.log` (plus `_part1`/`_part2` for the
+two earlier segments before the background process was resumed twice
+after hitting its own time limit — the run itself was never restarted
+from scratch; `cmd/hupi-bench`'s own `-out-file` resume mechanism
+picked up cleanly each time, skipping already-completed conversations).
+
