@@ -953,31 +953,58 @@ folding into §15: it changes how much weight any *future* category-level
 LoCoMo delta in this repo deserves, not just this one investigation's
 own numbers.
 
-## 17. Consolidation attribute/key_fact boundary — real partial fix, then the actual mechanism traced and fixed
+## 17. Consolidation architecture review: entity-attribute/key-fact boundary — real, partial fix
 
-Follow-up to `docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md` finding 1
-(the review requested after §§14-16's investigations kept surfacing the
-same consolidation subsystem from different angles).
+A full read-through of `internal/consolidation` (see
+`docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md`) found the real
+split worth making is by *output responsibility* (prose vs. key-facts
+vs. entity-attributes vs. relationships), not by input modality — every
+concrete consolidation failure this session traced back to a specific
+cause was a task-boundary confusion, never a text-vs-image-vs-question
+confusion.
 
-**First pass (PR #119)**: `summarySystemPrompt` didn't tell the model
-that a repeating/countable event (a tournament win, a trip) must always
-be recorded as a `key_fact`, never a newly-invented attribute key — a
-real traced case (`docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md`) had
-produced exactly that: an entity attribute
-(`fourth_video_game_tournament_win_date`) with zero `key_facts` backing
-it anywhere in storage. Added the missing instruction; verified via a
-fresh re-ingest of `conv-42` that the model stopped inventing the
-per-occurrence attribute key. **But the same re-ingest still produced an
-attribute with no matching key_fact** — the naming bug was fixed, the
-underlying symptom wasn't. Shipped as a real, honestly-documented
-partial fix rather than iterated further on an unverified guess at the
-time.
+The clearest of the plan's four findings: `summarySystemPrompt` never
+told the model attributes are the wrong place for a repeating/countable
+event — confirmed, via `conv-42`'s own real data, to produce an
+attribute (`fourth_video_game_tournament_win_date`) with zero
+corresponding `key_facts` row anywhere in storage. Added one sentence
+stating attributes are for stable, singular facts only, and a
+repeating/countable event must always be its own `key_fact`.
 
-**Second pass, asked to find the real cause (PR #120)**: direct
-decrypted queries against a live re-ingested `conv-42` scope — the full
-supersession chain, every version's prose and key_facts across the
-whole run, not a sample — showed this was never an extraction gap at
-all. `person:nate`'s attribute recording a specific tournament win
+**Verified real, but partial.** A fresh from-scratch re-ingest of the
+same `conv-42` scope confirmed the exact original pattern (an
+ordinal-prefixed attribute key) did not reproduce — but a decrypted
+read of `person:nate`'s attributes found two different tournament-win
+attributes (`won_international_tournament_date`,
+`won_major_gaming_tournament_week_before_2022_10_06`) still had zero
+`key_facts` backing, just under non-ordinal key names this time. The
+new sentence changed the bug's surface form without fully closing the
+underlying behavior. Not re-tightening the wording further this round
+— the open-domain inference-guard work (§15) already showed what
+repeated re-tightening against one observed case can cost without a
+wider control. Shipped as a real, partial, honestly-reported
+improvement, same posture as PR #112's own "does not fully close Part
+B" conclusion.
+
+The other three findings from the same review — grounding scoped to a
+fact's own cited episode, rollups threaded with the known-entities
+supersession context daily consolidation already has, and a visibility
+metric for clustering's cluster-count cap — are documented in full in
+`docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md` itself (PRs #116-118,
+merged).
+
+## 18. Finding 1 follow-up — the actual mechanism traced and fixed (PR #120)
+
+§17's partial fix left a residual: two tournament-win attributes
+(`won_international_tournament_date`,
+`won_major_gaming_tournament_week_before_2022_10_06`) with no matching
+`key_facts` row. Asked to go back and find the real cause rather than
+re-tighten the prompt wording again.
+
+Direct decrypted queries against a live re-ingested `conv-42` scope —
+the full supersession chain, every version's prose and key_facts across
+the whole run, not a sample — showed this was never an extraction gap
+at all. `person:nate`'s attribute recording a specific tournament win
 survived untouched; the `key_fact` that used to back it ("Nate won an
 international gaming tournament on 2022-08-21") was deleted by
 `checkOneRelatedSummary`'s cross-period contradiction check, which
