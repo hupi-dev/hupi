@@ -648,3 +648,77 @@ trials per conversation to average out re-ingest non-determinism —
 bigger than fits this round. If revisited, that's the next step before
 trying the more expensive option (real vision captioning instead of
 LoCoMo's own generic BLIP-1 captions).
+
+## 12. Multi-hop counting — exhaustive key_fact fetch for a resolved entity
+
+`docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md`'s Attempt 2, finally built:
+`looksLikeCountingRequest` (a narrow "how many" detector, carving out
+`looksLikeOrderingRequest`'s existing elapsed-time phrasings) gates a new
+`exhaustiveKeyFactsForEntity` fetch — every grounded, daily-level,
+current `summary_key_facts` row mentioning a stage-1-resolved entity's
+name, decrypted and substring-filtered (no SQL-level filter possible on
+encrypted text), deduplicated by exact text, presented as its own
+numbered list rather than folded into prose. Only fires when the
+question is counting-shaped *and* stage 1 resolves to exactly one named
+entity — narrower than Attempt 1 (§8), which fired on the phrase alone
+and regressed the adversarial category by pulling in a wrong person's
+details for a question that merely shared the words "how many."
+
+**Restricted to `level = 'daily'`** after realizing an unrestricted
+scope-wide scan has its own double-counting bug: a weekly/monthly/yearly
+rollup regenerates its own prose *and* its own key_facts from its daily
+sources' text (`Runner.RunRollup -> generateSummary`), independently
+re-extracting the same real occurrence as a brand-new row rather than
+referencing the daily one it came from. Confirmed directly (not assumed)
+with a real-Postgres integration test seeding a daily fact and a
+"rollup" fact describing the same event: an unrestricted query returns
+both; restricted to daily, only the real one does. Four more integration
+tests cover grounded-only, superseded-summary exclusion, and exact-text
+dedup — `internal/store/counting_retrieve_test.go`.
+
+**Real-infra verification, both at the mechanism level and at the
+benchmark level**, per the plan's own stated bar:
+
+- *Mechanism*: queried the already-consolidated `conv-42` scope
+  (`person:nate`) directly — `exhaustiveKeyFactsForEntity` returns
+  exactly what's actually stored (2 clear tournament wins — CS:GO,
+  Street Fighter — plus 2 explicit non-wins, nothing duplicated across
+  levels, nothing missed within what's grounded). This confirms the
+  retrieval mechanism itself is correct; it does not by itself close the
+  gap to the gold counts (9 participated, 7 won), because — as root-caused
+  earlier in this same doc — not every real occurrence in this
+  conversation ever got key-facted in the first place. That's
+  `docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md`'s separate Part B
+  (consolidation-side completeness), already attempted once this session
+  and reverted after a real-ingest check found a confound (the gold
+  count's own reconstructability from the raw conversation text is
+  itself in question) — out of scope for this round.
+- *Benchmark*: a full from-scratch re-ingest + answer pass of `conv-42`
+  with the feature on, compared question-by-question against the
+  existing pre-feature baseline. The 13 "how many" questions in this one
+  conversation show real, substantive movement in the right direction on
+  several (Joanna's letter count: "One letter" -> "2 letters" [two dated
+  letters, textually exact], gold "Two"; Nate's tournaments participated:
+  "4" -> "At least 8", gold "nine"; tournaments won: "2" -> "5", gold
+  "seven") — note several of these still score 0 under `score_locomo.py`
+  on a digit-vs-word mismatch ("2" vs "Two"), a pre-existing scoring
+  limitation unrelated to this change, not a sign the content is wrong.
+  The two adversarial-sensitive "gaming party hosted by Joanna [actually
+  Nate]" questions both still correctly abstain/attribute, confirming
+  this gate is narrow enough not to reproduce Attempt 1's regression.
+  Category 1 (multi-hop) overall: 0.344 -> 0.368 mean F1; the
+  non-counting subset of the same category moved by a similar amount
+  (0.416 -> 0.447) from this same fresh re-ingest's own non-determinism
+  (the same confound the LoCoMo image-caption fix's own verification
+  ran into, on a separate branch), so the category-wide number alone
+  isn't strong evidence — the counting-specific, question-by-question
+  substance is.
+
+**Not yet done**: the plan's own final step, a full 10-conversation
+re-run confirming no regression on the other four categories at scale.
+The single-conversation, non-counting-subset control above is reassuring
+(moved in the same direction and magnitude as the counting subset, i.e.
+dominated by the same re-ingest noise, not a gate misfire) but isn't a
+substitute for the full run. Recommended next step before raising any
+default or merging this as "done" rather than "narrowly verified."
+
