@@ -843,7 +843,7 @@ directly, and — now that temperature is pinned and repeat trials are
 actually comparable — verify with 2-3 repeat from-scratch re-ingests,
 not one run per side as before.
 
-## 14. Open-domain (category 3) inference-guard extension — real case-level fix, noisy at category scale
+## 15. Open-domain (category 3) inference-guard extension — real case-level fix, noisy at category scale
 
 Traced all 33 traceable zero-score category-3 (open-domain) misses from
 a fresh full 10-conversation run to their actual retrieved context, not
@@ -914,4 +914,42 @@ Joanna have based on her allergies?" went from `"Allergic rhinitis or
 animal dander allergy"` (F1 0.00) to `"asthma"` (F1 1.00). That causal
 link doesn't depend on the aggregate category number and isn't
 undermined by the noise-floor finding above. Shipped on that basis.
+
+## 16. QA-answer-phase temperature pin — noise floor reduced ~3-4x, confirmed by direct measurement
+
+§15's noise-floor finding pointed at one remaining unpinned call: the
+QA-answer-phase LLM call itself (`cmd/hupi-bench`'s `sendChatTurn`, and
+`cmd/hupi-answer-question`'s own duplicate) — PR #112 had only pinned
+consolidation's extraction/grounding calls. Pinned
+`Temperature: 0.0` there too, scoped to the QA-answering calls
+specifically (`answerQuestions`, `runBaselineConversation`) — not
+session replay, which generates a simulated conversational reply, not a
+faithfulness judgment.
+
+**Verified by direct measurement, not assumption**: ran the full
+10-conversation benchmark twice, back to back, identical code and
+already-consolidated data, before and after this fix, and measured
+per-question F1 disagreement between the two runs directly (the
+aggregate category score alone can hide canceling flips, as §13/§15
+already found the hard way):
+
+| Category | Unpinned disagreement | Pinned disagreement | Reduction |
+|---|---|---|---|
+| 1 — multi-hop | 40.4% | 11.7% | ~3.5x |
+| 2 — temporal | 16.8% | 5.3% | ~3.2x |
+| 3 — open-domain | 39.6% | 11.5% | ~3.4x |
+| 4 — single-hop | 33.9% | 8.7% | ~3.9x |
+| 5 — adversarial | 7.2% | 1.8% | ~4x |
+
+Residual noise isn't zero — temperature 0 isn't a literal bit-for-bit
+determinism guarantee for most providers (prediction *wording* still
+differed on roughly a quarter to a third of questions per category even
+post-fix, just rarely enough to flip the F1 score) — but this is a
+real, substantial, consistent reduction across every category. Future
+benchmark comparisons in this repo are now meaningfully more
+trustworthy than every comparison made earlier in this session, which
+is the main reason this is worth having as its own entry rather than
+folding into §15: it changes how much weight any *future* category-level
+LoCoMo delta in this repo deserves, not just this one investigation's
+own numbers.
 
