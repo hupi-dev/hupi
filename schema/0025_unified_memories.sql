@@ -31,14 +31,11 @@
 -- deliberately wasn't scope-qualified the way entities.id was), so no
 -- composite key is needed here either.
 --
--- Not yet wired into internal/rotate/rotate.go's tableOrder
--- (currently ["episodes", "summaries", "entities"], with
--- summary_key_facts handled implicitly alongside summaries) —
--- deliberately deferred, since this table is empty until the backfill
--- tool and application code (later Phase 0 PRs) actually write to it.
--- Must be added before memories carries real data, or a key rotation
--- will silently skip this table entirely while still reporting success
--- for the other four.
+-- Wired into internal/rotate/rotate.go's tableOrder (migrateMemoriesBatch)
+-- once application code (internal/consolidation/store.go's
+-- upsertEntities, internal/hpmf/import.go) actually started writing real
+-- attribute/fact content here — see that package's own tableOrder
+-- comment.
 --
 -- embedding/embedding_model mirror schema/0021's addition to
 -- summary_key_facts verbatim, including deliberately omitting an ANN

@@ -9,6 +9,7 @@ import (
 
 	"hupi/internal/audit"
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/identity"
 )
 
@@ -212,24 +213,24 @@ func (s *Store) loadTraceEpisodeHit(ctx context.Context, ref identity.Ref) (Trac
 
 func (s *Store) loadTraceEntity(ctx context.Context, ref identity.Ref) (TraceEntity, error) {
 	var kind, name string
-	var attrsCT []byte
-	var keyVersion int
+	var attrs map[string]string
 	err := dbscope.Run(ctx, s.db, ref.Scope, ref.Scope, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			select kind, name, attributes, key_version from entities
+		if err := tx.QueryRowContext(ctx, `
+			select kind, name from entities
 			where id = $1 and scope_kind = $2 and scope_owner = $3
-		`, ref.ID, ref.Scope.Kind, ref.Scope.Owner).Scan(&kind, &name, &attrsCT, &keyVersion)
+		`, ref.ID, ref.Scope.Kind, ref.Scope.Owner).Scan(&kind, &name); err != nil {
+			return err
+		}
+		var err error
+		attrs, err = entityattrs.Current(ctx, tx, s.keys, ref.Scope, ref.ID)
+		return err
 	})
 	if err != nil {
 		return TraceEntity{}, fmt.Errorf("store: load referenced entity %s: %w", ref.ID, err)
 	}
-	enc, err := s.keys.GetVersion(ctx, ref.Scope, keyVersion)
+	attrsJSON, err := json.Marshal(attrs)
 	if err != nil {
-		return TraceEntity{}, fmt.Errorf("store: resolve encryption key for entity %s: %w", ref.ID, err)
+		return TraceEntity{}, fmt.Errorf("store: marshal entity %s attributes: %w", ref.ID, err)
 	}
-	attrs, err := enc.Decrypt(attrsCT)
-	if err != nil {
-		return TraceEntity{}, fmt.Errorf("store: decrypt entity %s attributes: %w", ref.ID, err)
-	}
-	return TraceEntity{Ref: ref, Kind: kind, Name: name, Attributes: attrs}, nil
+	return TraceEntity{Ref: ref, Kind: kind, Name: name, Attributes: string(attrsJSON)}, nil
 }

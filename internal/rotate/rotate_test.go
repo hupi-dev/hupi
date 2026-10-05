@@ -36,6 +36,7 @@ func cleanup(t *testing.T, db *sql.DB, scope identity.Scope) {
 	_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 		tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+		tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		return nil
 	})
@@ -90,16 +91,32 @@ func seed(t *testing.T, ctx context.Context, db *sql.DB, keys *crypto.KeyStore, 
 			t.Fatalf("seed summary %s: %v", suffix, err)
 		}
 
-		attrsCT, _ := enc.Encrypt(`{"tag":"` + suffix + `"}`)
 		err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `
-				insert into entities (id, kind, name, attributes, scope_kind, scope_owner)
-				values ($1, 'project', $2, $3, $4, $5)
-			`, "project:"+suffix, "Project "+suffix, attrsCT, scope.Kind, scope.Owner)
+				insert into entities (id, kind, name, scope_kind, scope_owner)
+				values ($1, 'project', $2, $3, $4)
+			`, "project:"+suffix, "Project "+suffix, scope.Kind, scope.Owner)
 			return err
 		})
 		if err != nil {
 			t.Fatalf("seed entity %s: %v", suffix, err)
+		}
+
+		// A real, post-cutover attribute row — same shape
+		// internal/consolidation/store.go's upsertEntities writes, so this
+		// exercises migrateMemoriesBatch (the fourth tableOrder stop) the
+		// same way the other three seeded rows exercise their own table's
+		// migrate*Batch.
+		tagCT, _ := enc.Encrypt(suffix)
+		err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `
+				insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, is_static, grounded)
+				values ($1, $2, $3, $4, 'tag', $5, true, true)
+			`, "mem_"+suffix, scope.Kind, scope.Owner, "project:"+suffix, tagCT)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("seed memory %s: %v", suffix, err)
 		}
 	}
 }
@@ -170,8 +187,8 @@ func TestRotate_ContinueCoercesNonPositiveBatchSizeInsteadOfStalling(t *testing.
 	}
 
 	total := runToCompletion(t, ctx, r, scope, 0)
-	if total != 3 { // 1 episode + 1 summary + 1 entity
-		t.Errorf("migrated %d rows with batchSize=0, want 3 (coerced to 1 per call, not silently skipped)", total)
+	if total != 4 { // 1 episode + 1 summary + 1 entity + 1 memory
+		t.Errorf("migrated %d rows with batchSize=0, want 4 (coerced to 1 per call, not silently skipped)", total)
 	}
 }
 
@@ -193,8 +210,8 @@ func TestRotate_FullLifecycle(t *testing.T) {
 	}
 
 	total := runToCompletion(t, ctx, r, scope, 1) // batch size 1 forces many small batches
-	if total != 9 {                               // 3 episodes + 3 summaries + 3 entities
-		t.Errorf("migrated %d rows, want 9", total)
+	if total != 12 {                              // 3 episodes + 3 summaries + 3 entities + 3 memories
+		t.Errorf("migrated %d rows, want 12", total)
 	}
 
 	st, ok, err := r.Status(ctx, scope)
@@ -213,6 +230,7 @@ func TestRotate_FullLifecycle(t *testing.T) {
 	assertAllOnVersion(t, ctx, db, scope, "episodes", 2)
 	assertAllOnVersion(t, ctx, db, scope, "summaries", 2)
 	assertAllOnVersion(t, ctx, db, scope, "entities", 2)
+	assertAllOnVersion(t, ctx, db, scope, "memories", 2)
 
 	toEnc, err := keys.GetVersion(ctx, scope, toVersion)
 	if err != nil {
@@ -285,12 +303,13 @@ func TestRotate_ResumesAfterInterruption(t *testing.T) {
 	// what a restarted process would actually have) resumes correctly.
 	r2 := New(db, crypto.NewKeyStore(db, make([]byte, 32)))
 	total := processed + runToCompletion(t, ctx, r2, scope, 1)
-	if total != 9 {
-		t.Errorf("total migrated across both runners = %d, want 9 (no row skipped or double-processed)", total)
+	if total != 12 {
+		t.Errorf("total migrated across both runners = %d, want 12 (no row skipped or double-processed)", total)
 	}
 	assertAllOnVersion(t, ctx, db, scope, "episodes", 2)
 	assertAllOnVersion(t, ctx, db, scope, "summaries", 2)
 	assertAllOnVersion(t, ctx, db, scope, "entities", 2)
+	assertAllOnVersion(t, ctx, db, scope, "memories", 2)
 }
 
 // TestRotate_ConcurrentWriteLandsOnNewVersion is the "no downtime"
@@ -335,8 +354,8 @@ func TestRotate_ConcurrentWriteLandsOnNewVersion(t *testing.T) {
 	}
 
 	total := runToCompletion(t, ctx, r, scope, 2)
-	if total != 6 { // 2 episodes + 2 summaries + 2 entities from seed — NOT the concurrent write
-		t.Errorf("migrated %d rows, want exactly 6 (the concurrent write should never be touched by the batch job)", total)
+	if total != 8 { // 2 episodes + 2 summaries + 2 entities + 2 memories from seed — NOT the concurrent write
+		t.Errorf("migrated %d rows, want exactly 8 (the concurrent write should never be touched by the batch job)", total)
 	}
 
 	var keyVersion int

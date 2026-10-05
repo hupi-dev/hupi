@@ -471,6 +471,7 @@ migration_probe() {
     0025_unified_memories.sql)         echo "select (to_regclass('public.memories') is not null)" ;;
     0026_backfill_memories_audit_event.sql) echo "select (select pg_get_constraintdef(oid) from pg_constraint where conname = 'audit_log_event_type_check') like '%backfill_memories%'" ;;
     0027_memories_attribute_versioning.sql) echo "select exists(select 1 from information_schema.columns where table_name='memories' and column_name='attribute_key')" ;;
+    0028_key_rotations_memories_cursor.sql) echo "select (select pg_get_constraintdef(oid) from pg_constraint where conname = 'key_rotations_cursor_table_check') like '%memories%'" ;;
     *) die "no idempotency probe defined for migration $1 (add one to migration_probe)" ;;
   esac
 }
@@ -497,7 +498,8 @@ apply_all_migrations() {
            0017_summaries_supersedes_unique.sql 0018_summary_key_facts_rls.sql 0019_entity_relationships_valid_date_order.sql \
            0020_audit_log_target_ref_index.sql 0021_summary_key_facts_embeddings.sql 0022_scope_corpus_size.sql \
            0023_dashboard_sessions.sql 0024_summary_key_facts_embedding_index.sql 0025_unified_memories.sql \
-           0026_backfill_memories_audit_event.sql 0027_memories_attribute_versioning.sql; do
+           0026_backfill_memories_audit_event.sql 0027_memories_attribute_versioning.sql \
+           0028_key_rotations_memories_cursor.sql; do
     apply_migration "$f"
   done
 }
