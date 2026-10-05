@@ -185,11 +185,12 @@ func TestContinue_BackfillsAttributesIntoSeparateMemoriesRows(t *testing.T) {
 		isStatic, isInference, grounded bool
 		sourceCount, keyVersion         int
 		summaryID                       sql.NullString
+		attributeKey                    sql.NullString
 	}
 	var memRows []memRow
 	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-			select content, is_static, is_inference, source_count, grounded, summary_id, key_version
+			select content, is_static, is_inference, source_count, grounded, summary_id, key_version, attribute_key
 			from memories where scope_kind = $1 and scope_owner = $2 and entity_id = 'person:bob'
 			order by id
 		`, scope.Kind, scope.Owner)
@@ -199,7 +200,7 @@ func TestContinue_BackfillsAttributesIntoSeparateMemoriesRows(t *testing.T) {
 		defer rows.Close()
 		for rows.Next() {
 			var mr memRow
-			if err := rows.Scan(&mr.ct, &mr.isStatic, &mr.isInference, &mr.sourceCount, &mr.grounded, &mr.summaryID, &mr.keyVersion); err != nil {
+			if err := rows.Scan(&mr.ct, &mr.isStatic, &mr.isInference, &mr.sourceCount, &mr.grounded, &mr.summaryID, &mr.keyVersion, &mr.attributeKey); err != nil {
 				return err
 			}
 			memRows = append(memRows, mr)
@@ -215,6 +216,7 @@ func TestContinue_BackfillsAttributesIntoSeparateMemoriesRows(t *testing.T) {
 		t.Fatalf("resolve key: %v", err)
 	}
 
+	wantKeyForValue := map[string]string{"NYC": "city", "engineer": "occupation"}
 	gotValues := map[string]bool{}
 	for _, mr := range memRows {
 		plain, err := enc.Decrypt(mr.ct)
@@ -222,6 +224,9 @@ func TestContinue_BackfillsAttributesIntoSeparateMemoriesRows(t *testing.T) {
 			t.Fatalf("decrypt memory content: %v", err)
 		}
 		gotValues[plain] = true
+		if !mr.attributeKey.Valid || mr.attributeKey.String != wantKeyForValue[plain] {
+			t.Errorf("attribute_key = %v for value %q, want %q", mr.attributeKey, plain, wantKeyForValue[plain])
+		}
 		if !mr.isStatic {
 			t.Error("is_static = false, want true for an attribute-sourced memory")
 		}

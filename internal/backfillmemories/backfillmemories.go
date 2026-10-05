@@ -229,10 +229,10 @@ func (r *Runner) backfillAttributeBatch(ctx context.Context, scope identity.Scop
 				}
 				memID := memoryIDForAttribute(scope, rr.id, key)
 				_, err = tx.ExecContext(ctx, `
-					insert into memories (id, scope_kind, scope_owner, entity_id, content, key_version, is_static, grounded)
-					values ($1, $2, $3, $4, $5, $6, true, true)
+					insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, key_version, is_static, grounded)
+					values ($1, $2, $3, $4, $5, $6, $7, true, true)
 					on conflict (id) do nothing
-				`, memID, scope.Kind, scope.Owner, rr.id, ct, writeVersion)
+				`, memID, scope.Kind, scope.Owner, rr.id, key, ct, writeVersion)
 				if err != nil {
 					return fmt.Errorf("insert memory for %s.%s: %w", rr.id, key, err)
 				}
