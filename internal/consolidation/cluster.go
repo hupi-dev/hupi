@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"hupi/internal/identity"
+	"hupi/internal/metrics"
 	"hupi/internal/provider"
 )
 
@@ -272,6 +273,7 @@ func clusterSources(sources []textSource, vectors [][]float32) [][]textSource {
 	}
 
 	for len(clusters) > maxClustersPerDay() {
+		metrics.ConsolidationClusterMergesTotal.Inc()
 		bi, bj, best := 0, 1, -2.0
 		for i := 0; i < len(centroids); i++ {
 			for j := i + 1; j < len(centroids); j++ {
