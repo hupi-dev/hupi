@@ -309,6 +309,28 @@ closer to the default may be the better trade — this number isn't
 free to raise, it's a real dial with a cost on both ends. See
 `docs/EVALMEM_INTEGRATION_PLAN.md` §7 for the full experiment.
 
+### Optional feature flags
+
+Every one of these is read live on each call (`os.Getenv`, not cached at
+startup), so flipping one takes effect on the next request — no restart
+needed. Each is independent of the others; none require each other.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `HUPI_ENABLE_KEYWORD_SEARCH` | **on** (`!= "false"` to disable) | Runs BM25 keyword search alongside vector search on every retrieval — see the dedicated section above. |
+| `HUPI_ENABLE_SEMANTIC_FACT_RANKING` | **on** (`!= "false"` to disable) | Ranks a summary's key facts by fusing lexical relevance with per-fact embedding similarity (reciprocal rank fusion), rescuing a fact that's semantically on-topic but shares little vocabulary with the query. Falls back automatically to the pre-existing lexical-only ranking whenever any fact is missing a similarity score, so disabling it (or losing embeddings) never breaks ranking, just makes it coarser. |
+| `HUPI_ENABLE_RELATIONSHIP_GRAPH_WALK` | off | Lets retrieval walk the stored entity-relationship graph (e.g. "spouse of", "sibling of") to pull in facts about an entity connected to, but not named in, the query. Defaults off because three independent measurements (see `docs/BENCHMARK_IMPROVEMENT_PLAN.md` step 2 and a dedicated LoCoMo category-1 ablation, 106 questions, 35.3% vs. 35.4%) found it contributes no measurable accuracy gain on either benchmark this project tracks, while still spending real cost competing for the same fixed context budget. Worth enabling only if your own deployment's relationship graph is denser or more load-bearing than either benchmark's. `graphWalkMaxHops`/`graphWalkMaxResults` (compile-time constants, `internal/store/retrieve.go`) bound the cost. |
+| `HUPI_ENABLE_QUERY_EXPANSION` | off | Adds one extra LLM call per retrieval to generate up to 2 paraphrases of the query in different concrete wording, then searches with all of them — targets the case where a stored fact's own phrasing ("pre-approved for $400,000 from Wells Fargo") shares little vocabulary with how the question is asked ("mortgage pre-approval amount"). Real cost: one extra LLM call and a couple of extra embedding searches per retrieval that opts in. |
+| `HUPI_ENABLE_LLM_RERANK` | off | Adds one extra LLM call, only for ordering-shaped retrievals (not every retrieval), that scores 0-10 how directly each candidate excerpt actually answers the question — rather than just how topically related it is — and reorders by that score. Real measured cost: ~3.5-4.3s per call at ~20 candidates (~10-12K prompt characters), which is why it's gated to the already-latency-accepting ordering case rather than applied everywhere. |
+| `HUPI_ENABLE_REDUNDANCY_DEDUP` | off | Consolidation's cross-period contradiction check normally only *corrects* an existing fact that's genuinely wrong. With this on, it can additionally flag an existing fact as **redundant** — a pure restatement of a new fact with no new information — and remove it outright (empty replacement). Off by default because this path destroys stored data on a wrong call, unlike a pure ranking/ordering toggle: a wrongly-flagged "redundant" fact is gone for good, so it stays opt-in until trusted in a given deployment. |
+| `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` | off | Dashboard-only. Decrypts recent episode/summary text in-process to compute local keyword-frequency themes — no LLM call, decrypted text never leaves the process, only an aggregated term list is ever returned. This is the one place outside the normal retrieve/consolidate loop where plaintext conversation text touches a request path, which is why it's opt-in rather than on by default. |
+| `HUPI_ENABLE_DASHBOARD_LLM_THEMES` | off | Dashboard-only, independent of the flag above. Sends decrypted recent text to the configured LLM provider to generate a richer narrative theme summary, instead of (or alongside) the local keyword-frequency version. Only a model-generated narrative paragraph is ever returned — never the raw decrypted text itself, and neither this flag nor the one above ever logs decrypted content, only counts/errors. |
+
+`HUPI_KEYWORD_SEARCH_NARROW_THRESHOLD`/`HUPI_KEYWORD_SEARCH_DISABLE_THRESHOLD`
+and `HUPI_CONTEXT_CHAR_BUDGET` (both covered in their own sections above)
+are tuning knobs rather than on/off switches, so they're kept separate
+from this table.
+
 At this point the shared setup is done. What differs per tier is what you
 do next.
 
