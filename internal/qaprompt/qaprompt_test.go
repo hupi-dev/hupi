@@ -235,6 +235,32 @@ func TestConciseIncludesPredictiveInferenceGuidance(t *testing.T) {
 	}
 }
 
+// TestConciseIncludesSymptomInferenceGuidance is a real regression test
+// for one sub-shape of the open-domain (category 3) gap the "predict,
+// judge, or infer" paragraph was already built for, found tracing a
+// fresh full 10-conversation run's zero-score open-domain misses to
+// their actual retrieved context: an allergen pattern ("allergic to
+// reptiles, animals with fur, cockroaches") implying an ordinary medical
+// condition (asthma). Distinct from TestConciseIncludesPredictiveInferenceGuidance
+// above: that paragraph's own worked examples are a stated-preference
+// judgment and a geography lookup, neither of which covers a symptom-
+// based medical inference. A second, broader addition for the same
+// investigation — inferring a relationship from shared activity or
+// conversational framing — was tried the same day and reverted after a
+// full re-run found it net-regressed category 5 (adversarial) by 16
+// questions; see this constant's own doc comment and docs/BENCHMARKS.md
+// for the full account. No test asserts that reverted wording.
+func TestConciseIncludesSymptomInferenceGuidance(t *testing.T) {
+	for _, want := range []string{
+		"allergic to reptiles",
+		"asthma",
+	} {
+		if !strings.Contains(Concise, want) {
+			t.Errorf("Concise missing expected symptom inference guidance: %q", want)
+		}
+	}
+}
+
 func TestConciseAbstentionExamplesUseTheExactScoredPhrase(t *testing.T) {
 	if strings.Contains(strings.ToLower(Concise), "isn't mentioned") {
 		t.Error(`Concise contains "isn't mentioned" in an example — this does not match LoCoMo's literal "not mentioned" substring check; use "is not mentioned" instead`)
