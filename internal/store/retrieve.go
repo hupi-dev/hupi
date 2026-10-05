@@ -1641,7 +1641,7 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		// queryVectors[0] (the original, unparaphrased query) — in-
 		// summary fact ranking is a separate mechanism from candidate
 		// selection above and deliberately isn't expanded.
-		facts, err := loadKeyFacts(ctx, q, c.id, c.enc, queryVectors[0], s.currentEmbeddingModel())
+		facts, err := loadKeyFacts(ctx, q, c.id, c.enc, queryVectors[0], s.currentEmbeddingModel(), now)
 		if err != nil {
 			return nil, err
 		}
@@ -1825,10 +1825,10 @@ type keyFact struct {
 	similarity sql.NullFloat64
 }
 
-// loadKeyFacts loads a summary's grounded facts along with each one's
-// cosine similarity to the query, computed in SQL (`1 - (embedding <=>
-// $queryVector)`) so Go never has to parse a 1536-float vector just to
-// rank a handful of facts — the same division of labor
+// loadKeyFacts loads a summary's grounded, not-yet-expired facts along
+// with each one's cosine similarity to the query, computed in SQL (`1 -
+// (embedding <=> $queryVector)`) so Go never has to parse a 1536-float
+// vector just to rank a handful of facts — the same division of labor
 // vectorSearchEntities already uses. similarity is NULL whenever a fact
 // has no embedding yet (not reembedded since schema/0021, or the
 // consolidation-time embed call failed — see
@@ -1836,15 +1836,25 @@ type keyFact struct {
 // design) or was embedded under a different model than the one currently
 // active (embedding_model != $3 — mixing vectors across models produces
 // noise, not a real signal, same reasoning as summaries/entities).
-func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryVector string, embeddingModel string) ([]keyFact, error) {
+//
+// expires_at is null or in the future, evaluated against now (the
+// query-time "as of" instant threaded through from
+// internal/gateway/handler.go's Retriever.Retrieve, not time.Now() —
+// see that field's own doc comment) — Phase 1 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md. An expired fact is filtered
+// here, before citation-construction code in this file ever sees it,
+// the same mechanism grounded=false already uses (the plan doc's own
+// "Citation impact: none" note for this phase).
+func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryVector string, embeddingModel string, now time.Time) ([]keyFact, error) {
 	rows, err := q.QueryContext(ctx, `
 		select id, fact,
 		       case when embedding is not null and embedding_model = $3
 		            then 1 - (embedding <=> $2::vector) end as similarity
 		from summary_key_facts
 		where summary_id = $1 and grounded = true
+		  and (expires_at is null or expires_at >= $4::date)
 		order by id
-	`, summaryID, queryVector, embeddingModel)
+	`, summaryID, queryVector, embeddingModel, now.Format("2006-01-02"))
 	if err != nil {
 		return nil, fmt.Errorf("load key facts for summary %s: %w", summaryID, err)
 	}

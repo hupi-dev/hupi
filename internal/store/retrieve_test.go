@@ -211,6 +211,78 @@ func insertKeyFact(t *testing.T, s *Store, scope identity.Scope, summaryID, fact
 	}
 }
 
+// insertKeyFactWithExpiration is insertKeyFact's sibling with an
+// explicit expires_at — insertKeyFact leaves it null, since none of its
+// own callers needed expiration. expiresAt is "YYYY-MM-DD" or "" for
+// null.
+func insertKeyFactWithExpiration(t *testing.T, s *Store, scope identity.Scope, summaryID, fact, expiresAt string) {
+	t.Helper()
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	factCT, err := enc.Encrypt(fact)
+	if err != nil {
+		t.Fatalf("encrypt test key fact: %v", err)
+	}
+	var expiresAtArg any
+	if expiresAt != "" {
+		expiresAtArg = expiresAt
+	}
+	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into summary_key_facts (summary_id, fact, grounded, key_version, scope_kind, scope_owner, expires_at)
+			values ($1, $2, true, $3, $4, $5, $6::date)
+		`, summaryID, factCT, keyVersion, scope.Kind, scope.Owner, expiresAtArg)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test key fact with expiration for %s: %v", summaryID, err)
+	}
+}
+
+// TestRetrieve_FiltersExpiredKeyFacts is the real-infra regression for
+// Phase 1 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md (native fact
+// expiration): loadKeyFacts must exclude a fact whose expires_at has
+// already passed, include one whose expires_at is still in the future
+// (or exactly today — the inclusive boundary loadKeyFacts' own doc
+// comment explains), and include one with no expiration at all.
+func TestRetrieve_FiltersExpiredKeyFacts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-retrieve-expired-facts"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	period := "2026-01-01"
+	summaryID := "sum_test-retrieve-expired-facts_2026-01-01_daily_v1"
+	insertSummary(t, s, scope, summaryID, period, "Dana has some things coming up.", "")
+
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+	insertKeyFactWithExpiration(t, s, scope, summaryID, "Dana has a dentist appointment that already passed.", "2026-01-10")
+	insertKeyFactWithExpiration(t, s, scope, summaryID, "Dana has a dentist appointment coming up soon.", "2026-01-20")
+	insertKeyFactWithExpiration(t, s, scope, summaryID, "Dana has a dentist appointment exactly today.", "2026-01-15")
+	insertKeyFact(t, s, scope, summaryID, "Dana generally prefers morning appointments.", true)
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "what appointments does Dana have?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, now)
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if strings.Contains(result.ContextMessage, "already passed") {
+		t.Errorf("context message includes an expired fact, want it filtered out, got: %q", result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "coming up soon") {
+		t.Errorf("context message missing the not-yet-expired fact, got: %q", result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "exactly today") {
+		t.Errorf("context message missing the fact expiring exactly today (inclusive boundary), got: %q", result.ContextMessage)
+	}
+	if !strings.Contains(result.ContextMessage, "prefers morning appointments") {
+		t.Errorf("context message missing the fact with no expiration at all, got: %q", result.ContextMessage)
+	}
+}
+
 // TestRetrieve_SurfacesGroundedKeyFactsAlongsideSummary is a regression
 // test for a real gap found tracing cmd/hupi-bench QA misses against a
 // real cloud model at scale: a daily/weekly summary's own prose is
@@ -553,7 +625,7 @@ func TestRetrieve_FactEmbeddedUnderDifferentModelFallsBackToLexical(t *testing.T
 	var facts []keyFact
 	err = dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
 		var err error
-		facts, err = loadKeyFacts(ctx, tx, summaryID, enc, pgfmt.VectorLiteral(axis(0)), s.currentEmbeddingModel())
+		facts, err = loadKeyFacts(ctx, tx, summaryID, enc, pgfmt.VectorLiteral(axis(0)), s.currentEmbeddingModel(), time.Now())
 		return err
 	})
 	if err != nil {
