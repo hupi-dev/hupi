@@ -722,7 +722,61 @@ dominated by the same re-ingest noise, not a gate misfire) but isn't a
 substitute for the full run. Recommended next step before raising any
 default or merging this as "done" rather than "narrowly verified."
 
-## 13. Consolidation-time temperature — real, partial fix for Part B's run-to-run non-determinism
+**Update**: the full 10-conversation re-run was done (§13) — overall
+accuracy moved in the wrong direction (0.609 -> 0.601), but that number
+is confounded by the same fresh-re-ingest non-determinism documented
+throughout this doc, not attributable to either feature specifically.
+See §13 for why, and §14 for a real, partial fix to that same
+non-determinism's root cause, found right after.
+
+## 13. Full 10-conversation re-run with both §11 and §12 merged — confounded, not a clean signal
+
+Ran a genuine from-scratch wipe + replay + consolidate + answer pass
+across all 10 LoCoMo conversations with both the image-caption fix (§11)
+and the counting feature (§12) merged together, to get a real combined
+category table rather than relying on the two single-conversation
+checks alone.
+
+**Result**: overall accuracy 0.609 -> 0.601; category 1 (multi-hop,
+exactly what §12 targets) 0.495 -> 0.482; category 2 (temporal, what §11
+targets) 0.560 -> 0.549; category 3 (open-domain) 0.302 -> 0.336;
+category 4 (single-hop) 0.608 -> 0.600; category 5 (adversarial) 0.783
+-> 0.774.
+
+**This is not evidence the features regressed anything.** The baseline
+(0.609) is the existing `-answer-only` rerun against old, already-
+consolidated data (same baseline §11/§12 already flagged as not a fair
+comparison for a fresh re-ingest). Direct proof the gap here is
+re-ingest noise, not the code: pulled conv-42's and conv-48's individual
+answers out of this full run and compared them to the *exact same two
+conversations*, re-ingested in isolation earlier, with the *identical
+binaries* (confirmed via `strings` that both the `"[Shared image: %s]"`
+tag and the `"Every recorded occurrence found for %s"` counting-list
+header are genuinely compiled into the binary used for both). The
+answers differ: conv-42's "How many tournaments has Nate won?" (gold
+seven) scored "5" in the isolated run and "3" here; conv-48's
+appreciation-letter question scored "26 January 2023" (the correct day)
+in the isolated with-fix run and "27 January 2023" (the control run's
+exact wrong answer) here. Same code, same question, different answers —
+each fresh re-ingest independently re-extracts facts, and that
+extraction is not deterministic run to run (the Nate-tournament
+win-count instability earlier in this doc and in
+`docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md` is the same phenomenon).
+
+**Decision: rely on the targeted, isolated verification already
+documented in §11 and §12, not this full-scale number.** A clean
+full-scale comparison would need a matched fresh-re-ingest baseline
+*without* either feature, run across all 10 conversations too, to give
+both sides the same noise floor — doubling the cost of an already
+~90-minute run for a number that, per every other finding in this
+session, would still have its own run-to-run variance on top. Not worth
+it given the mechanism-level verification (direct DB queries, real
+Postgres integration tests) already confirms both features do exactly
+what they're designed to do, independent of any one noisy end-to-end
+score. **Update**: §14, written right after this entry, found and fixed
+a real contributor to exactly this non-determinism.
+
+## 14. Consolidation-time temperature — real, partial fix for Part B's run-to-run non-determinism
 
 Follow-up to §12 and `docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md`'s Part B
 (dated 2026-10-04/05): that plan's own recommended next step, never done
