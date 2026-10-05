@@ -31,6 +31,18 @@ type textSource struct {
 type KeyFactOutput struct {
 	Fact             string   `json:"fact"`
 	SourceEpisodeIDs []string `json:"source_episode_ids"`
+	// ExpiresAt/ExpireReason are Phase 1 of
+	// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: native fact expiration.
+	// Only ever set by summarySystemPrompt's main extraction pass — the
+	// separate per-episode extraction pass (perepisode.go's
+	// perEpisodeFactPrompt) returns bare fact strings with no room for
+	// either field, a deliberate, documented scope boundary (the plan
+	// doc calls for "one narrow extraction instruction," singular, not
+	// both prompts). ExpiresAt is "YYYY-MM-DD" or empty (no expiration);
+	// parsed the same way relationships' valid_from/valid_until already
+	// are (parseOptionalDate) before storeSummary writes it.
+	ExpiresAt    string `json:"expires_at"`
+	ExpireReason string `json:"expire_reason"`
 }
 
 // EntityUpdate is one entity a consolidation run or correction says this

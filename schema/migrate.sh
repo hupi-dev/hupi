@@ -51,6 +51,8 @@ probe() {
     0026_backfill_memories_audit_event.sql) echo "select (select pg_get_constraintdef(oid) from pg_constraint where conname = 'audit_log_event_type_check') like '%backfill_memories%'" ;;
     0027_memories_attribute_versioning.sql) echo "select exists(select 1 from information_schema.columns where table_name='memories' and column_name='attribute_key')" ;;
     0028_key_rotations_memories_cursor.sql) echo "select (select pg_get_constraintdef(oid) from pg_constraint where conname = 'key_rotations_cursor_table_check') like '%memories%'" ;;
+    0029_summary_key_facts_expiration.sql) echo "select exists(select 1 from information_schema.columns where table_name='summary_key_facts' and column_name='expires_at')" ;;
+    0030_memories_cascade_deletes.sql) echo "select (select confdeltype from pg_constraint where conname = 'memories_summary_id_fkey') = 'c'" ;;
     *) echo "no idempotency probe defined for $1" >&2; exit 1 ;;
   esac
 }
@@ -63,7 +65,8 @@ for f in 0001_init.sql 0002_tier3_phase1_identity.sql 0003_tier3_phase2_retrieve
          0017_summaries_supersedes_unique.sql 0018_summary_key_facts_rls.sql 0019_entity_relationships_valid_date_order.sql \
          0020_audit_log_target_ref_index.sql 0021_summary_key_facts_embeddings.sql 0022_scope_corpus_size.sql \
          0023_dashboard_sessions.sql 0024_summary_key_facts_embedding_index.sql 0025_unified_memories.sql \
-         0026_backfill_memories_audit_event.sql 0027_memories_attribute_versioning.sql 0028_key_rotations_memories_cursor.sql; do
+         0026_backfill_memories_audit_event.sql 0027_memories_attribute_versioning.sql 0028_key_rotations_memories_cursor.sql \
+         0029_summary_key_facts_expiration.sql 0030_memories_cascade_deletes.sql; do
   already="$(psql "$HUPI_ADMIN_DATABASE_URL" -tAc "$(probe "$f")" 2>/dev/null | tr -d '[:space:]')"
   if [ "$already" = "t" ]; then
     echo "schema/$f already applied, skipping"

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +82,111 @@ func testRunner(t *testing.T, consolidationResponse, groundingResponse string) (
 	consolidationProvider := fakeConsolidationProvider{response: consolidationResponse}
 	groundingProvider := fakeConsolidationProvider{response: groundingResponse}
 	return New(db, keys, consolidationProvider, groundingProvider, consolidationProvider), db
+}
+
+// TestStoreSummary_WritesExpirationIntoBothKeyFactsAndMemories is the
+// real-infra regression for Phase 1 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: a key fact's ExpiresAt/
+// ExpireReason (from the consolidation LLM's own JSON output) must land
+// in both summary_key_facts (what loadKeyFacts actually filters on) and
+// its live memories mirror (what a RefKindMemory citation resolves
+// back to) — and a fact with no ExpiresAt at all must leave both
+// columns null, not some zero-value placeholder.
+func TestStoreSummary_WritesExpirationIntoBothKeyFactsAndMemories(t *testing.T) {
+	groundingJSON := `{"grounded": [{"i":1,"ok":true},{"i":2,"ok":true}]}`
+	runner, db := testRunner(t, "", groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-fact-expiration"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	if err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2026-01-15",
+		output: ConsolidationOutput{
+			Summary: "Dana has an appointment coming up.",
+			KeyFacts: []KeyFactOutput{
+				{Fact: "Dana has a dentist appointment on 2026-01-20.", ExpiresAt: "2026-01-20", ExpireReason: "one-time appointment"},
+				{Fact: "Dana prefers morning appointments."},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("storeSummary: %v", err)
+	}
+
+	var summaryID string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select id from summaries where level = 'daily' and period = '2026-01-15' and scope_kind = $1 and scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&summaryID)
+	}); err != nil {
+		t.Fatalf("load stored summary id: %v", err)
+	}
+
+	type factRow struct {
+		id                      int64
+		expiresAt, expireReason sql.NullString
+	}
+	var facts []factRow
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select id, expires_at::text, expire_reason from summary_key_facts where summary_id = $1 order by id
+		`, summaryID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var fr factRow
+			if err := rows.Scan(&fr.id, &fr.expiresAt, &fr.expireReason); err != nil {
+				return err
+			}
+			facts = append(facts, fr)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("load key facts: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("got %d key facts, want 2", len(facts))
+	}
+
+	expiring, plain := facts[0], facts[1]
+	if !expiring.expiresAt.Valid || expiring.expiresAt.String != "2026-01-20" {
+		t.Errorf("summary_key_facts expires_at = %v, want 2026-01-20", expiring.expiresAt)
+	}
+	if !expiring.expireReason.Valid || expiring.expireReason.String != "one-time appointment" {
+		t.Errorf("summary_key_facts expire_reason = %v, want \"one-time appointment\"", expiring.expireReason)
+	}
+	if plain.expiresAt.Valid || plain.expireReason.Valid {
+		t.Errorf("fact with no stated expiration has expires_at=%v expire_reason=%v, want both null", plain.expiresAt, plain.expireReason)
+	}
+
+	// The live memories mirror must carry the exact same expiration —
+	// this is what a RefKindMemory citation (and, in a later phase,
+	// retrieval filtering) actually reads.
+	var memExpiresAt, memExpireReason sql.NullString
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select expires_at::text, expire_reason from memories where id = $1
+		`, "mem_fact_"+strconv.FormatInt(expiring.id, 10)).Scan(&memExpiresAt, &memExpireReason)
+	}); err != nil {
+		t.Fatalf("load memories mirror for expiring fact: %v", err)
+	}
+	if !memExpiresAt.Valid || memExpiresAt.String != "2026-01-20" {
+		t.Errorf("memories expires_at = %v, want 2026-01-20", memExpiresAt)
+	}
+	if !memExpireReason.Valid || memExpireReason.String != "one-time appointment" {
+		t.Errorf("memories expire_reason = %v, want \"one-time appointment\"", memExpireReason)
+	}
 }
 
 // TestRunDaily_WritesGroundedSummary exercises storeSummary's real
