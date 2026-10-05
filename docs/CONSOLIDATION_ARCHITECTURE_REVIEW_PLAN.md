@@ -115,6 +115,41 @@ needs to name the pattern more generally (any attribute describing a
 specific past occurrence, not just one with a numbered key) rather than
 assume more wording will close the remaining gap.
 
+**Follow-up — the actual mechanism, traced precisely (PR #120)**: asked
+to go back and find the real cause of this residual. Direct decrypted
+queries against a live re-ingested `conv-42` scope (full supersession
+chain, every version's prose and key_facts across the whole run, not a
+sample) showed the orphaned attribute was never an extraction-
+completeness gap at all: `person:nate`'s `won_international_tournament_date`
+attribute survived untouched (attributes aren't rewritten by this
+path), but the `key_fact` that used to back it — "Nate won an
+international gaming tournament on 2022-08-21" — was deleted by
+`checkOneRelatedSummary`'s cross-period contradiction check. That check
+was given, as a later "new" fact from an unrelated conversation, "Nate
+participated in a video game tournament recently and did not do well" —
+a separately-recounted, genuinely different tournament occasion — and
+wrongly treated it as a contradiction overwriting the win, rewriting the
+day's prose to a vague merged narrative in the process.
+
+The codebase already had the right guard language for exactly this
+shape ("a repeating TYPE of event... happening again is a new, distinct
+occurrence, not a restatement"), but it only existed in the paragraph
+gated behind `HUPI_ENABLE_REDUNDANCY_DEDUP` (off by default — this flag
+itself was not touched or enabled). `contradiction.go`'s always-on base
+prompt had no equivalent protection. Fixed by promoting an adapted
+version of that guard into the always-on prompt, anchored to the real
+traced fact pair above rather than a guessed one. Verified with a live
+A/B against gpt-4.1 using the exact real fact lists and prose decrypted
+from the re-ingest: the original prompt reproduces the failure (reports
+the false contradiction, would delete the win fact); the fixed prompt
+does not (`{"contradictions": [], "corrected_prose": ""}`). An earlier,
+less precise hypothesis for this same residual (two different *roles*
+at the same named event, rather than two distinct *occurrences* of a
+repeating event type) was tried first and found, via the same kind of
+isolated live A/B test, not to discriminate — i.e. it wasn't the real
+mechanism — before this more precise, real-data-traced diagnosis was
+reached.
+
 ## Finding 2: grounding checks a fact against the whole day, not its own cited source
 
 **Problem, grounded in direct reading**: `groundingCheck`

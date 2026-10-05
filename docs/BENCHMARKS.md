@@ -993,3 +993,47 @@ metric for clustering's cluster-count cap — are documented in full in
 `docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md` itself (PRs #116-118,
 merged).
 
+## 18. Finding 1 follow-up — the actual mechanism traced and fixed (PR #120)
+
+§17's partial fix left a residual: two tournament-win attributes
+(`won_international_tournament_date`,
+`won_major_gaming_tournament_week_before_2022_10_06`) with no matching
+`key_facts` row. Asked to go back and find the real cause rather than
+re-tighten the prompt wording again.
+
+Direct decrypted queries against a live re-ingested `conv-42` scope —
+the full supersession chain, every version's prose and key_facts across
+the whole run, not a sample — showed this was never an extraction gap
+at all. `person:nate`'s attribute recording a specific tournament win
+survived untouched; the `key_fact` that used to back it ("Nate won an
+international gaming tournament on 2022-08-21") was deleted by
+`checkOneRelatedSummary`'s cross-period contradiction check, which
+wrongly treated an unrelated later recollection — "Nate participated in
+a video game tournament recently and did not do well," recounted in a
+conversation about something else entirely — as a contradiction
+overwriting the win. Two distinct real occurrences of a repeating event
+type (one win, one separately-recounted loss) got merged into one vague
+fact, and the win was deleted.
+
+The codebase already had the correct guard language for exactly this
+("a repeating TYPE of event... happening again is a new, distinct
+occurrence, not a restatement") but it only existed in the paragraph
+gated behind `HUPI_ENABLE_REDUNDANCY_DEDUP` — off by default, and not
+changed by this fix — leaving the always-on contradiction-check path
+with no equivalent protection. Promoted an adapted version of that
+guard into the always-on prompt, anchored to the real traced fact pair.
+
+**Verified by live A/B against real gpt-4.1**, using the exact real fact
+lists and prose decrypted from the re-ingest (an earlier, simplified
+two-fact version of this test did not reproduce the failure — only the
+full real context did, which is why the test keeps every fact rather
+than trimming to "just the relevant ones"): the original prompt
+reproduces the failure (reports the false contradiction, would delete
+the win fact); the fixed prompt does not
+(`{"contradictions": [], "corrected_prose": ""}`). An earlier, less
+precise hypothesis for this same residual (two different *roles* at the
+same named event, rather than two distinct *occurrences* of a repeating
+event type) was tried first and found, via the same kind of isolated
+live A/B test, not to discriminate — ruled out before this more precise
+diagnosis was reached.
+
