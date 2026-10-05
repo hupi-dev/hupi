@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"hupi/internal/audit"
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/gateway"
 	"hupi/internal/identity"
 	"hupi/internal/metrics"
@@ -936,23 +938,26 @@ func stage1QuestionSignal(query string) bool {
 
 func (s *Store) formatEntity(ctx context.Context, q dbscope.Querier, scope identity.Scope, id string, dateLabel string) (string, error) {
 	var name string
-	var attrsCT []byte
-	var keyVersion int
 	err := q.QueryRowContext(ctx, `
-		select name, attributes, key_version from entities where scope_kind = $1 and scope_owner = $2 and id = $3
-	`, scope.Kind, scope.Owner, id).Scan(&name, &attrsCT, &keyVersion)
+		select name from entities where scope_kind = $1 and scope_owner = $2 and id = $3
+	`, scope.Kind, scope.Owner, id).Scan(&name)
 	if err != nil {
 		return "", err
 	}
-	enc, err := s.keys.GetVersion(ctx, scope, keyVersion)
-	if err != nil {
-		return "", fmt.Errorf("resolve encryption key: %w", err)
-	}
-	attrs, err := enc.Decrypt(attrsCT)
+	attrs, err := entityattrs.Current(ctx, q, s.keys, scope, id)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("entity %s%s (%s): %s", id, dateLabel, name, attrs), nil
+	// json.Marshal of a map[string]string sorts keys alphabetically,
+	// matching the exact text shape the old entities.attributes blob
+	// already had (it was itself produced by json.Marshal(map[string]string)
+	// in upsertEntities) — callers of this formatted line see unchanged
+	// output even though the underlying storage changed.
+	attrsJSON, err := json.Marshal(attrs)
+	if err != nil {
+		return "", fmt.Errorf("marshal attributes for entity %s: %w", id, err)
+	}
+	return fmt.Sprintf("entity %s%s (%s): %s", id, dateLabel, name, attrsJSON), nil
 }
 
 // vectorSearchSummaries searches the current (non-superseded) summaries

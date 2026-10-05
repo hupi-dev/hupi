@@ -17,6 +17,7 @@ import (
 
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/identity"
 	"hupi/internal/metrics"
 	"hupi/internal/pgfmt"
@@ -534,31 +535,19 @@ func (r *Runner) CurrentContent(ctx context.Context, scope identity.Scope, summa
 	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		for _, id := range entityIDs {
 			var kind, name string
-			var attrsCT []byte
-			var entKeyVersion int
 			scanErr := tx.QueryRowContext(ctx, `
-				select kind, name, attributes, key_version from entities
+				select kind, name from entities
 				where id = $1 and scope_kind = $2 and scope_owner = $3
-			`, id, scope.Kind, scope.Owner).Scan(&kind, &name, &attrsCT, &entKeyVersion)
+			`, id, scope.Kind, scope.Owner).Scan(&kind, &name)
 			if errors.Is(scanErr, sql.ErrNoRows) {
 				continue
 			}
 			if scanErr != nil {
 				return fmt.Errorf("load entity %s: %w", id, scanErr)
 			}
-			entEnc, keyErr := r.keys.GetVersion(ctx, scope, entKeyVersion)
-			if keyErr != nil {
-				return fmt.Errorf("resolve encryption key for entity %s: %w", id, keyErr)
-			}
-			attrsJSON, decErr := entEnc.Decrypt(attrsCT)
-			if decErr != nil {
-				return fmt.Errorf("decrypt attributes for entity %s: %w", id, decErr)
-			}
-			var attrs map[string]string
-			if attrsJSON != "" {
-				if jsonErr := json.Unmarshal([]byte(attrsJSON), &attrs); jsonErr != nil {
-					return fmt.Errorf("parse attributes for entity %s: %w", id, jsonErr)
-				}
+			attrs, attrErr := entityattrs.Current(ctx, tx, r.keys, scope, id)
+			if attrErr != nil {
+				return fmt.Errorf("load current attributes for entity %s: %w", id, attrErr)
 			}
 			entities = append(entities, EntityUpdate{ID: id, Kind: kind, Name: name, Attributes: attrs})
 		}

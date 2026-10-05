@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 
 	"hupi/internal/audit"
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/identity"
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
@@ -369,33 +369,52 @@ func slugify(s string) string {
 	return strings.TrimSuffix(b.String(), "-")
 }
 
-// upsertEntities merges each entity's new attributes over its existing
-// ones rather than replacing them wholesale (docs/DESIGN_VS_BUILT.md #1):
-// a consolidation run that only mentions one attribute of a previously
-// richer entity must not erase everything else that was known about it.
-// `for update` guards the read against another consolidation process
-// running concurrently against the same entity. Entities are looked up and
-// written within scope — the same "project:hupi" id can exist once per
-// scope since entities' primary key is (scope_kind, scope_owner, id).
+// upsertEntities writes each touched entity's identity (kind/name/
+// timestamps) and its attribute values into the unified `memories`
+// table (schema/0025, schema/0027) — Phase 0 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md. entities.attributes is no
+// longer written from here: an existing entity's legacy blob is left
+// exactly as it was (read-only, for the rollback window the plan doc's
+// own risk section calls for) and a new entity simply gets a null one.
 //
-// replace flips that to a wholesale overwrite of each touched entity's
-// attributes, used only by Runner.Correct: a correction's whole point is
-// to fix a wrong fact, and merge's "new keys win, old keys survive"
-// behavior means a correction that changes what an old run called
-// concurrency_limit but writes it back under a differently-named key like
-// concurrent_jobs_per_node leaves the stale key sitting right next to the
-// corrected one, both visible to retrieval — found by observing exactly
-// that after a real correction. A human correction is expected to state
-// the entity's full corrected set of touched attributes, not a partial
-// patch, so replacing is the semantically correct behavior specifically
-// for this caller.
+// Every touched key gets a brand-new memories row every call —
+// superseding whatever row was previously current for that (entity,
+// key) pair, via the same supersedes-chain convention
+// summaries.supersedes already established (schema/0027) — rather than
+// the old flat per-key overlay (mergeAttributes) that silently
+// discarded an attribute's prior value on every update
+// (docs/DESIGN_VS_BUILT.md #1 wanted the *set* of known attributes to
+// survive an update that only mentions one of them; it never said
+// anything about keeping the *old value* around too, which attributes
+// gain here for the first time). Deliberately not a decrypt-and-
+// compare-then-skip-if-unchanged optimization: a consolidation run that
+// reaffirms an unchanged value is itself a real signal ("still true as
+// of today"), and skipping the write would mean decrypting every
+// existing value on every single run just to maybe save one write.
+//
+// `for update` locks the entity identity row against another
+// consolidation process running concurrently against the same entity —
+// same guard the old implementation's own `for update` gave the
+// attributes column, now protecting the identity row instead (no
+// equivalent row-lock exists for the per-key memories rows themselves).
+//
+// replace flips the per-entity write to a wholesale reset: every
+// currently-live key not restated in e.Attributes this call is
+// tombstoned (a new row with empty content, grounded=false — "this key
+// no longer applies," not "this key still holds its last known value"),
+// matching the old replace=true branch's wholesale `merged =
+// e.Attributes`. Used only by Runner.Correct: a correction's whole
+// point is to fix a wrong fact, and the default additive behavior's
+// "new keys win, old keys survive" means a correction that changes what
+// an old run called concurrency_limit but writes it back under a
+// differently-named key like concurrent_jobs_per_node would otherwise
+// leave the stale key sitting right next to the corrected one, both
+// still live — found by observing exactly that after a real
+// correction. A human correction is expected to state the entity's
+// full corrected set of touched attributes, not a partial patch, so
+// resetting is the semantically correct behavior specifically for this
+// caller.
 func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.Scope, updates []EntityUpdate, replace bool, asOf time.Time) error {
-	// Writes always go under the *current* version — resolved once here,
-	// not per entity, since it can't change mid-transaction. Reads of
-	// each entity's *existing* attributes below use that specific row's
-	// own key_version instead, which may still be an older one — this is
-	// the one write path that's also a read, so both GetOrCreate and
-	// GetVersion show up in the same function.
 	enc, keyVersion, err := r.keys.GetOrCreate(ctx, scope)
 	if err != nil {
 		return fmt.Errorf("resolve encryption key for %s:%s: %w", scope.Kind, scope.Owner, err)
@@ -406,77 +425,91 @@ func (r *Runner) upsertEntities(ctx context.Context, tx *sql.Tx, scope identity.
 			continue
 		}
 
-		merged := e.Attributes
-		var existingCT []byte
-		var existingVersion int
-		err := tx.QueryRowContext(ctx,
-			`select attributes, key_version from entities where scope_kind = $1 and scope_owner = $2 and id = $3 for update`,
-			scope.Kind, scope.Owner, e.ID,
-		).Scan(&existingCT, &existingVersion)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			// new entity — nothing to merge or replace, e.Attributes as given
-		case err != nil:
-			return fmt.Errorf("load existing entity %s for merge: %w", e.ID, err)
-		case replace:
-			// `for update` above still ran, so this row stays locked
-			// against a concurrent writer until this transaction commits
-			// — merged is already e.Attributes, nothing else to do.
-		default:
-			existingEnc, keyErr := r.keys.GetVersion(ctx, scope, existingVersion)
-			if keyErr != nil {
-				return fmt.Errorf("resolve encryption key for existing entity %s: %w", e.ID, keyErr)
+		exists, err := entityExists(ctx, tx, scope, e.ID)
+		if err != nil {
+			return fmt.Errorf("check existing entity %s: %w", e.ID, err)
+		}
+		if exists {
+			var discard string
+			if err := tx.QueryRowContext(ctx, `
+				select id from entities where scope_kind = $1 and scope_owner = $2 and id = $3 for update
+			`, scope.Kind, scope.Owner, e.ID).Scan(&discard); err != nil {
+				return fmt.Errorf("lock existing entity %s: %w", e.ID, err)
 			}
-			existingJSON, decErr := existingEnc.Decrypt(existingCT)
-			if decErr != nil {
-				return fmt.Errorf("decrypt existing attributes for entity %s: %w", e.ID, decErr)
+			if _, err := tx.ExecContext(ctx, `
+				update entities set name = $1, last_updated = $2
+				where scope_kind = $3 and scope_owner = $4 and id = $5
+			`, e.Name, asOf, scope.Kind, scope.Owner, e.ID); err != nil {
+				return fmt.Errorf("update entity %s: %w", e.ID, err)
 			}
-			var existing map[string]string
-			if existingJSON != "" {
-				if jsonErr := json.Unmarshal([]byte(existingJSON), &existing); jsonErr != nil {
-					return fmt.Errorf("parse existing attributes for entity %s: %w", e.ID, jsonErr)
-				}
+		} else {
+			if _, err := tx.ExecContext(ctx, `
+				insert into entities (id, kind, name, first_seen, last_updated, scope_kind, scope_owner, key_version)
+				values ($1, $2, $3, $4, $4, $5, $6, $7)
+			`, e.ID, e.Kind, e.Name, asOf, scope.Kind, scope.Owner, keyVersion); err != nil {
+				return fmt.Errorf("insert entity %s: %w", e.ID, err)
 			}
-			// Phase C sub-problem 1 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md):
-			// a key named here is the consolidation LLM's own judgment
-			// (informed by this entity's current attributes, fed into its
-			// prompt via findKnownEntities) that a key in e.Attributes
-			// updates this existing key under a new name — delete it
-			// before merging, rather than the default additive overlay
-			// that would otherwise leave both sitting side by side
-			// forever (the real Wells Fargo failure mode this fixes).
-			if len(e.SupersedesKeys) > 0 {
-				slog.Info("consolidation: entity attribute key superseded", "entity", e.ID, "superseded_keys", e.SupersedesKeys)
-			}
-			for _, staleKey := range e.SupersedesKeys {
-				delete(existing, staleKey)
-			}
-			merged = mergeAttributes(existing, e.Attributes)
 		}
 
-		attrsJSON, err := json.Marshal(merged)
+		current, err := entityattrs.CurrentRowIDs(ctx, tx, scope, e.ID)
 		if err != nil {
-			return fmt.Errorf("marshal attributes for entity %s: %w", e.ID, err)
+			return fmt.Errorf("load current attribute rows for entity %s: %w", e.ID, err)
 		}
-		// Re-encrypted under the current version even if the existing row
-		// was on an older one — a touched entity naturally migrates
-		// forward, one row at a time, independent of whether
-		// hupi-rotate-key ever gets around to it.
-		attrsCT, err := enc.Encrypt(string(attrsJSON))
-		if err != nil {
-			return fmt.Errorf("encrypt attributes for entity %s: %w", e.ID, err)
+
+		// replace mode: every currently-live key not restated this call is
+		// gone (wholesale reset). Non-replace mode: only the keys this run
+		// explicitly names via SupersedesKeys are gone (Phase C
+		// sub-problem 1's renamed-key case) — every other existing key
+		// survives untouched, needing no new row at all.
+		var staleKeys []string
+		if replace {
+			for key := range current {
+				if _, keep := e.Attributes[key]; !keep {
+					staleKeys = append(staleKeys, key)
+				}
+			}
+		} else {
+			staleKeys = e.SupersedesKeys
+			if len(staleKeys) > 0 {
+				slog.Info("consolidation: entity attribute key superseded", "entity", e.ID, "superseded_keys", staleKeys)
+			}
 		}
-		_, err = tx.ExecContext(ctx, `
-			insert into entities (id, kind, name, attributes, first_seen, last_updated, scope_kind, scope_owner, key_version)
-			values ($1, $2, $3, $4, $5, $5, $6, $7, $8)
-			on conflict (scope_kind, scope_owner, id) do update set
-				name = excluded.name,
-				attributes = excluded.attributes,
-				key_version = excluded.key_version,
-				last_updated = excluded.last_updated
-		`, e.ID, e.Kind, e.Name, attrsCT, asOf, scope.Kind, scope.Owner, keyVersion)
-		if err != nil {
-			return fmt.Errorf("upsert entity %s: %w", e.ID, err)
+		for _, staleKey := range staleKeys {
+			oldID, ok := current[staleKey]
+			if !ok {
+				continue // already gone, or never existed — nothing to tombstone
+			}
+			tombstoneID, err := entityattrs.NewID()
+			if err != nil {
+				return fmt.Errorf("generate tombstone id for entity %s key %s: %w", e.ID, staleKey, err)
+			}
+			emptyCT, err := enc.Encrypt("")
+			if err != nil {
+				return fmt.Errorf("encrypt tombstone for entity %s key %s: %w", e.ID, staleKey, err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, key_version, is_static, grounded, supersedes)
+				values ($1, $2, $3, $4, $5, $6, $7, true, false, $8)
+			`, tombstoneID, scope.Kind, scope.Owner, e.ID, staleKey, emptyCT, keyVersion, oldID); err != nil {
+				return fmt.Errorf("tombstone entity %s key %s: %w", e.ID, staleKey, err)
+			}
+		}
+
+		for key, value := range e.Attributes {
+			ct, err := enc.Encrypt(value)
+			if err != nil {
+				return fmt.Errorf("encrypt attribute %s.%s: %w", e.ID, key, err)
+			}
+			rowID, err := entityattrs.NewID()
+			if err != nil {
+				return fmt.Errorf("generate id for entity %s key %s: %w", e.ID, key, err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, key_version, is_static, grounded, supersedes)
+				values ($1, $2, $3, $4, $5, $6, $7, true, true, $8)
+			`, rowID, scope.Kind, scope.Owner, e.ID, key, ct, keyVersion, pgfmt.Nullable(current[key])); err != nil {
+				return fmt.Errorf("insert attribute for entity %s key %s: %w", e.ID, key, err)
+			}
 		}
 	}
 	return nil
@@ -780,23 +813,6 @@ func (r *Runner) upsertRelationships(ctx context.Context, tx *sql.Tx, scope iden
 	return nil
 }
 
-// mergeAttributes overlays incoming key/value pairs onto the existing set:
-// new keys win, keys this run didn't mention survive from before. This is
-// what makes entity state cumulative instead of a lossy overwrite.
-func mergeAttributes(existing, incoming map[string]string) map[string]string {
-	if existing == nil {
-		return incoming
-	}
-	merged := make(map[string]string, len(existing)+len(incoming))
-	for k, v := range existing {
-		merged[k] = v
-	}
-	for k, v := range incoming {
-		merged[k] = v
-	}
-	return merged
-}
-
 // EmbedderIdentity is what gets recorded in embedding_model whenever
 // something is embedded — see schema/0013_embedding_model_tracking.sql
 // for why: a vector from one embedding model isn't comparable to a
@@ -853,35 +869,21 @@ func (r *Runner) embedEntities(ctx context.Context, scope identity.Scope, ids []
 			continue
 		}
 		var kind, name string
-		var attrsCT []byte
-		var keyVersion int
+		var attrs map[string]string
 		err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx, `
-				select kind, name, attributes, key_version from entities
+			if err := tx.QueryRowContext(ctx, `
+				select kind, name from entities
 				where id = $1 and scope_kind = $2 and scope_owner = $3
-			`, id, scope.Kind, scope.Owner).Scan(&kind, &name, &attrsCT, &keyVersion)
+			`, id, scope.Kind, scope.Owner).Scan(&kind, &name); err != nil {
+				return err
+			}
+			var err error
+			attrs, err = entityattrs.Current(ctx, tx, r.keys, scope, id)
+			return err
 		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("entity %s: load current attributes: %w", id, err))
 			continue
-		}
-
-		enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("entity %s: resolve encryption key: %w", id, err))
-			continue
-		}
-		attrsJSON, err := enc.Decrypt(attrsCT)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("entity %s: decrypt attributes: %w", id, err))
-			continue
-		}
-		var attrs map[string]string
-		if attrsJSON != "" {
-			if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
-				errs = append(errs, fmt.Errorf("entity %s: parse attributes: %w", id, err))
-				continue
-			}
 		}
 
 		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(EntityEmbedText(kind, name, attrs))}})
