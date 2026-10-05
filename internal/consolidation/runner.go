@@ -180,7 +180,7 @@ func (r *Runner) RunDaily(ctx context.Context, scope identity.Scope, date time.T
 		correctionReason = "automatic re-consolidation, not a human correction: regenerated from the full day's episodes"
 	}
 
-	if err := r.storeSummary(ctx, storeSummaryInput{
+	if _, err := r.storeSummary(ctx, storeSummaryInput{
 		scope:               scope,
 		level:               "daily",
 		period:              period,
@@ -386,9 +386,13 @@ func (r *Runner) entitiesMissingEmbeddings(ctx context.Context, scope identity.S
 // only ever sees the old summary's sources and the real, correct
 // replacement fact comes back ungrounded every time, real-verified via
 // live testing.
-func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID string, output ConsolidationOutput, reason, actor, extraGroundingSourceText string) error {
+// Correct returns the new (corrected) summary's own id — Phase 3 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md needs it to record an
+// "updates" memory_relations edge from a replacement fact to the one it
+// replaced; existing callers that don't need it can discard it with _.
+func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID string, output ConsolidationOutput, reason, actor, extraGroundingSourceText string) (string, error) {
 	if reason == "" {
-		return fmt.Errorf("consolidation: correction_reason is required to correct %s", oldSummaryID)
+		return "", fmt.Errorf("consolidation: correction_reason is required to correct %s", oldSummaryID)
 	}
 
 	var level, period, sourceEpisodeIDsLit, sourceSummaryPeriodsLit string
@@ -419,10 +423,10 @@ func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("consolidation: load summary %s to correct: %w", oldSummaryID, err)
+		return "", fmt.Errorf("consolidation: load summary %s to correct: %w", oldSummaryID, err)
 	}
 	if supersededBy.Valid {
-		return fmt.Errorf("consolidation: %s is already superseded by %s — correct that version instead", oldSummaryID, supersededBy.String)
+		return "", fmt.Errorf("consolidation: %s is already superseded by %s — correct that version instead", oldSummaryID, supersededBy.String)
 	}
 
 	sourceEpisodeIDs := pgfmt.ParseTextArray(sourceEpisodeIDsLit)
@@ -436,7 +440,7 @@ func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID
 			return err
 		})
 		if err != nil {
-			return fmt.Errorf("consolidation: reload source episodes for correction: %w", err)
+			return "", fmt.Errorf("consolidation: reload source episodes for correction: %w", err)
 		}
 	} else {
 		err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
@@ -445,7 +449,7 @@ func (r *Runner) Correct(ctx context.Context, scope identity.Scope, oldSummaryID
 			return err
 		})
 		if err != nil {
-			return fmt.Errorf("consolidation: reload source summaries for correction: %w", err)
+			return "", fmt.Errorf("consolidation: reload source summaries for correction: %w", err)
 		}
 	}
 	groundingSourceText := joinSources(sources)
@@ -506,7 +510,8 @@ func (r *Runner) CurrentContent(ctx context.Context, scope identity.Scope, summa
 	var keyFacts []KeyFactOutput
 	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		rows, queryErr := tx.QueryContext(ctx, `
-			select fact, source_episode_ids from summary_key_facts where summary_id = $1
+			select fact, source_episode_ids, expires_at::text, expire_reason, source_count
+			from summary_key_facts where summary_id = $1
 		`, summaryID)
 		if queryErr != nil {
 			return queryErr
@@ -515,14 +520,27 @@ func (r *Runner) CurrentContent(ctx context.Context, scope identity.Scope, summa
 		for rows.Next() {
 			var factCT []byte
 			var sourceIDsLit string
-			if scanErr := rows.Scan(&factCT, &sourceIDsLit); scanErr != nil {
+			var expiresAt, expireReason sql.NullString
+			var sourceCount int
+			if scanErr := rows.Scan(&factCT, &sourceIDsLit, &expiresAt, &expireReason, &sourceCount); scanErr != nil {
 				return scanErr
 			}
 			factText, decErr := enc.Decrypt(factCT)
 			if decErr != nil {
 				return fmt.Errorf("decrypt key fact: %w", decErr)
 			}
-			keyFacts = append(keyFacts, KeyFactOutput{Fact: factText, SourceEpisodeIDs: pgfmt.ParseTextArray(sourceIDsLit)})
+			// expires_at/expire_reason/source_count round-trip here too
+			// (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md Phases 1-2) — a
+			// manual correction that doesn't touch a given fact must not
+			// silently lose its expiration or reset its reinforcement
+			// count back to 1.
+			keyFacts = append(keyFacts, KeyFactOutput{
+				Fact:             factText,
+				SourceEpisodeIDs: pgfmt.ParseTextArray(sourceIDsLit),
+				ExpiresAt:        expiresAt.String,
+				ExpireReason:     expireReason.String,
+				SourceCount:      sourceCount,
+			})
 		}
 		return rows.Err()
 	})
@@ -724,7 +742,7 @@ func (r *Runner) RunRollup(ctx context.Context, scope identity.Scope, level, sou
 	if existingCurrentID != "" {
 		correctionReason = "automatic re-consolidation, not a human correction: a source period changed since this rollup was last generated"
 	}
-	if err := r.storeSummary(ctx, storeSummaryInput{
+	if _, err := r.storeSummary(ctx, storeSummaryInput{
 		scope:                scope,
 		level:                level,
 		period:               period,

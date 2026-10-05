@@ -56,20 +56,23 @@ type storeSummaryInput struct {
 // opens (docs/HARDENING_PLAN.md D3); everything from nextSummaryID's
 // version lookup through the entity upserts shares one transaction so the
 // version-counting query and the insert that relies on it are consistent.
-func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
+// Returns the new summary's own id — Correct needs it (Phase 3 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md) to look up a just-written
+// key fact's own memories row id when recording an "updates" relation.
+func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) (string, error) {
 	grounded, err := r.groundingCheck(ctx, in.groundingSourceText, in.output.KeyFacts)
 	if err != nil {
-		return fmt.Errorf("grounding check: %w", err)
+		return "", fmt.Errorf("grounding check: %w", err)
 	}
 
 	enc, keyVersion, err := r.keys.GetOrCreate(ctx, in.scope)
 	if err != nil {
-		return fmt.Errorf("resolve encryption key for %s:%s: %w", in.scope.Kind, in.scope.Owner, err)
+		return "", fmt.Errorf("resolve encryption key for %s:%s: %w", in.scope.Kind, in.scope.Owner, err)
 	}
 
 	summaryCT, err := enc.Encrypt(in.output.Summary)
 	if err != nil {
-		return fmt.Errorf("encrypt summary text: %w", err)
+		return "", fmt.Errorf("encrypt summary text: %w", err)
 	}
 
 	// Canonicalize each touched entity's id from kind+name rather than
@@ -194,13 +197,24 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			if expiresAt != nil && kf.ExpireReason != "" {
 				expireReason = kf.ExpireReason
 			}
+			// Phase 2 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: every
+			// ordinary, freshly-extracted fact (the consolidation LLM
+			// never sets KeyFactOutput.SourceCount itself) gets the
+			// schema's own default of 1, not a literal Go zero value —
+			// only contradiction.go's redundant-handling branch (via a
+			// dump-template-and-resubmit Correct cycle) ever sets this
+			// above 1.
+			sourceCount := kf.SourceCount
+			if sourceCount <= 0 {
+				sourceCount = 1
+			}
 
 			var factRowID int64
 			err = tx.QueryRowContext(ctx, `
-				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner, expires_at, expire_reason)
-				values ($1, $2, $3::text[], $4, $5, $6, $7, $8::date, $9)
+				insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner, expires_at, expire_reason, source_count)
+				values ($1, $2, $3::text[], $4, $5, $6, $7, $8::date, $9, $10)
 				returning id
-			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner, expiresAt, expireReason).Scan(&factRowID)
+			`, id, factCT, pgfmt.TextArray(citeIDs), grounded[i], keyVersion, in.scope.Kind, in.scope.Owner, expiresAt, expireReason, sourceCount).Scan(&factRowID)
 			if err != nil {
 				return fmt.Errorf("insert key fact %d for summary %s: %w", i, id, err)
 			}
@@ -223,9 +237,9 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 			// today (schema/0025's own doc comment), so embedding it a
 			// second time would be pure cost with no reachable consumer.
 			if _, err := tx.ExecContext(ctx, `
-				insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded, source_episode_ids, expires_at, expire_reason)
-				values ($1, $2, $3, $4, $5, $6, false, $7, $8::text[], $9::date, $10)
-			`, "mem_fact_"+strconv.FormatInt(factRowID, 10), in.scope.Kind, in.scope.Owner, id, factCT, keyVersion, grounded[i], pgfmt.TextArray(citeIDs), expiresAt, expireReason); err != nil {
+				insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded, source_episode_ids, expires_at, expire_reason, source_count)
+				values ($1, $2, $3, $4, $5, $6, false, $7, $8::text[], $9::date, $10, $11)
+			`, memoryIDForKeyFact(factRowID), in.scope.Kind, in.scope.Owner, id, factCT, keyVersion, grounded[i], pgfmt.TextArray(citeIDs), expiresAt, expireReason, sourceCount); err != nil {
 				return fmt.Errorf("mirror key fact %d for summary %s into memories: %w", i, id, err)
 			}
 
@@ -285,7 +299,7 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Embedding runs after commit, genuinely best-effort — a real,
@@ -313,7 +327,7 @@ func (r *Runner) storeSummary(ctx context.Context, in storeSummaryInput) error {
 	if err := r.embedKeyFacts(ctx, in.scope, groundedFacts); err != nil {
 		slog.Warn("consolidation: embed key facts failed, facts committed without embeddings (lexical ranking fallback)", "summary", id, "facts", len(groundedFacts), "error", err)
 	}
-	return nil
+	return id, nil
 }
 
 // nextSummaryID assigns sum_<scope_owner>_<period>_<level>_v<N>,
@@ -628,6 +642,21 @@ func parseOptionalDate(s string) any {
 		return nil
 	}
 	return s
+}
+
+// memoryIDForKeyFact derives a key fact's citation id in the unified
+// memories table — same deterministic scheme
+// internal/backfillmemories.memoryIDForKeyFact and
+// internal/store/retrieve.go's own copy use (duplicated across
+// packages rather than exported and imported, same precedent as
+// internal/gateway/attribution.go's extractJSON: a one-line,
+// self-contained helper isn't worth a cross-package dependency).
+// Package-level here (not inlined at each call site) since this
+// package now has two call sites: storeSummary's own insert, and
+// contradiction.go's recordUpdateRelations linking a correction's new
+// fact back to the one it replaced.
+func memoryIDForKeyFact(factID int64) string {
+	return "mem_fact_" + strconv.FormatInt(factID, 10)
 }
 
 // newRelationshipID is a random opaque id, unlike entities' own

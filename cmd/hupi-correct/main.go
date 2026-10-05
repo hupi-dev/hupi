@@ -105,11 +105,12 @@ func run() error {
 		return fmt.Errorf("parse %s: %w", *contentPath, err)
 	}
 
-	if err := runner.Correct(ctx, scope, *summaryID, output, *reason, *actor, ""); err != nil {
+	newID, err := runner.Correct(ctx, scope, *summaryID, output, *reason, *actor, "")
+	if err != nil {
 		return fmt.Errorf("correct %s: %w", *summaryID, err)
 	}
 
-	fmt.Printf("wrote a corrected version superseding %s\n", *summaryID)
+	fmt.Printf("wrote %s, a corrected version superseding %s\n", newID, *summaryID)
 	return nil
 }
 

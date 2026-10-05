@@ -106,7 +106,7 @@ func TestStoreSummary_WritesExpirationIntoBothKeyFactsAndMemories(t *testing.T) 
 		})
 	})
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2026-01-15",
@@ -1054,7 +1054,7 @@ func TestCorrect_WritesAuditLogWithGivenActor(t *testing.T) {
 
 	const actor = "test-operator-erin"
 	correction := ConsolidationOutput{Summary: "Corrected weekly summary."}
-	if err := runner.Correct(ctx, scope, originalID, correction, "the original missed a decision", actor, ""); err != nil {
+	if _, err := runner.Correct(ctx, scope, originalID, correction, "the original missed a decision", actor, ""); err != nil {
 		t.Fatalf("Correct: %v", err)
 	}
 
@@ -1311,7 +1311,7 @@ func TestCorrect_ReplacesEntityAttributesWholesale(t *testing.T) {
 		})
 	})
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2026-09-20",
@@ -1348,7 +1348,7 @@ func TestCorrect_ReplacesEntityAttributesWholesale(t *testing.T) {
 			{ID: "project:widget", Kind: "project", Name: "Widget", Attributes: map[string]string{"concurrent_jobs_per_node": "2000"}},
 		},
 	}
-	if err := runner.Correct(ctx, scope, originalID, correction, "raised the concurrency limit", "test-operator", ""); err != nil {
+	if _, err := runner.Correct(ctx, scope, originalID, correction, "raised the concurrency limit", "test-operator", ""); err != nil {
 		t.Fatalf("Correct: %v", err)
 	}
 
@@ -1396,7 +1396,7 @@ func TestUpsertEntities_SupersedesKeysDeletesOldKeyBeforeMerging(t *testing.T) {
 		})
 	})
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2026-09-20",
@@ -1413,7 +1413,7 @@ func TestUpsertEntities_SupersedesKeysDeletesOldKeyBeforeMerging(t *testing.T) {
 
 	// A later day's own automatic consolidation, not a human correction —
 	// storeSummary's default merge path (replaceEntityAttrs left false).
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2026-09-21",
@@ -1495,14 +1495,14 @@ func TestCorrect_RejectsAlreadySupersededTarget(t *testing.T) {
 	// First correction: v2 supersedes v1 — this one is legitimate and
 	// must succeed, establishing v2 as current.
 	v2 := ConsolidationOutput{Summary: "v2: the first correction"}
-	if err := runner.Correct(ctx, scope, "sum_test_stale_v1", v2, "first correction", "operator-a", ""); err != nil {
+	if _, err := runner.Correct(ctx, scope, "sum_test_stale_v1", v2, "first correction", "operator-a", ""); err != nil {
 		t.Fatalf("first Correct (v1 -> v2) should succeed: %v", err)
 	}
 
 	// Second correction targets v1 again — v1 is no longer current (v2
 	// superseded it), so this must be rejected, not silently accepted.
 	v3 := ConsolidationOutput{Summary: "v3: a second correction mistakenly targeting stale v1"}
-	err = runner.Correct(ctx, scope, "sum_test_stale_v1", v3, "second correction, wrong target", "operator-b", "")
+	_, err = runner.Correct(ctx, scope, "sum_test_stale_v1", v3, "second correction, wrong target", "operator-b", "")
 	if err == nil {
 		t.Fatal("Correct against an already-superseded id should have failed, got nil error")
 	}
@@ -1548,7 +1548,7 @@ func TestCurrentContent_DumpTemplateThenCorrectPreservesUntouchedAttributes(t *t
 		})
 	})
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2026-09-20",
@@ -1589,7 +1589,7 @@ func TestCurrentContent_DumpTemplateThenCorrectPreservesUntouchedAttributes(t *t
 	dump.EntitiesTouched[0].Attributes["a"] = "99"
 	dump.Summary = "Corrected summary text."
 
-	if err := runner.Correct(ctx, scope, originalID, dump, "fixed field a using the dumped template", "test-operator", ""); err != nil {
+	if _, err := runner.Correct(ctx, scope, originalID, dump, "fixed field a using the dumped template", "test-operator", ""); err != nil {
 		t.Fatalf("Correct with edited dump: %v", err)
 	}
 
@@ -1638,7 +1638,7 @@ func TestStoreSummary_CanonicalizesEntityIDByKindAndName(t *testing.T) {
 
 	store := func(period, entityID string, attrs map[string]string) {
 		t.Helper()
-		if err := runner.storeSummary(ctx, storeSummaryInput{
+		if _, err := runner.storeSummary(ctx, storeSummaryInput{
 			scope:  scope,
 			level:  "daily",
 			period: period,
@@ -1705,7 +1705,7 @@ func TestStoreSummary_EmbedsTouchedEntities(t *testing.T) {
 		})
 	})
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2026-09-20",
