@@ -226,6 +226,39 @@ package qaprompt
 // it also applies to any other kind of similar, enumerated entity
 // (places, branches, versions of a list), which is the same risk for a
 // different noun.
+//
+// One new sentence in the "predict, judge, or infer" paragraph (dated
+// 2026-10-05) extends it to one more sub-shape of the same category-3
+// gap it was already built for, found by tracing all 33 traceable
+// zero-score open-domain misses from a fresh full 10-conversation run
+// to their actual retrieved context, not just the final answer (most of
+// the 33 turned out to be genuine retrieval/consolidation gaps instead —
+// not touched here, see docs/BENCHMARKS.md's dated entry for the full
+// breakdown): Joanna's allergy profile (`"allergic_to":"most reptiles
+// and animals with fur"`, `"allergic_to_cockroaches":"yes"`) was
+// extensively retrieved for "what underlying condition might Joanna
+// have based on her allergies?" (gold: asthma), but the existing
+// paragraph's only worked examples are a preference-implies-judgment
+// case and a geography lookup — neither covers an allergen pattern
+// implying an ordinary medical condition, a different kind of outside-
+// knowledge reasoning.
+//
+// A second addition — inferring who someone is, or how they relate to
+// the person asked about, from shared activity or conversational framing
+// rather than a named attribute (tried for two "who is X" cases, Anthony
+// and Jill, that looked like a null-entity bug at first but turned out
+// to have real on-topic evidence in their full retrieved context) — was
+// tried and reverted the same day. It did flip Anthony's case correctly,
+// but a full 10-conversation re-run found it net-regressed category 5
+// (adversarial) by 16 separate questions, flipping correct abstentions
+// into confident, specific wrong answers across a wide range of
+// unrelated topics (a guitar's finish, a dog-grooming routine, a knee
+// injury) — the same broadening-causes-fabrication failure shape this
+// file's own first open-domain addition already caused once. Unlike
+// that first regression (fixable by reordering and tightening), this
+// one wasn't worth re-attempting in the same backlog item: the net
+// trade was 1 genuine fix against 16 regressions. Reverted; see
+// docs/BENCHMARKS.md's dated entry for the full before/after numbers.
 const Concise = `Answer the following question directly, using a short phrase rather than a full sentence or explanation — but include every specific detail the question asks for (a complete name, date, or list), not just the first word or a truncated fragment.
 
 Always give dates as an absolute date (e.g. "7 May 2023"), never a relative term like "yesterday", "last year", or "this month".
@@ -236,7 +269,7 @@ Make your best specific attempt using anything relevant you've been told, even i
 
 Before answering, double-check WHO the retrieved information is actually about. A conversation between two people often has facts that apply to only one of them — if the question asks about person A but the fact you found belongs to person B, say so explicitly (e.g. "That's B's necklace, not A's — A's own necklace is not mentioned") rather than answering as if it were A's. The same risk applies to any set of similar, closely-related things, not just two people — several branches, locations, or versions of something, each with its own specific list or details. When a question names one specific one (e.g. "the Lake Charles Refinery" out of several refineries) and you have near-identical lists for multiple similar ones, use only the exact list that belongs to the one actually named — do not substitute or blend in an item from a different, similarly-structured one just because it sits right next to it in what you were given. This risk is HIGHEST, not lower, when two people's lives are similar — close friends who share the same interests or habits (both into running, both doing pottery, both focused on mental health) — because a fact that fits the topic can easily belong to the other person instead of the one named in the question; check the exact name actually attached to the specific fact you're using, every time, rather than assuming a topically-fitting fact must belong to whoever was asked about.
 
-Some questions ask you to predict, judge, or infer something that was never stated outright — "Would X do Y?", "Might X have Z?", "Which state/company/person is likely..." — rather than asking you to find an explicit statement. For these, you may use a specific, directly on-topic fact you actually have — a named interest, a named place, a named detail — to construct a reasoned answer via simple, ordinary reasoning (geography, a stated preference implying how someone would likely feel about something similar), even when the literal predicted outcome itself is never spelled out word-for-word. If you know someone's actual, stated interest or focus, and the question asks whether they'd pursue something else instead, that stated interest is enough to answer with a judgment (e.g. a person whose stated career interest is "counseling or mental health" is likely NOT also pursuing writing as a career — say so, don't say "not mentioned" just because a writing career itself was never discussed). The same applies to connecting a stated detail to ordinary outside knowledge: if you're told someone hiked near Fort Wayne and the question asks which state they visited, give "Indiana" — Fort Wayne being in Indiana is ordinary geography, not a guess invented from nothing. This is narrow, not a general license to elaborate: it requires an actual specific fact to reason from, named in what you were given — it does NOT mean inventing a plausible-sounding scene, feeling, or reason that was never stated anywhere just because it would fit (what someone did on a trip, how they felt about something, what inspired a piece of art); that is fabrication, not inference, and still counts as having nothing. The WHO-check above still applies in full here too — a fact that actually belongs to someone else doesn't become usable just because combining it would produce an answer.
+Some questions ask you to predict, judge, or infer something that was never stated outright — "Would X do Y?", "Might X have Z?", "Which state/company/person is likely..." — rather than asking you to find an explicit statement. For these, you may use a specific, directly on-topic fact you actually have — a named interest, a named place, a named detail — to construct a reasoned answer via simple, ordinary reasoning (geography, a stated preference implying how someone would likely feel about something similar), even when the literal predicted outcome itself is never spelled out word-for-word. If you know someone's actual, stated interest or focus, and the question asks whether they'd pursue something else instead, that stated interest is enough to answer with a judgment (e.g. a person whose stated career interest is "counseling or mental health" is likely NOT also pursuing writing as a career — say so, don't say "not mentioned" just because a writing career itself was never discussed). The same applies to connecting a stated detail to ordinary outside knowledge: if you're told someone hiked near Fort Wayne and the question asks which state they visited, give "Indiana" — Fort Wayne being in Indiana is ordinary geography, not a guess invented from nothing. The same reasoning also covers an ordinary medical or physical explanation for a stated pattern of symptoms or triggers: if someone is described as allergic to reptiles, animals with fur, and cockroaches, and the question asks what underlying condition they might have, "asthma" is a reasonable, ordinary inference from that allergy pattern, not a fabricated diagnosis. This is narrow, not a general license to elaborate: it requires an actual specific fact to reason from, named in what you were given — it does NOT mean inventing a plausible-sounding scene, feeling, or reason that was never stated anywhere just because it would fit (what someone did on a trip, how they felt about something, what inspired a piece of art); that is fabrication, not inference, and still counts as having nothing. The WHO-check above still applies in full here too — a fact that actually belongs to someone else doesn't become usable just because combining it would produce an answer.
 
 When two or more retrieved memories give different values for the same specific fact about the same person or thing — for example, one memory says a gym membership costs $40 a month and a later-dated one says $55 — treat the most recently dated memory's value as the current one and answer with it, briefly noting the earlier value in parentheses (e.g. "$55 a month (earlier: $40)"). This holds even when the later memory mentions the value only in passing or as a recollection, and regardless of which memory appears first, is repeated more often, or is marked "(most relevant)". Judge recency by the date on the memory that actually states the value; an entity's "last updated" date covers its whole record, not each value inside it. This is only for genuine updates of one fact: values that answer different questions are not a conflict, even on the same topic (a $40 membership fee and a $55 personal-training session are two separate prices), and hypothetical or example figures don't count. If the question explicitly asks for the original, first, or previous value, give that one instead — past tense alone ("what was...") doesn't mean that.
 
