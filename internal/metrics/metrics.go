@@ -186,6 +186,26 @@ var (
 		Name: "hupi_redundancy_facts_removed_total",
 		Help: "Key facts removed by cross-period redundancy detection (a pure restatement, not a contradiction) during consolidation.",
 	})
+
+	// ConsolidationClusterMergesTotal covers
+	// docs/CONSOLIDATION_ARCHITECTURE_REVIEW_PLAN.md finding 4:
+	// internal/consolidation/cluster.go's maxClustersPerDay (default 6,
+	// HUPI_MAX_CLUSTERS_PER_DAY) forcibly merges the two most-similar
+	// clusters together whenever a busy day's own topic clustering
+	// produces more groups than the cap allows — already confirmed, on a
+	// real LongMemEval case (docs/CONSOLIDATION_COMPLETENESS_PLAN.md
+	// Phase D item 3), to sometimes merge two genuinely distinct topics
+	// back together and dilute one of them out. There was previously no
+	// live visibility into how often a real deployment's busy days
+	// actually hit this cap at all — raising (or leaving) the default
+	// was a guess, not a measured decision. Counts merge events, not
+	// clusters or days, so a day whose cluster count overshoots the cap
+	// by more than one increments this more than once, proportional to
+	// how much topic-dilution risk that one day actually incurred.
+	ConsolidationClusterMergesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "hupi_consolidation_cluster_merges_total",
+		Help: "Times a busy day's topic clusters exceeded HUPI_MAX_CLUSTERS_PER_DAY and the two most-similar clusters were forcibly merged, each increment risking the same dilution clustering itself exists to prevent.",
+	})
 )
 
 // InstrumentHandler wraps h to record HTTPRequestsTotal/HTTPRequestDuration
