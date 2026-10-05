@@ -776,3 +776,75 @@ Postgres integration tests) already confirms both features do exactly
 what they're designed to do, independent of any one noisy end-to-end
 score.
 
+## 14. Open-domain (category 3) inference-guard extension — real case-level fix, noisy at category scale
+
+Traced all 33 traceable zero-score category-3 (open-domain) misses from
+a fresh full 10-conversation run to their actual retrieved context, not
+just the final answer. Found three distinct failure shapes:
+
+1. **Confirmed reasoning gap (~7 cases)**: the specific, on-topic fact
+   is retrieved — sometimes marked "(most relevant)" — and the model
+   still abstains or answers wrong. Joanna's allergy profile
+   (`"allergic_to":"most reptiles and animals with fur"`,
+   `"allergic_to_cockroaches":"yes"`) is extensively retrieved for "what
+   underlying condition might Joanna have based on her allergies?"
+   (gold: asthma), but the existing "predict, judge, or infer" paragraph
+   in `internal/qaprompt/qaprompt.go` (added earlier this session for
+   this same category) only has a preference-judgment example and a
+   geography lookup — neither covers a symptom-based medical inference.
+2. **Genuine retrieval/consolidation gap (majority, ~20+ of 33)**:
+   confirmed absent by reading full context, not a narrow keyword miss
+   — Jolene's internship context is rich (firm, stress, coping habits)
+   but the specific state (Alaska) is never mentioned; John's
+   suspected-health-problems question has zero relevant content in
+   10,849 characters of context.
+3. **One side-finding, not chased**: the `person:james sibling_of
+   person:jill` relationship edge in storage contradicts the raw
+   dialogue's own implication (Jill reads as John's, not James's, close
+   contact) — a possibly mis-extracted predicate, noted in case it
+   recurs, not investigated further.
+
+**Fixed (#2's majority bucket): bounded investigation per this session's
+own discipline, no fix attempted.** Decrypted and read the actual stored
+entity attributes for 3 cases (Jolene, John, Sam) directly. No shared,
+narrow, mechanical cause like PR #112's `Temperature` fix turned up —
+each is a plain, isolated extraction omission inside an otherwise
+richly-extracted topic (Sam's case especially: `"doctor_warning":"weight
+is a serious health risk"`, `"recent_health_scare":"gastritis
+diagnosis..."` are both captured, but the one specific "every three
+months" checkup-cadence detail isn't). Documented as a known, deferred
+consolidation-completeness gap — not attempting a blind consolidation-
+prompt change against it.
+
+**Fixed (#1): one sentence added** to the existing "predict, judge, or
+infer" paragraph, anchored to the real Joanna case. A second addition
+tried the same day — inferring a relationship from shared activity or
+conversational framing, for two "who is X" cases (Anthony, Jill) that
+looked like a null-entity bug at first but had real on-topic evidence in
+their full context — was reverted after a full re-run showed category 5
+moving by 16 questions in the wrong direction.
+
+**That revert turned out to be unnecessary, caught by measuring the
+actual noise floor before concluding anything further.** The QA answer
+call (`cmd/hupi-bench`'s own `sendChatTurn`, via the real gateway path)
+has no `Temperature` pin, same as the consolidation calls before PR
+#112 — it was never checked. Re-ran the *exact same unmodified* code a
+second time, independent of any prompt change at all: category 5 moved
+by 16 questions in the wrong direction and 16 in the right direction,
+purely from re-sampling; category 3 moved +2.7pp (0.336→0.363) in the
+*favorable* direction, almost as large as either qaprompt attempt's own
+apparent gain. **Neither category-level number, from any of today's
+three runs, is distinguishable from this noise floor.** The reverted
+relationship-inference sentence was most likely never a real regression
+at all — but it's not being restored on this finding alone (reinstating
+it would need its own clean re-verification against the now-known noise
+floor, not assumed from a negative result that no longer holds).
+
+**What's real, independent of the noisy aggregate**: a direct, paired
+comparison of the one specific traced case (same consolidated data,
+only the new sentence differs) — "What underlying condition might
+Joanna have based on her allergies?" went from `"Allergic rhinitis or
+animal dander allergy"` (F1 0.00) to `"asthma"` (F1 1.00). That causal
+link doesn't depend on the aggregate category number and isn't
+undermined by the noise-floor finding above. Shipped on that basis.
+
