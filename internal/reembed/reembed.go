@@ -26,7 +26,6 @@ package reembed
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,6 +34,7 @@ import (
 	"hupi/internal/consolidation"
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/identity"
 	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
@@ -388,13 +388,11 @@ func (r *Runner) reembedEntityBatch(ctx context.Context, scope identity.Scope, m
 	type row struct {
 		id         string
 		kind, name string
-		attrsCT    []byte
-		keyVersion int
 	}
 	var rows []row
 	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		dbRows, err := tx.QueryContext(ctx, `
-			select id, kind, name, attributes, key_version from entities
+			select id, kind, name from entities
 			where (embedding is null or embedding_model is distinct from $1)
 			  and scope_kind = $2 and scope_owner = $3
 			order by id limit $4
@@ -405,7 +403,7 @@ func (r *Runner) reembedEntityBatch(ctx context.Context, scope identity.Scope, m
 		defer dbRows.Close()
 		for dbRows.Next() {
 			var rr row
-			if err := dbRows.Scan(&rr.id, &rr.kind, &rr.name, &rr.attrsCT, &rr.keyVersion); err != nil {
+			if err := dbRows.Scan(&rr.id, &rr.kind, &rr.name); err != nil {
 				return fmt.Errorf("scan entity: %w", err)
 			}
 			rows = append(rows, rr)
@@ -417,16 +415,20 @@ func (r *Runner) reembedEntityBatch(ctx context.Context, scope identity.Scope, m
 	}
 
 	for _, rr := range rows {
-		texts, err := r.decryptWithRetry(ctx, scope, "entities", rr.id, rr.keyVersion, []string{"attributes"}, [][]byte{rr.attrsCT})
-		if err != nil {
-			return 0, fmt.Errorf("decrypt entity %s attributes: %w", rr.id, err)
-		}
-		attrsJSON := texts[0]
+		// Unlike decryptWithRetry's own race (a batch-selected ciphertext
+		// paired with a key_version that's since moved on), this reads
+		// content and key_version together, fresh, right here — no gap
+		// between the read and the decrypt for this row to race against,
+		// so no retry is needed the way the other entity columns still
+		// use it above.
 		var attrs map[string]string
-		if attrsJSON != "" {
-			if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
-				return 0, fmt.Errorf("parse entity %s attributes: %w", rr.id, err)
-			}
+		err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+			var attrErr error
+			attrs, attrErr = entityattrs.Current(ctx, tx, r.keys, scope, rr.id)
+			return attrErr
+		})
+		if err != nil {
+			return 0, fmt.Errorf("load current attributes for entity %s: %w", rr.id, err)
 		}
 		resp, err := r.embedder.Embed(ctx, provider.EmbedRequest{Input: []string{provider.TruncateForEmbedding(consolidation.EntityEmbedText(rr.kind, rr.name, attrs))}})
 		if err != nil {

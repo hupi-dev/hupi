@@ -39,6 +39,7 @@ func cleanup(t *testing.T, db *sql.DB, scope identity.Scope) {
 		tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		tx.Exec(`delete from summary_key_facts where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+		tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		return nil
 	})

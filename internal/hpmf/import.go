@@ -19,6 +19,7 @@ import (
 	"hupi/internal/audit"
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/identity"
 	"hupi/internal/pgfmt"
 )
@@ -190,17 +191,45 @@ func importEntities(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, keyV
 				stats.EntitiesSkipped++
 				continue
 			}
-			attrsCT, err := enc.Encrypt(string(r.Attributes))
-			if err != nil {
-				return fmt.Errorf("hpmf: encrypt entity %s attributes: %w", r.ID, err)
-			}
-			_, err = tx.ExecContext(ctx, `
-				insert into entities (id, kind, name, first_seen, last_updated, attributes, scope_kind, scope_owner, key_version)
-				values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			`, r.ID, r.Kind, r.Name, r.FirstSeen, r.LastUpdated, attrsCT, scope.Kind, scope.Owner, keyVersion)
+			_, err := tx.ExecContext(ctx, `
+				insert into entities (id, kind, name, first_seen, last_updated, scope_kind, scope_owner, key_version)
+				values ($1, $2, $3, $4, $5, $6, $7, $8)
+			`, r.ID, r.Kind, r.Name, r.FirstSeen, r.LastUpdated, scope.Kind, scope.Owner, keyVersion)
 			if err != nil {
 				return fmt.Errorf("hpmf: insert entity %s: %w", r.ID, err)
 			}
+
+			// Attributes land in the unified memories table (schema/0025,
+			// schema/0027), one row per key — same shape upsertEntities
+			// writes going forward, not entities.attributes, which this
+			// import no longer populates at all (see that function's own
+			// doc comment on why). A brand-new entity has no prior
+			// attribute row to supersede, so every row here starts a fresh
+			// chain.
+			var attrs map[string]string
+			if len(r.Attributes) > 0 {
+				if err := json.Unmarshal(r.Attributes, &attrs); err != nil {
+					return fmt.Errorf("hpmf: parse entity %s attributes: %w", r.ID, err)
+				}
+			}
+			for key, value := range attrs {
+				ct, err := enc.Encrypt(value)
+				if err != nil {
+					return fmt.Errorf("hpmf: encrypt entity %s attribute %s: %w", r.ID, key, err)
+				}
+				rowID, err := entityattrs.NewID()
+				if err != nil {
+					return fmt.Errorf("hpmf: generate id for entity %s attribute %s: %w", r.ID, key, err)
+				}
+				_, err = tx.ExecContext(ctx, `
+					insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, key_version, is_static, grounded)
+					values ($1, $2, $3, $4, $5, $6, $7, true, true)
+				`, rowID, scope.Kind, scope.Owner, r.ID, key, ct, keyVersion)
+				if err != nil {
+					return fmt.Errorf("hpmf: insert attribute for entity %s key %s: %w", r.ID, key, err)
+				}
+			}
+
 			existing[r.ID] = true
 			stats.EntitiesImported++
 		}

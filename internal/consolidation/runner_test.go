@@ -3,7 +3,6 @@ package consolidation
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -14,6 +13,7 @@ import (
 
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
+	"hupi/internal/entityattrs"
 	"hupi/internal/identity"
 	"hupi/internal/provider"
 )
@@ -107,6 +107,7 @@ func TestRunDaily_WritesGroundedSummary(t *testing.T) {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -386,6 +387,7 @@ func TestRunDaily_SucceedsDespiteEmbeddingFailure(t *testing.T) {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -452,6 +454,7 @@ func TestRunDaily_SetsEntityDatesToTheSimulatedDateNotRealNow(t *testing.T) {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -1196,6 +1199,7 @@ func TestCorrect_ReplacesEntityAttributesWholesale(t *testing.T) {
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -1242,26 +1246,13 @@ func TestCorrect_ReplacesEntityAttributesWholesale(t *testing.T) {
 		t.Fatalf("Correct: %v", err)
 	}
 
-	var attrsCT []byte
-	var keyVersion int
-	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			select attributes, key_version from entities where id = 'project:widget' and scope_kind = $1 and scope_owner = $2
-		`, scope.Kind, scope.Owner).Scan(&attrsCT, &keyVersion)
-	}); err != nil {
-		t.Fatalf("load corrected entity: %v", err)
-	}
-	enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
-	if err != nil {
-		t.Fatalf("resolve key version: %v", err)
-	}
-	attrsJSON, err := enc.Decrypt(attrsCT)
-	if err != nil {
-		t.Fatalf("decrypt entity attributes: %v", err)
-	}
 	var attrs map[string]string
-	if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
-		t.Fatalf("parse entity attributes: %v", err)
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		var err error
+		attrs, err = entityattrs.Current(ctx, tx, runner.keys, scope, "project:widget")
+		return err
+	}); err != nil {
+		t.Fatalf("load corrected entity attributes: %v", err)
 	}
 
 	if got, want := attrs["concurrent_jobs_per_node"], "2000"; got != want {
@@ -1293,6 +1284,7 @@ func TestUpsertEntities_SupersedesKeysDeletesOldKeyBeforeMerging(t *testing.T) {
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -1336,26 +1328,13 @@ func TestUpsertEntities_SupersedesKeysDeletesOldKeyBeforeMerging(t *testing.T) {
 		t.Fatalf("store later summary+entity update: %v", err)
 	}
 
-	var attrsCT []byte
-	var keyVersion int
-	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			select attributes, key_version from entities where id = 'project:widget' and scope_kind = $1 and scope_owner = $2
-		`, scope.Kind, scope.Owner).Scan(&attrsCT, &keyVersion)
-	}); err != nil {
-		t.Fatalf("load entity: %v", err)
-	}
-	enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
-	if err != nil {
-		t.Fatalf("resolve key version: %v", err)
-	}
-	attrsJSON, err := enc.Decrypt(attrsCT)
-	if err != nil {
-		t.Fatalf("decrypt entity attributes: %v", err)
-	}
 	var attrs map[string]string
-	if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
-		t.Fatalf("parse entity attributes: %v", err)
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		var err error
+		attrs, err = entityattrs.Current(ctx, tx, runner.keys, scope, "project:widget")
+		return err
+	}); err != nil {
+		t.Fatalf("load entity attributes: %v", err)
 	}
 
 	if got, want := attrs["concurrent_jobs_per_node"], "2000"; got != want {
@@ -1457,6 +1436,7 @@ func TestCurrentContent_DumpTemplateThenCorrectPreservesUntouchedAttributes(t *t
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -1507,26 +1487,13 @@ func TestCurrentContent_DumpTemplateThenCorrectPreservesUntouchedAttributes(t *t
 		t.Fatalf("Correct with edited dump: %v", err)
 	}
 
-	var attrsCT []byte
-	var keyVersion int
-	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			select attributes, key_version from entities where id = 'project:gizmo' and scope_kind = $1 and scope_owner = $2
-		`, scope.Kind, scope.Owner).Scan(&attrsCT, &keyVersion)
-	}); err != nil {
-		t.Fatalf("load corrected entity: %v", err)
-	}
-	enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
-	if err != nil {
-		t.Fatalf("resolve key version: %v", err)
-	}
-	attrsJSON, err := enc.Decrypt(attrsCT)
-	if err != nil {
-		t.Fatalf("decrypt entity attributes: %v", err)
-	}
 	var attrs map[string]string
-	if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
-		t.Fatalf("parse entity attributes: %v", err)
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		var err error
+		attrs, err = entityattrs.Current(ctx, tx, runner.keys, scope, "project:gizmo")
+		return err
+	}); err != nil {
+		t.Fatalf("load corrected entity attributes: %v", err)
 	}
 	if attrs["a"] != "99" {
 		t.Errorf("a = %q, want %q (the corrected value)", attrs["a"], "99")
@@ -1557,6 +1524,7 @@ func TestStoreSummary_CanonicalizesEntityIDByKindAndName(t *testing.T) {
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -1596,26 +1564,13 @@ func TestStoreSummary_CanonicalizesEntityIDByKindAndName(t *testing.T) {
 	}
 
 	const canonicalID = "project:project-falcon"
-	var attrsCT []byte
-	var keyVersion int
-	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			select attributes, key_version from entities where id = $1 and scope_kind = $2 and scope_owner = $3
-		`, canonicalID, scope.Kind, scope.Owner).Scan(&attrsCT, &keyVersion)
-	}); err != nil {
-		t.Fatalf("load entity at canonical id %s: %v", canonicalID, err)
-	}
-	enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
-	if err != nil {
-		t.Fatalf("resolve key version: %v", err)
-	}
-	attrsJSON, err := enc.Decrypt(attrsCT)
-	if err != nil {
-		t.Fatalf("decrypt attributes: %v", err)
-	}
 	var attrs map[string]string
-	if err := json.Unmarshal([]byte(attrsJSON), &attrs); err != nil {
-		t.Fatalf("parse attributes: %v", err)
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		var err error
+		attrs, err = entityattrs.Current(ctx, tx, runner.keys, scope, canonicalID)
+		return err
+	}); err != nil {
+		t.Fatalf("load attributes at canonical id %s: %v", canonicalID, err)
 	}
 	if attrs["launch"] != "Q2" {
 		t.Errorf("launch = %q, want %q (the second run's value, merged onto the same canonicalized row)", attrs["launch"], "Q2")
@@ -1638,6 +1593,7 @@ func TestStoreSummary_EmbedsTouchedEntities(t *testing.T) {
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -1688,6 +1644,7 @@ func TestRunDaily_BackfillsMissingEntityEmbeddings(t *testing.T) {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -1771,6 +1728,7 @@ func TestRunRollup_ThreadsKnownEntitiesIntoPrompt(t *testing.T) {
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -1784,9 +1742,9 @@ func TestRunRollup_ThreadsKnownEntitiesIntoPrompt(t *testing.T) {
 	// A pre-existing entity whose name appears in the rollup's own
 	// source summary text below — findKnownEntities' substring match is
 	// what's supposed to pick this up now.
-	attrsCT, err := enc.Encrypt(`{"preapproval_amount":"$400,000"}`)
+	attrCT, err := enc.Encrypt("$400,000")
 	if err != nil {
-		t.Fatalf("encrypt entity attrs: %v", err)
+		t.Fatalf("encrypt entity attr: %v", err)
 	}
 	dailyText := "Jolene mentioned her mortgage pre-approval again this week."
 	dailyCT, err := enc.Encrypt(dailyText)
@@ -1797,9 +1755,15 @@ func TestRunRollup_ThreadsKnownEntitiesIntoPrompt(t *testing.T) {
 	sourcePeriods := []string{"2026-09-07", "2026-09-08"}
 	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`
-			insert into entities (id, kind, name, attributes, scope_kind, scope_owner, key_version)
-			values ('person:jolene', 'person', 'Jolene', $1, $2, $3, $4)
-		`, attrsCT, scope.Kind, scope.Owner, keyVersion); err != nil {
+			insert into entities (id, kind, name, scope_kind, scope_owner, key_version)
+			values ('person:jolene', 'person', 'Jolene', $1, $2, $3)
+		`, scope.Kind, scope.Owner, keyVersion); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, key_version, is_static, grounded)
+			values ('mem_test_jolene_preapproval', $1, $2, 'person:jolene', 'preapproval_amount', $3, $4, true, true)
+		`, scope.Kind, scope.Owner, attrCT, keyVersion); err != nil {
 			return err
 		}
 		for _, p := range sourcePeriods {

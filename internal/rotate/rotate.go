@@ -43,8 +43,12 @@ const (
 // tableOrder is the fixed sequence a rotation walks — episodes first
 // since they're normally the largest table, then summaries (which also
 // carries summary_key_facts along for the ride, see migrateSummaryBatch),
-// then entities.
-var tableOrder = []string{"episodes", "summaries", "entities"}
+// then entities, then memories (schema/0025) — the unified table
+// internal/consolidation/store.go's upsertEntities and
+// internal/hpmf/import.go now write real attribute/fact content into,
+// per schema/0025's own doc comment flagging this as a must-do "before
+// memories carries real data."
+var tableOrder = []string{"episodes", "summaries", "entities", "memories"}
 
 // MaxBatchSize is the hard ceiling Continue enforces on batchSize,
 // regardless of what a caller requests. Each batch runs real
@@ -273,6 +277,8 @@ func (r *Runner) Continue(ctx context.Context, scope identity.Scope, batchSize i
 			n, err = r.migrateSummaryBatch(ctx, scope, fromEnc, toEnc, st.FromVersion, st.ToVersion, batchSize)
 		case "entities":
 			n, err = r.migrateEntityBatch(ctx, scope, fromEnc, toEnc, st.FromVersion, st.ToVersion, batchSize)
+		case "memories":
+			n, err = r.migrateMemoriesBatch(ctx, scope, fromEnc, toEnc, st.FromVersion, st.ToVersion, batchSize)
 		default:
 			return 0, false, fmt.Errorf("rotate: unknown cursor_table %q for %s:%s", table, scope.Kind, scope.Owner)
 		}
@@ -571,6 +577,70 @@ func (r *Runner) migrateEntityBatch(ctx context.Context, scope identity.Scope, f
 	return len(rows), err
 }
 
+// migrateMemoriesBatch re-encrypts memories.content the same way
+// migrateEntityBatch re-encrypts entities.attributes — one column, one
+// key_version, no linked child table to carry along (unlike summaries'
+// summary_key_facts: every attribute/fact's own history already lives
+// as separate memories rows, each with its own key_version migrated in
+// its own right when this batch reaches it).
+func (r *Runner) migrateMemoriesBatch(ctx context.Context, scope identity.Scope, fromEnc, toEnc *crypto.Encryptor, fromVersion, toVersion, batchSize int) (int, error) {
+	type row struct {
+		id        string
+		contentCT []byte
+	}
+	var rows []row
+
+	err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		dbRows, err := tx.QueryContext(ctx, `
+			select id, content from memories
+			where scope_kind = $1 and scope_owner = $2 and key_version = $3
+			order by id limit $4
+		`, scope.Kind, scope.Owner, fromVersion, batchSize)
+		if err != nil {
+			return fmt.Errorf("query memories: %w", err)
+		}
+		for dbRows.Next() {
+			var rr row
+			if err := dbRows.Scan(&rr.id, &rr.contentCT); err != nil {
+				dbRows.Close()
+				return fmt.Errorf("scan memory: %w", err)
+			}
+			rows = append(rows, rr)
+		}
+		if err := dbRows.Err(); err != nil {
+			dbRows.Close()
+			return err
+		}
+		dbRows.Close()
+
+		for _, rr := range rows {
+			content, err := fromEnc.Decrypt(rr.contentCT)
+			if err != nil {
+				return fmt.Errorf("decrypt memory %s: %w", rr.id, err)
+			}
+			newCT, err := toEnc.Encrypt(content)
+			if err != nil {
+				return fmt.Errorf("re-encrypt memory %s: %w", rr.id, err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				update memories set content = $1, key_version = $2
+				where id = $3 and scope_kind = $4 and scope_owner = $5
+			`, newCT, toVersion, rr.id, scope.Kind, scope.Owner); err != nil {
+				return fmt.Errorf("update memory %s: %w", rr.id, err)
+			}
+		}
+		if len(rows) > 0 {
+			if _, err := tx.ExecContext(ctx, `
+				update key_rotations set cursor_id = $1 where scope_kind = $2 and scope_owner = $3
+			`, rows[len(rows)-1].id, scope.Kind, scope.Owner); err != nil {
+				return fmt.Errorf("advance cursor: %w", err)
+			}
+		}
+		return nil
+	})
+	return len(rows), err
+}
+
 // Prune deletes scope_keys rows for versions older than a completed
 // rotation's to_version — the explicit, separate step
 // docs/GAP_CLOSURE_PLAN.md §4.4 calls for rather than doing this
@@ -608,7 +678,8 @@ func (r *Runner) Prune(ctx context.Context, scope identity.Scope, actor string) 
 				(select count(*) from summaries where scope_kind=$1 and scope_owner=$2 and key_version < $3) +
 				(select count(*) from entities where scope_kind=$1 and scope_owner=$2 and key_version < $3) +
 				(select count(*) from summary_key_facts f join summaries s on s.id = f.summary_id
-					where s.scope_kind=$1 and s.scope_owner=$2 and f.key_version < $3)
+					where s.scope_kind=$1 and s.scope_owner=$2 and f.key_version < $3) +
+				(select count(*) from memories where scope_kind=$1 and scope_owner=$2 and key_version < $3)
 		`, scope.Kind, scope.Owner, st.ToVersion).Scan(&stillReferenced)
 	})
 	if err != nil {

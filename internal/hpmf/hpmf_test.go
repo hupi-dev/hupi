@@ -39,6 +39,7 @@ func cleanupScope(t *testing.T, db *sql.DB, scope identity.Scope) {
 	_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
 		tx.Exec(`delete from episodes where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+		tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		return nil
 	})
@@ -94,12 +95,21 @@ func seedScope(t *testing.T, ctx context.Context, db *sql.DB, keys *crypto.KeySt
 		t.Fatalf("seed summary for %s: %v", tag, err)
 	}
 
-	attrsCT, _ := enc.Encrypt(`{"tag":"` + tag + `"}`)
+	tagCT, _ := enc.Encrypt(tag)
 	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			insert into entities (id, kind, name, scope_kind, scope_owner)
+			values ($1, 'project', $2, $3, $4)
+		`, "project:"+tag, "Project "+tag, scope.Kind, scope.Owner); err != nil {
+			return err
+		}
+		// A real, post-cutover attribute row (internal/consolidation/store.go's
+		// upsertEntities shape) — entities.attributes is no longer where
+		// live attribute data lives, see exportEntities' own doc comment.
 		_, err := tx.ExecContext(ctx, `
-			insert into entities (id, kind, name, attributes, scope_kind, scope_owner)
-			values ($1, 'project', $2, $3, $4, $5)
-		`, "project:"+tag, "Project "+tag, attrsCT, scope.Kind, scope.Owner)
+			insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, is_static, grounded)
+			values ($1, $2, $3, $4, 'tag', $5, true, true)
+		`, "mem_"+tag, scope.Kind, scope.Owner, "project:"+tag, tagCT)
 		return err
 	})
 	if err != nil {

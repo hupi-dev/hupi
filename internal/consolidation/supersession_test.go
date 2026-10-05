@@ -65,6 +65,7 @@ func TestFindKnownEntitiesMatchesNameSubstring(t *testing.T) {
 	ctx := context.Background()
 	t.Cleanup(func() {
 		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 			return nil
 		})
@@ -74,30 +75,33 @@ func TestFindKnownEntitiesMatchesNameSubstring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve test encryption key: %v", err)
 	}
-	attrsCT, err := enc.Encrypt(`{"preapproval_amount":"$250,000"}`)
+	attrCT, err := enc.Encrypt("$250,000")
 	if err != nil {
-		t.Fatalf("encrypt attributes: %v", err)
+		t.Fatalf("encrypt attribute: %v", err)
 	}
 	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			insert into entities (id, kind, name, key_version, scope_kind, scope_owner)
+			values ('organization:wells-fargo', 'organization', 'Wells Fargo', $1, $2, $3)
+		`, keyVersion, scope.Kind, scope.Owner); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx, `
-			insert into entities (id, kind, name, attributes, key_version, scope_kind, scope_owner)
-			values ('organization:wells-fargo', 'organization', 'Wells Fargo', $1, $2, $3, $4)
-		`, attrsCT, keyVersion, scope.Kind, scope.Owner)
+			insert into memories (id, scope_kind, scope_owner, entity_id, attribute_key, content, key_version, is_static, grounded)
+			values ('mem_test_wells_fargo_preapproval', $1, $2, 'organization:wells-fargo', 'preapproval_amount', $3, $4, true, true)
+		`, scope.Kind, scope.Owner, attrCT, keyVersion)
 		return err
 	}); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	// Also seed an unrelated entity to confirm it's correctly excluded —
-	// findKnownEntities should be selective, not "return everything".
-	unrelatedCT, err := enc.Encrypt(`{}`)
-	if err != nil {
-		t.Fatalf("encrypt unrelated attributes: %v", err)
-	}
+	// Also seed an unrelated entity (with no attributes at all) to
+	// confirm it's correctly excluded — findKnownEntities should be
+	// selective, not "return everything".
 	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			insert into entities (id, kind, name, attributes, key_version, scope_kind, scope_owner)
-			values ('organization:chase', 'organization', 'Chase', $1, $2, $3, $4)
-		`, unrelatedCT, keyVersion, scope.Kind, scope.Owner)
+			insert into entities (id, kind, name, key_version, scope_kind, scope_owner)
+			values ('organization:chase', 'organization', 'Chase', $1, $2, $3)
+		`, keyVersion, scope.Kind, scope.Owner)
 		return err
 	}); err != nil {
 		t.Fatalf("seed unrelated entity: %v", err)

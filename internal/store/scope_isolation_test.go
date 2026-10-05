@@ -290,6 +290,7 @@ func cleanupScope(t *testing.T, s *Store, scope identity.Scope) {
 		// delete below had been failing on every run all along and no
 		// one noticed until a table existed whose rows referenced them).
 		_, _ = tx.Exec(`delete from entity_relationships where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+		_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
 		_, _ = tx.Exec(`delete from scope_corpus_size where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
