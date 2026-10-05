@@ -82,9 +82,11 @@ type locomoRaw struct {
 }
 
 type locomoTurn struct {
-	Speaker string `json:"speaker"`
-	DiaID   string `json:"dia_id"`
-	Text    string `json:"text"`
+	Speaker     string   `json:"speaker"`
+	DiaID       string   `json:"dia_id"`
+	Text        string   `json:"text"`
+	ImgURL      []string `json:"img_url"`
+	BlipCaption string   `json:"blip_caption"`
 }
 
 type locomoQA struct {
@@ -95,6 +97,51 @@ type locomoQA struct {
 }
 
 var sessionKeyRe = regexp.MustCompile(`^session_(\d+)$`)
+
+// formatLoCoMoTurnText appends the real production attachment tag
+// (internal/gateway/attachments.go's "[Shared image: %s]\n%s" format —
+// consolidation already knows how to attribute this exact shape, see
+// internal/consolidation/prompts.go's own doc comment) for any turn that
+// shares an image — LoCoMo's own img_url/blip_caption fields, previously
+// dropped entirely by this parser.
+//
+// Real, measured gap (docs/BENCHMARKS.md's temporal-category trace,
+// 2026-10-04): 31 of 54 zero-score temporal-category misses had an
+// image on their evidence turn (e.g. "Look what letter I received
+// yesterday!" — the letter being specifically an appreciation letter
+// from the community is almost certainly stated in the photo, not the
+// text alone). Using LoCoMo's own blip_caption here, not a real vision
+// call: cheap (no extra API cost across potentially hundreds of images
+// in a full run), but these are generic BLIP-1 captions ("a photo of a
+// note written to someone"), not a faithful description of specific
+// visible text or detail — expected to help some of these 31 misses,
+// not all of them. A real vision-captioning pass through the same
+// pipeline a production image share would use is the faithful
+// follow-up if this doesn't close enough of the gap.
+func formatLoCoMoTurnText(t locomoTurn) string {
+	if len(t.ImgURL) == 0 || strings.TrimSpace(t.BlipCaption) == "" {
+		return t.Text
+	}
+	name := imageLabelFromURL(t.ImgURL[0])
+	tag := fmt.Sprintf("[Shared image: %s]\n%s", name, t.BlipCaption)
+	if strings.TrimSpace(t.Text) == "" {
+		return tag
+	}
+	return t.Text + "\n" + tag
+}
+
+// imageLabelFromURL derives a short, human-readable label from a LoCoMo
+// image URL for the "[Shared image: %s]" tag — LoCoMo has no real
+// filename, only a URL, so this uses the URL's last path segment (e.g.
+// "lr823iakg38b1.jpg" from "https://i.redd.it/lr823iakg38b1.jpg"),
+// matching the spirit of a real shared image's filename without
+// inventing one that doesn't exist.
+func imageLabelFromURL(url string) string {
+	if i := strings.LastIndexByte(url, '/'); i >= 0 && i+1 < len(url) {
+		return url[i+1:]
+	}
+	return url
+}
 
 // loadLoCoMo parses locomo10.json and returns a single conversation.
 // convIndex selects which of the 10 conversations to load (0-based) —
@@ -176,7 +223,7 @@ func parseLoCoMoConversation(c locomoRaw) (benchConversation, error) {
 		}
 		sess := session{date: date}
 		for _, t := range rawTurns {
-			sess.turns = append(sess.turns, turn{speaker: t.Speaker, text: t.Text})
+			sess.turns = append(sess.turns, turn{speaker: t.Speaker, text: formatLoCoMoTurnText(t)})
 		}
 		conv.sessions = append(conv.sessions, sess)
 	}

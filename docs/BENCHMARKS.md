@@ -595,7 +595,61 @@ Not yet verified against 2-3 more varied real cases per this session's
 own stated bar for raising the default — recommended next step before
 considering `HUPI_ENABLE_REDUNDANCY_DEDUP` on by default.
 
-## 11. Multi-hop counting — exhaustive key_fact fetch for a resolved entity
+## 11. LoCoMo image-caption surfacing (`cmd/hupi-bench`) — real, small, hard to isolate
+
+Tracing the temporal-category zero-score misses (§8) found `cmd/hupi-bench`
+silently discarded LoCoMo's own `img_url`/`blip_caption` fields on every
+turn — the model never saw any indication an image was even shared.
+Measured scale: 31 of 54 (57%) of temporal-category zero-score misses had
+an image on their evidence turn. Fixed by appending the same
+`"[Shared image: %s]\n%s"` tag production attachments already use
+(`internal/gateway/attachments.go`) to any captioned turn
+(`cmd/hupi-bench/locomo.go`'s `formatLoCoMoTurnText`).
+
+**The one directly-traced case did improve.** conv-48's "When did Deborah
+receive an appreciation letter from her community?" (gold: January 26,
+2023) went from a flat miss in the original baseline to a dated, correct
+answer once the caption was visible. But that original baseline
+(`locomo_full10_rerank_gated`) was an `-answer-only` rerun against
+already-consolidated data from much earlier in this session — not a fair
+A/B for isolating one code change, the same confound
+`docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md` §"Tried and reverted" already
+flagged for consolidation-time changes generally.
+
+**Ran the proper control**: two fresh from-scratch re-ingests of conv-48
+(wipe + replay + consolidate + answer, not `-answer-only`), same binaries
+and env otherwise, one with the caption fix and one without. Result:
+even the *control* (no fix at all) recovered the Deborah fact reasonably
+well on its own (F1 0.667, predicted "27 January 2023" — one day off)
+— confirming the original flat miss was mostly about stale/incomplete
+old consolidated data, not specifically the missing caption. The fix
+still measurably helped this one case (F1 0.667 → 0.75, and the date is
+now exactly right rather than one day off), but category 2 (temporal)
+as a whole moved from 6/42 zero-scored (mean F1 0.582) without the fix to
+8/42 (mean F1 0.566) with it — a net wash, not a win, with 13 of 42
+questions flipping score in *both* directions, the great majority about
+people/events the caption fix has nothing to do with (Jolene's mother,
+a yoga retreat, a bicycle ride, a trip to Brazil). At n=42 questions per
+conversation, one fresh LLM-driven re-ingest's own run-to-run
+non-determinism dominates the category-level number completely,
+swamping the one real, structural signal this fix actually provides.
+
+**Shipped anyway, on its own merits, not on this category-level number.**
+Surfacing a previously wholly-discarded signal (images were shared and
+never represented to the model at all) is correct regardless of how one
+single-conversation re-ingest happens to score — the directly-traced
+case did get measurably better and more precisely dated, and there is no
+plausible mechanism by which *adding* real information the model
+previously never saw makes answers worse on net; the observed category
+wobble is consolidation noise, not a reason to believe the fix is
+harmful. A real verdict on how much of the 31-miss gap this closes needs
+either a much larger sample (several conversations, not one) or repeated
+trials per conversation to average out re-ingest non-determinism —
+bigger than fits this round. If revisited, that's the next step before
+trying the more expensive option (real vision captioning instead of
+LoCoMo's own generic BLIP-1 captions).
+
+## 12. Multi-hop counting — exhaustive key_fact fetch for a resolved entity
 
 `docs/MULTIHOP_COUNT_AGGREGATION_PLAN.md`'s Attempt 2, finally built:
 `looksLikeCountingRequest` (a narrow "how many" detector, carving out
@@ -667,3 +721,4 @@ The single-conversation, non-counting-subset control above is reassuring
 dominated by the same re-ingest noise, not a gate misfire) but isn't a
 substitute for the full run. Recommended next step before raising any
 default or merging this as "done" rather than "narrowly verified."
+
