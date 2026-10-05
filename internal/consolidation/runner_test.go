@@ -189,6 +189,106 @@ func TestStoreSummary_WritesExpirationIntoBothKeyFactsAndMemories(t *testing.T) 
 	}
 }
 
+// TestStoreSummary_WritesInferenceAndDerivesRelation is the real-infra
+// regression for Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md:
+// an inferred fact must be grounded=true unconditionally (never sent
+// through groundingCheck — the fake grounding provider here returns no
+// verdicts at all, which would otherwise fail every literal fact too),
+// and must get a derives memory_relations edge to each named attribute
+// row it was inferred from.
+func TestStoreSummary_WritesInferenceAndDerivesRelation(t *testing.T) {
+	runner, db := testRunner(t, "", `{"grounded": []}`)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-inference-derives"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	// Seed Joanna's allergy attributes first, via their own storeSummary
+	// call — upsertEntities runs after the key-fact loop within one
+	// call, so the attribute rows the derives relation below needs to
+	// find must already exist from a prior call, not this same one.
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2026-01-01",
+		output: ConsolidationOutput{
+			Summary: "Discussed Joanna's allergies.",
+			EntitiesTouched: []EntityUpdate{
+				{ID: "person:joanna", Kind: "person", Name: "Joanna", Attributes: map[string]string{
+					"allergic_to":             "most reptiles and animals with fur",
+					"allergic_to_cockroaches": "yes",
+				}},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed Joanna's attributes: %v", err)
+	}
+
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
+		scope:  scope,
+		level:  "daily",
+		period: "2026-01-15",
+		output: ConsolidationOutput{
+			Summary: "Joanna went hiking.",
+			KeyFacts: []KeyFactOutput{
+				{
+					Fact:                      "Joanna likely has asthma.",
+					IsInference:               true,
+					InferredFromEntityID:      "person:joanna",
+					InferredFromAttributeKeys: []string{"allergic_to", "allergic_to_cockroaches"},
+				},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("storeSummary with inferred fact: %v", err)
+	}
+
+	var factID int64
+	var grounded, isInference bool
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select f.id, f.grounded, f.is_inference from summary_key_facts f
+			join summaries s on s.id = f.summary_id
+			where s.period = '2026-01-15' and s.scope_kind = $1 and s.scope_owner = $2
+		`, scope.Kind, scope.Owner).Scan(&factID, &grounded, &isInference)
+	}); err != nil {
+		t.Fatalf("load inferred fact: %v", err)
+	}
+	if !grounded {
+		t.Error("inferred fact grounded = false, want true unconditionally (never sent through groundingCheck)")
+	}
+	if !isInference {
+		t.Error("inferred fact is_inference = false, want true")
+	}
+
+	factMemID := memoryIDForKeyFact(factID)
+	var derivesCount int
+	var relationType string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select count(*), min(relation_type) from memory_relations
+			where from_memory_id = $1 and scope_kind = $2 and scope_owner = $3
+		`, factMemID, scope.Kind, scope.Owner).Scan(&derivesCount, &relationType)
+	}); err != nil {
+		t.Fatalf("load derives relations: %v", err)
+	}
+	if derivesCount != 2 {
+		t.Fatalf("got %d derives relations, want 2 (one per inferred_from_attribute_keys entry)", derivesCount)
+	}
+	if relationType != "derives" {
+		t.Errorf("relation_type = %q, want %q", relationType, "derives")
+	}
+}
+
 // TestRunDaily_WritesGroundedSummary exercises storeSummary's real
 // transaction path end to end (insert summary, insert key facts, upsert
 // the touched entity, then embed) — the part of this package's

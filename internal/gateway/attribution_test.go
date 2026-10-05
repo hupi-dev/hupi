@@ -35,6 +35,31 @@ func (f *fakeJudge) Embed(ctx context.Context, req provider.EmbedRequest) (provi
 	panic("not used by attributionCheck")
 }
 
+// TestBuildAttributionPrompt_MarksInferredSnippets is Phase 4 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: a citation whose
+// IsInference is a pointer to true gets a "[inferred] " prefix in the
+// judge's numbered snippet list; an ordinary citation (IsInference nil
+// or pointing to false) doesn't.
+func TestBuildAttributionPrompt_MarksInferredSnippets(t *testing.T) {
+	trueVal := true
+	falseVal := false
+	citations := []Citation{
+		{Snippet: "Joanna likely has asthma.", IsInference: &trueVal},
+		{Snippet: "Joanna went hiking.", IsInference: &falseVal},
+		{Snippet: "Dana's rent is $2200."}, // IsInference nil — an attribute citation
+	}
+	got := buildAttributionPrompt("the answer", citations)
+	if !strings.Contains(got, "1. [inferred] Joanna likely has asthma.") {
+		t.Errorf("prompt missing the [inferred] prefix for the inferred citation, got:\n%s", got)
+	}
+	if strings.Contains(got, "[inferred] Joanna went hiking.") {
+		t.Errorf("prompt incorrectly prefixed a non-inferred citation, got:\n%s", got)
+	}
+	if strings.Contains(got, "[inferred] Dana's rent") {
+		t.Errorf("prompt incorrectly prefixed a nil-IsInference citation, got:\n%s", got)
+	}
+}
+
 func TestAttributionCheck_ParsesUsedVerdicts(t *testing.T) {
 	judge := &fakeJudge{content: `{"used": [true, false]}`}
 	citations := []Citation{{Snippet: "a"}, {Snippet: "b"}}

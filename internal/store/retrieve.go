@@ -1778,11 +1778,17 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		for _, kf := range p.facts {
 			factRef := identity.Ref{Kind: identity.RefKindMemory, Scope: scope, ID: memoryIDForKeyFact(kf.id)}
 			refs = append(refs, factRef)
+			// Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: a
+			// pointer to the real, known answer (not left nil) — every
+			// key fact's is_inference column is a definitive true/false,
+			// never "not yet evaluated," now that Phase 4 ships.
+			isInference := kf.isInference
 			*citations = append(*citations, gateway.Citation{
 				Ref:             factRef,
 				Snippet:         kf.text,
 				ParentSummaryID: p.c.id,
 				Relations:       relationsByFactMemID[factRef.ID],
+				IsInference:     &isInference,
 			})
 		}
 		*strongHit = true
@@ -1876,6 +1882,7 @@ type keyFact struct {
 	text        string
 	similarity  sql.NullFloat64
 	sourceCount int
+	isInference bool
 }
 
 // loadKeyFacts loads a summary's grounded, not-yet-expired facts along
@@ -1900,7 +1907,7 @@ type keyFact struct {
 // "Citation impact: none" note for this phase).
 func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc *crypto.Encryptor, queryVector string, embeddingModel string, now time.Time) ([]keyFact, error) {
 	rows, err := q.QueryContext(ctx, `
-		select id, fact, source_count,
+		select id, fact, source_count, is_inference,
 		       case when embedding is not null and embedding_model = $3
 		            then 1 - (embedding <=> $2::vector) end as similarity
 		from summary_key_facts
@@ -1918,15 +1925,16 @@ func loadKeyFacts(ctx context.Context, q dbscope.Querier, summaryID string, enc 
 		var id int64
 		var factCT []byte
 		var sourceCount int
+		var isInference bool
 		var similarity sql.NullFloat64
-		if err := rows.Scan(&id, &factCT, &sourceCount, &similarity); err != nil {
+		if err := rows.Scan(&id, &factCT, &sourceCount, &isInference, &similarity); err != nil {
 			return nil, err
 		}
 		fact, err := enc.Decrypt(factCT)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
 		}
-		facts = append(facts, keyFact{id: id, text: fact, similarity: similarity, sourceCount: sourceCount})
+		facts = append(facts, keyFact{id: id, text: fact, similarity: similarity, sourceCount: sourceCount, isInference: isInference})
 	}
 	return facts, rows.Err()
 }

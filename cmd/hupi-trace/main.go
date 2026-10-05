@@ -95,12 +95,16 @@ func printTrace(t store.Trace) {
 
 	fmt.Printf("\nretrieved memories (%d):\n", len(t.RetrievedMemories))
 	for _, m := range t.RetrievedMemories {
+		inferredMarker := ""
+		if m.IsInference {
+			inferredMarker = " [INFERRED, not directly stated]"
+		}
 		if m.IsStatic {
-			fmt.Printf("  - %s (scope=%s:%s, entity=%s, attribute=%s, grounded=%v)\n    %s\n",
-				m.Ref.ID, m.Ref.Scope.Kind, m.Ref.Scope.Owner, m.EntityID, m.AttributeKey, m.Grounded, m.Content)
+			fmt.Printf("  - %s (scope=%s:%s, entity=%s, attribute=%s, grounded=%v)%s\n    %s\n",
+				m.Ref.ID, m.Ref.Scope.Kind, m.Ref.Scope.Owner, m.EntityID, m.AttributeKey, m.Grounded, inferredMarker, m.Content)
 		} else {
-			fmt.Printf("  - %s (scope=%s:%s, summary=%s, grounded=%v)\n    %s\n",
-				m.Ref.ID, m.Ref.Scope.Kind, m.Ref.Scope.Owner, m.SummaryID, m.Grounded, m.Content)
+			fmt.Printf("  - %s (scope=%s:%s, summary=%s, grounded=%v)%s\n    %s\n",
+				m.Ref.ID, m.Ref.Scope.Kind, m.Ref.Scope.Owner, m.SummaryID, m.Grounded, inferredMarker, m.Content)
 		}
 	}
 }

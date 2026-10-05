@@ -475,6 +475,7 @@ migration_probe() {
     0029_summary_key_facts_expiration.sql) echo "select exists(select 1 from information_schema.columns where table_name='summary_key_facts' and column_name='expires_at')" ;;
     0030_memories_cascade_deletes.sql) echo "select (select confdeltype from pg_constraint where conname = 'memories_summary_id_fkey') = 'c'" ;;
     0031_summary_key_facts_source_count.sql) echo "select exists(select 1 from information_schema.columns where table_name='summary_key_facts' and column_name='source_count')" ;;
+    0032_summary_key_facts_is_inference.sql) echo "select exists(select 1 from information_schema.columns where table_name='summary_key_facts' and column_name='is_inference')" ;;
     *) die "no idempotency probe defined for migration $1 (add one to migration_probe)" ;;
   esac
 }
@@ -503,7 +504,8 @@ apply_all_migrations() {
            0023_dashboard_sessions.sql 0024_summary_key_facts_embedding_index.sql 0025_unified_memories.sql \
            0026_backfill_memories_audit_event.sql 0027_memories_attribute_versioning.sql \
            0028_key_rotations_memories_cursor.sql 0029_summary_key_facts_expiration.sql \
-           0030_memories_cascade_deletes.sql 0031_summary_key_facts_source_count.sql; do
+           0030_memories_cascade_deletes.sql 0031_summary_key_facts_source_count.sql \
+           0032_summary_key_facts_is_inference.sql; do
     apply_migration "$f"
   done
 }

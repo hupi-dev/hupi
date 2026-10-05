@@ -60,6 +60,27 @@ type KeyFactOutput struct {
 	// storeSummary writes the schema's own default of 1, not a literal
 	// 0 — see that function's own doc comment.
 	SourceCount int `json:"source_count,omitempty"`
+	// IsInference/InferredFromEntityID/InferredFromAttributeKeys are
+	// Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md. Not part of
+	// summarySystemPrompt's own extraction instructions — live-tested
+	// and confirmed that prompt's own "never infer" framing reliably
+	// suppresses the one narrow exception this needs, even placed
+	// directly next to the rule it overrides (two separate attempts,
+	// both against the real Joanna/asthma traced case). These are set
+	// instead by a wholly separate call, extractInferences
+	// (inference.go) — its own dedicated prompt, with no "never infer"
+	// framing to fight, confirmed live to fire reliably on the same
+	// case and correctly reject a loose, non-diagnostic attribute
+	// combination. storeSummary treats a fact with IsInference set
+	// differently from an ordinary one: grounded=true unconditionally
+	// (groundingCheck verifies a fact against raw conversation text,
+	// which an inference-from-attributes was never going to match), and
+	// a derives memory_relations edge is written from this fact back to
+	// each of InferredFromAttributeKeys' own current memories rows on
+	// InferredFromEntityID.
+	IsInference               bool     `json:"is_inference,omitempty"`
+	InferredFromEntityID      string   `json:"inferred_from_entity_id,omitempty"`
+	InferredFromAttributeKeys []string `json:"inferred_from_attribute_keys,omitempty"`
 }
 
 // EntityUpdate is one entity a consolidation run or correction says this

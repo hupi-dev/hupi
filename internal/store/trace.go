@@ -66,6 +66,10 @@ type TraceMemory struct {
 	SummaryID    string
 	Content      string
 	Grounded     bool
+	// IsInference is Phase 4 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md
+	// — set for a key fact (never true for an attribute today; nothing
+	// produces an inferred attribute, only inferred facts).
+	IsInference bool
 }
 
 // TraceEpisodeHit is a *different* episode this turn's vector search
@@ -236,15 +240,15 @@ func (s *Store) loadTraceEpisodeHit(ctx context.Context, ref identity.Ref) (Trac
 }
 
 func (s *Store) loadTraceMemory(ctx context.Context, ref identity.Ref) (TraceMemory, error) {
-	var isStatic, grounded bool
+	var isStatic, grounded, isInference bool
 	var entityID, attributeKey, summaryID sql.NullString
 	var contentCT []byte
 	var keyVersion int
 	err := dbscope.Run(ctx, s.db, ref.Scope, ref.Scope, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
-			select is_static, grounded, entity_id, attribute_key, summary_id, content, key_version
+			select is_static, grounded, entity_id, attribute_key, summary_id, content, key_version, is_inference
 			from memories where id = $1 and scope_kind = $2 and scope_owner = $3
-		`, ref.ID, ref.Scope.Kind, ref.Scope.Owner).Scan(&isStatic, &grounded, &entityID, &attributeKey, &summaryID, &contentCT, &keyVersion)
+		`, ref.ID, ref.Scope.Kind, ref.Scope.Owner).Scan(&isStatic, &grounded, &entityID, &attributeKey, &summaryID, &contentCT, &keyVersion, &isInference)
 	})
 	if err != nil {
 		return TraceMemory{}, fmt.Errorf("store: load referenced memory %s: %w", ref.ID, err)
@@ -265,6 +269,7 @@ func (s *Store) loadTraceMemory(ctx context.Context, ref identity.Ref) (TraceMem
 		SummaryID:    summaryID.String,
 		Content:      content,
 		Grounded:     grounded,
+		IsInference:  isInference,
 	}, nil
 }
 
