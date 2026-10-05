@@ -1732,6 +1732,23 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 		sb.WriteString(prefix + guarantee)
 	}
 
+	// Batched once across every picked summary's facts, not per-fact —
+	// Phase 3 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's
+	// Citation.Relations field. Only ever non-empty for a fact
+	// contradiction.go's own "updates" classification produced — see
+	// that package's own doc comment on why "extends"/"derives" are
+	// schema-ready but not yet produced by anything.
+	var allFactMemIDs []string
+	for _, p := range picks {
+		for _, kf := range p.facts {
+			allFactMemIDs = append(allFactMemIDs, memoryIDForKeyFact(kf.id))
+		}
+	}
+	relationsByFactMemID, err := loadMemoryRelations(ctx, q, scope, allFactMemIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load memory relations: %w", err)
+	}
+
 	var refs []identity.Ref
 	for _, p := range picks {
 		// summaryDepthCap bounds the whole depth block's length, not its
@@ -1765,11 +1782,46 @@ func (s *Store) fusedSearchSummaries(ctx context.Context, q dbscope.Querier, sco
 				Ref:             factRef,
 				Snippet:         kf.text,
 				ParentSummaryID: p.c.id,
+				Relations:       relationsByFactMemID[factRef.ID],
 			})
 		}
 		*strongHit = true
 	}
 	return refs, nil
+}
+
+// loadMemoryRelations returns each of factMemoryIDs' outgoing
+// memory_relations edges (where it's the FROM side) — Phase 3 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's Citation.Relations field.
+// Only ever non-empty for a fact internal/consolidation/contradiction.go's
+// "updates" classification produced (recordUpdateRelations) — that
+// package's own doc comment explains why "extends"/"derives" are
+// schema-ready but not yet produced by anything, so those relation
+// types never appear here today even though the column allows them.
+func loadMemoryRelations(ctx context.Context, q dbscope.Querier, scope identity.Scope, factMemoryIDs []string) (map[string][]gateway.RelationRef, error) {
+	out := make(map[string][]gateway.RelationRef, len(factMemoryIDs))
+	if len(factMemoryIDs) == 0 {
+		return out, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+		select from_memory_id, to_memory_id, relation_type from memory_relations
+		where from_memory_id = any($1::text[]) and scope_kind = $2 and scope_owner = $3
+	`, pgfmt.TextArray(factMemoryIDs), scope.Kind, scope.Owner)
+	if err != nil {
+		return nil, fmt.Errorf("query memory relations: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fromID, toID, relType string
+		if err := rows.Scan(&fromID, &toID, &relType); err != nil {
+			return nil, err
+		}
+		out[fromID] = append(out[fromID], gateway.RelationRef{
+			Type: relType,
+			Ref:  identity.Ref{Kind: identity.RefKindMemory, Scope: scope, ID: toID},
+		})
+	}
+	return out, rows.Err()
 }
 
 // appendKeyFacts writes a summary's grounded key_facts (see

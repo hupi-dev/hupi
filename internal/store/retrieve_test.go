@@ -407,6 +407,102 @@ func TestRetrieve_CitesKeyFactsAtFactGranularity(t *testing.T) {
 	}
 }
 
+// TestRetrieve_CitationSurfacesUpdatesRelation is the real-infra
+// regression for Phase 3 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md:
+// a cited fact with an outgoing memory_relations edge (the "updates"
+// relation internal/consolidation/contradiction.go's
+// recordUpdateRelations writes) must surface it through
+// Citation.Relations, not just its own Snippet/ParentSummaryID.
+func TestRetrieve_CitationSurfacesUpdatesRelation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-retrieve-citation-relations"}
+	t.Cleanup(func() { cleanupScope(t, s, scope) })
+
+	oldSummaryID := "sum_test-retrieve-citation-relations_2026-01-01_daily_v1"
+	newSummaryID := "sum_test-retrieve-citation-relations_2026-01-15_daily_v1"
+	insertSummary(t, s, scope, oldSummaryID, "2026-01-01", "Old summary, now stale.", "")
+	insertKeyFact(t, s, scope, oldSummaryID, "Dana's mortgage pre-approval is for $400,000.", true)
+	insertSummary(t, s, scope, newSummaryID, "2026-01-15", "Dana's mortgage pre-approval was increased.", "")
+	insertKeyFact(t, s, scope, newSummaryID, "Dana's mortgage pre-approval is for $450,000.", true)
+
+	var oldFactID, newFactID int64
+	if err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `select id from summary_key_facts where summary_id = $1`, oldSummaryID).Scan(&oldFactID); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `select id from summary_key_facts where summary_id = $1`, newSummaryID).Scan(&newFactID)
+	}); err != nil {
+		t.Fatalf("load seeded fact ids: %v", err)
+	}
+	oldMemID := memoryIDForKeyFact(oldFactID)
+	newMemID := memoryIDForKeyFact(newFactID)
+
+	// memory_relations' from/to columns are real FKs into memories(id) —
+	// insertKeyFact only seeds summary_key_facts, not the live memories
+	// mirror storeSummary's own dual-write normally produces, so the
+	// test has to seed that mirror itself before the relation can exist.
+	enc, keyVersion, err := s.keys.GetOrCreate(ctx, scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	if err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
+		for _, m := range []struct {
+			id, summaryID, text string
+		}{
+			{oldMemID, oldSummaryID, "Dana's mortgage pre-approval is for $400,000."},
+			{newMemID, newSummaryID, "Dana's mortgage pre-approval is for $450,000."},
+		} {
+			ct, err := enc.Encrypt(m.text)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded)
+				values ($1, $2, $3, $4, $5, $6, false, true)
+			`, m.id, scope.Kind, scope.Owner, m.summaryID, ct, keyVersion); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed memories mirror rows: %v", err)
+	}
+
+	if err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into memory_relations (id, scope_kind, scope_owner, from_memory_id, to_memory_id, relation_type)
+			values ('rel_test_updates', $1, $2, $3, $4, 'updates')
+		`, scope.Kind, scope.Owner, newMemID, oldMemID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed updates relation: %v", err)
+	}
+
+	messages := []provider.Message{{Role: provider.RoleUser, Content: "what is Dana's mortgage pre-approval amount?"}}
+	result, err := s.Retrieve(ctx, scope, scope, messages, time.Now())
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	var found bool
+	for _, c := range result.Citations {
+		if c.Ref.ID != newMemID {
+			continue
+		}
+		found = true
+		if len(c.Relations) != 1 {
+			t.Fatalf("citation %s has %d relations, want 1: %+v", newMemID, len(c.Relations), c.Relations)
+		}
+		if c.Relations[0].Type != "updates" || c.Relations[0].Ref.ID != oldMemID {
+			t.Errorf("citation %s relation = %+v, want {Type: updates, Ref.ID: %s}", newMemID, c.Relations[0], oldMemID)
+		}
+	}
+	if !found {
+		t.Fatalf("no citation found for the new fact (%s) among: %+v", newMemID, result.Citations)
+	}
+}
+
 // insertKeyFactWithEmbedding seeds a summary_key_facts row with an
 // explicit embedding and embedding_model — insertKeyFact doesn't set
 // either, since none of its own callers needed semantic fact ranking.

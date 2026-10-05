@@ -64,7 +64,7 @@ func TestCorrect_ConcurrentCorrectionsOfSameTargetDoNotFork(t *testing.T) {
 		go func() {
 			<-start
 			output := ConsolidationOutput{Summary: "a concurrent correction attempt"}
-			err := runner.Correct(ctx, scope, "sum_test_concurrent_fork_v1", output, "concurrent correction race test", "operator-concurrent", "")
+			_, err := runner.Correct(ctx, scope, "sum_test_concurrent_fork_v1", output, "concurrent correction race test", "operator-concurrent", "")
 			results <- result{err: err}
 		}()
 	}

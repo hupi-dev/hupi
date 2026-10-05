@@ -169,11 +169,67 @@ func (r *Runner) loadGroundedKeyFactsByID(ctx context.Context, scope identity.Sc
 	return facts, err
 }
 
+// loadKeyFactIDsByText returns summaryID's own key facts' row ids, keyed
+// by decrypted fact text — Phase 3 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's "updates" relation needs a
+// specific fact's own memories row id (memoryIDForKeyFact(id)), and text
+// is the only join key available: it's the same one
+// checkOneRelatedSummary's own c.OldFact/c.Replacement matching already
+// uses, since the model only ever echoes back fact text, never a row
+// id it was never shown. Unlike loadGroundedKeyFactsByID, this is not
+// filtered to grounded=true — CurrentContent (which current.KeyFacts
+// comes from) isn't either, so the keys this map needs to match against
+// must cover the same set.
+func (r *Runner) loadKeyFactIDsByText(ctx context.Context, scope identity.Scope, summaryID string) (map[string]int64, error) {
+	var keyVersion int
+	if err := dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select key_version from summaries where id = $1 and scope_kind = $2 and scope_owner = $3
+		`, summaryID, scope.Kind, scope.Owner).Scan(&keyVersion)
+	}); err != nil {
+		return nil, fmt.Errorf("load key version for summary %s: %w", summaryID, err)
+	}
+	enc, err := r.keys.GetVersion(ctx, scope, keyVersion)
+	if err != nil {
+		return nil, fmt.Errorf("resolve encryption key for summary %s: %w", summaryID, err)
+	}
+	ids := map[string]int64{}
+	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select id, fact from summary_key_facts where summary_id = $1
+		`, summaryID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			var factCT []byte
+			if err := rows.Scan(&id, &factCT); err != nil {
+				return err
+			}
+			fact, err := enc.Decrypt(factCT)
+			if err != nil {
+				return fmt.Errorf("decrypt key fact for summary %s: %w", summaryID, err)
+			}
+			ids[fact] = id
+		}
+		return rows.Err()
+	})
+	return ids, err
+}
+
 // relatedSummary is one other current summary sharing a touched entity
 // with today's new one.
 type relatedSummary struct {
 	id, level, period string
 }
+
+// updatePair is one genuine value-change checkOneRelatedSummary applied
+// — oldText is the EXISTING fact's exact text (the join key into
+// old.id's own facts), newText is its replacement (the join key into
+// the just-corrected summary's facts) — see recordUpdateRelations.
+type updatePair struct{ oldText, newText string }
 
 // findRelatedSummaries returns other current summaries (any level or
 // period) that share at least one entity with entitiesTouched — real
@@ -349,6 +405,12 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 		return
 	}
 
+	// updates tracks each genuine value-change applied below, by fact
+	// text — Phase 3 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's
+	// "updates" relation, recorded after Correct returns (the new fact's
+	// own memories row doesn't exist until storeSummary writes it).
+	var updates []updatePair
+
 	applied := 0
 	redundantApplied := 0
 	for _, c := range parsed.Contradictions {
@@ -390,6 +452,7 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 			current.KeyFacts = append(current.KeyFacts[:idx], current.KeyFacts[idx+1:]...)
 		} else {
 			current.KeyFacts[idx].Fact = c.Replacement
+			updates = append(updates, updatePair{oldText: c.OldFact, newText: c.Replacement})
 		}
 		applied++
 	}
@@ -420,7 +483,8 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 	default:
 		reason = fmt.Sprintf("system-detected contradiction and redundancy: a %s summary stated different values for some facts and restated others with no new information", newPeriod)
 	}
-	if err := r.Correct(ctx, scope, old.id, current, reason, systemActor, extraGrounding); err != nil {
+	correctedID, err := r.Correct(ctx, scope, old.id, current, reason, systemActor, extraGrounding)
+	if err != nil {
 		slog.Warn("consolidation: applying contradiction correction failed", "related_summary", old.id, "error", err)
 		return
 	}
@@ -429,11 +493,67 @@ func (r *Runner) checkOneRelatedSummary(ctx context.Context, scope identity.Scop
 	}
 	slog.Info("consolidation: cross-period contradiction corrected", "corrected_summary", old.id, "triggering_period", newPeriod, "facts_replaced", applied, "redundant_removed", redundantApplied, "prose_rewritten", strings.TrimSpace(parsed.CorrectedProse) != "")
 
+	if len(updates) > 0 {
+		r.recordUpdateRelations(ctx, scope, old.id, correctedID, updates)
+	}
+
 	// Phase D item 4 (docs/CONSOLIDATION_COMPLETENESS_PLAN.md): old.id
 	// just changed, so any already-existing rollup covering old.period
 	// may now be stale too — nothing in the natural cron cadence would
 	// ever revisit it on its own.
 	r.refreshRollupsCovering(ctx, scope, old.level, old.period)
+}
+
+// recordUpdateRelations writes one memory_relations row (relation_type
+// 'updates') per entry in updates, linking the corrected summary's new
+// fact back to the one it replaced — Phase 3 of
+// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md. Looked up by text after the
+// fact (the model only ever echoes fact text, never a row id it was
+// never shown — the same join key checkOneRelatedSummary's own
+// c.OldFact/c.Replacement matching above already uses).
+//
+// Best-effort, logged not returned: Correct already committed the
+// correction itself by the time this runs, so a failure here is a
+// missed graph edge, not lost fact data — the same availability-over-
+// durability posture embedSummary/embedEntities/embedKeyFacts already
+// take for their own best-effort steps after a commit.
+func (r *Runner) recordUpdateRelations(ctx context.Context, scope identity.Scope, oldSummaryID, correctedSummaryID string, updates []updatePair) {
+	oldIDs, err := r.loadKeyFactIDsByText(ctx, scope, oldSummaryID)
+	if err != nil {
+		slog.Warn("consolidation: load old fact ids for updates relation failed", "summary", oldSummaryID, "error", err)
+		return
+	}
+	newIDs, err := r.loadKeyFactIDsByText(ctx, scope, correctedSummaryID)
+	if err != nil {
+		slog.Warn("consolidation: load corrected fact ids for updates relation failed", "summary", correctedSummaryID, "error", err)
+		return
+	}
+	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
+		for _, u := range updates {
+			oldFactID, ok := oldIDs[u.oldText]
+			if !ok {
+				continue // shouldn't happen (this exact text was just matched against current.KeyFacts), but not worth failing the whole batch over
+			}
+			newFactID, ok := newIDs[u.newText]
+			if !ok {
+				continue
+			}
+			relID, err := newRelationshipID()
+			if err != nil {
+				return fmt.Errorf("generate memory_relations id: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				insert into memory_relations (id, scope_kind, scope_owner, from_memory_id, to_memory_id, relation_type)
+				values ($1, $2, $3, $4, $5, 'updates')
+			`, relID, scope.Kind, scope.Owner, memoryIDForKeyFact(newFactID), memoryIDForKeyFact(oldFactID)); err != nil {
+				return fmt.Errorf("insert updates relation for fact %d -> %d: %w", newFactID, oldFactID, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Warn("consolidation: record updates relation(s) failed", "old_summary", oldSummaryID, "corrected_summary", correctedSummaryID, "error", err)
+	}
 }
 
 // loadGroundingSourceTextForSummary rebuilds a summary's own grounding

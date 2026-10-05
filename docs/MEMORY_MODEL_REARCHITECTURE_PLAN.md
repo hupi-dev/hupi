@@ -208,9 +208,11 @@ become blocking rework inside Phase 3.
 
 ## Phased delivery
 
-Five phases, each its own PR (matching this repo's one-concern-per-PR
-convention), in dependency order — **not** the order the five features
-were originally presented in.
+Six phases (Phase 5 added after Phase 3 shipped `updates` only and
+`extends` turned out to need its own dedicated prompt-design effort —
+see Phase 5's own doc comment), each its own PR (matching this repo's
+one-concern-per-PR convention), in dependency order — **not** the order
+the five original features were presented in.
 
 ### Phase 0 — Unify the storage model + migrate citations together
 
@@ -340,27 +342,50 @@ optionally suppress an `updates`-superseded fact from a crowded result
 set even though it stays `grounded=true` (today, suppression only
 happens via literal replacement/deletion). Citations gain the
 `Relations []RelationRef` field and rendering logic to show a fact's
+
+**What actually shipped vs. this original scope**: `updates` was wired
+by reusing `contradiction.go`'s *existing* cross-period correction flow
+(`Runner.Correct`) exactly as-is — a corrected fact is still written via
+a brand-new summary version that supersedes the whole old one, the same
+full-supersession mechanism this codebase already had. `recordUpdateRelations`
+only adds an explicit `memory_relations` edge alongside that, for
+traceability/citation display — it changes nothing about which facts
+retrieval can see. This means the "suppress an `updates`-superseded fact
+from a crowded result set even though it stays `grounded=true`" scope
+item above was never reachable: the old fact's *entire summary* is
+already superseded and invisible to retrieval the moment `Correct`
+commits (the existing `not exists (select 1 from summaries newer where
+newer.supersedes = s.id)` filter), so there's no scenario where an
+`updates`-superseded fact is still `grounded=true` *and* still
+retrievable, competing for space in a crowded result set. That scenario
+only arises if a future, lighter-weight "updates" path is added that
+links two facts *without* superseding either one's containing summary
+(e.g. a same-period update within one summary's own fact list, which
+nothing in this codebase detects or classifies today, cross-period or
+otherwise) — deferred until such a path exists, not implemented
+speculatively against a case this session never built. "extends" was
+drafted and live-tested but not shipped — see Phase 5 below.
 update/derivation chain.
 
-**Complexity: High.** New table, richer LLM output schema across
-`contradiction.go` (and possibly extraction itself, if `derives`
-relations can also be created at `generateSummary` time, not only at
-cross-period contradiction-check time), new retrieval-time filtering,
-and real citation-rendering work.
+**Complexity: High as originally scoped** (a richer 3-way classifier
+plus new retrieval-time filtering); **what actually shipped (`updates`
+only, reusing the existing correction flow) was Low** — the complexity
+budget above was almost entirely `extends`'s, which moved to Phase 5.
 
-**Risk**: a looser 3-way classifier has more surface area to misfire
-than today's narrow binary contradiction check — PR #120 earlier this
+**Risk**: a looser classifier has more surface area to misfire than
+today's narrow binary contradiction check — PR #120 earlier this
 session spent real effort specifically hardening that binary check
-against conflating two distinct occurrences of a repeating event; a
-richer classifier reopens a version of that same risk in a new shape
-(now also distinguishing "updates" from "extends" from "derives," not
-just "contradiction" from "nothing").
+against conflating two distinct occurrences of a repeating event. This
+risk applies to `extends` (Phase 5), not to `updates`: shipped `updates`
+reuses the *same* contradiction classification PR #120 already
+hardened, unchanged, so it carries none of this risk itself.
 
-**Verification**: same real-data-trace discipline as PR #120 —
-construct the verification cases from actually-observed real
-consolidation output (not synthetic examples), live A/B test the new
-prompt against the old on those specific cases, full from-scratch
-re-ingest only after the targeted live checks pass.
+**Verification**: `updates` — a new test confirming the `memory_relations`
+row and `Citation.Relations` rendering, on top of the existing
+contradiction-correction test's own already-established assertions (no
+new LLM behavior to verify). `extends` — see Phase 5's own verification
+section; this is where the real-data-trace / live-A/B discipline
+PR #120 established actually applies.
 
 ### Phase 4 — `isInference` (consolidation-time inference extraction)
 
@@ -403,22 +428,100 @@ first; full re-ingest only after that passes; noise-floor-aware
 category-level comparison, never a single run's number taken at face
 value (this session's own established, hard-won discipline).
 
+### Phase 5 — `extends` classification (deferred from Phase 3, needs
+dedicated prompt engineering)
+
+**Why split out, not shipped with Phase 3**: Phase 3 shipped `updates`
+only — recording the *already-verified* contradiction/replacement
+classification as an explicit `memory_relations` edge, zero new LLM
+risk. `extends` (a NEW fact that adds detail/a follow-up development to
+an EXISTING fact, without contradicting or restating it) was drafted
+and live-tested twice against real GPT-4.1 as an addition to
+`contradictionCheckPrompt`, and real-verified NOT to work:
+
+- First attempt: explicit instruction + a narrow "only when genuinely a
+  continuation of the same specific thread" guardrail. Result: 0/2 test
+  cases fired (a clean hobby-extension case, a clean ongoing-goal-plus-
+  specific-instance case) — the model reported nothing for either.
+- Second attempt: loosened wording, added two fully-worked positive
+  examples matching the test cases almost verbatim (marathon training ->
+  a specific training run; learning guitar -> a specific practice
+  session). Result: identical — 0/2, including the case the new example
+  was written to match exactly.
+- Both attempts correctly handled every *other* case in the same
+  battery (a genuine value-change classified as `contradiction`;
+  unrelated facts reported as nothing; the PR #120 false-positive shape
+  — two distinct occurrences of a repeating event — correctly reported
+  as nothing, not misclassified as either `contradiction` or `extends`).
+
+**Conclusion**: this isn't a wording nit fixable with one more
+iteration. `contradictionCheckPrompt`'s entire framing — extensive
+guardrails and worked examples, almost all of them about *rejecting* a
+classification — gives the model a strong prior toward "report nothing"
+that a few added sentences in the same system prompt don't overcome,
+even with directly-matching worked examples. A reliable `extends`
+classifier needs its own dedicated, separately-tuned prompt (and likely
+its own LLM call, not appended to the skeptical contradiction-check
+call) — real scope, not a quick addition.
+
+**Scope**: design and live-test a standalone `extends`-detection prompt,
+independent of `contradictionCheckPrompt`'s existing skeptical framing
+— starting from first principles (what does the model reliably
+recognize as "a follow-up development" without the contradiction-check
+task's own framing pulling it toward non-reporting), not by continuing
+to bolt onto the existing prompt. Once a prompt reliably fires on a
+battery of real, traced extends-shaped cases (mirroring this session's
+`updates` verification: genuine positives, unrelated negatives, and the
+repeating-event near-miss), wire `memory_relations` population
+(`relation_type = 'extends'`) the same way `recordUpdateRelations`
+already does for `updates`, and extend `loadMemoryRelations`'s existing
+query (already selects any `relation_type`, no code change needed there)
+to surface it through `Citation.Relations`.
+
+**Complexity: Medium**, concentrated entirely in prompt design and live
+verification — the plumbing (`memory_relations` table, citation
+rendering) already exists from Phase 3's `updates` work and needs no
+changes to carry `extends` once a prompt actually produces one.
+
+**Risk**: same shape Phase 3's own section already flagged — a looser
+classifier has more surface area to misfire than a narrow binary one.
+The two failed attempts above lean the risk toward false negatives
+(never firing) rather than false positives (misclassifying), which is
+the safer failure direction, but a from-scratch prompt removes that
+accidental safety net too, so the full verification battery (not just
+the cases a new prompt was written to pass) still applies.
+
+**Verification**: same live-prompt-battery discipline as the two
+attempts above — construct cases from actually-observed real
+consolidation output, not synthetic ones, before considering any
+redesigned prompt done; full from-scratch re-ingest only after the
+targeted live checks pass.
+
 ## Dependency graph (why this order, restated plainly)
 
 ```
 Phase 0 (unify + citations)
    │
-   ├──> Phase 1 (expiration)        — independent of 2/3/4, sequenced
+   ├──> Phase 1 (expiration)        — independent of 2/3/4/5, sequenced
    │                                   early for its low risk
-   ├──> Phase 2 (sourceCount)       — independent of 1/3/4, sequenced
+   ├──> Phase 2 (sourceCount)       — independent of 1/3/4/5, sequenced
    │                                   early for its low risk
    │
-   └──> Phase 3 (relations) ──> Phase 4 (inference)
-          (derives relation is Phase 4's safety mechanism)
+   └──> Phase 3 (relations: updates only) ──> Phase 4 (inference)
+          │                                      (derives relation is
+          │                                       Phase 4's safety
+          │                                       mechanism)
+          └──> Phase 5 (relations: extends)
+                 (independent of Phase 4 — a standalone prompt-design
+                  effort deferred out of Phase 3, not a dependency of
+                  the inference work)
 ```
 
 Phases 1 and 2 could run in either order, or in parallel, once Phase 0
-lands. Phase 4 should not start before Phase 3 ships.
+lands. Phase 4 should not start before Phase 3 ships. Phase 5 can run
+any time after Phase 3 (including in parallel with Phase 4) — it only
+needs Phase 3's `memory_relations` table/citation plumbing, not
+anything Phase 4 adds.
 
 ## Non-goals / explicitly deferred
 

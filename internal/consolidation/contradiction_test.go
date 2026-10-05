@@ -53,7 +53,7 @@ func TestFindRelatedSummaries_MatchesSharedEntityExcludesOthers(t *testing.T) {
 
 	store := func(period, entityID, entityName string) {
 		t.Helper()
-		if err := runner.storeSummary(ctx, storeSummaryInput{
+		if _, err := runner.storeSummary(ctx, storeSummaryInput{
 			scope:  scope,
 			level:  "daily",
 			period: period,
@@ -125,7 +125,7 @@ func TestFindRelatedSummaries_PrefersSpecificSharedEntityOverHub(t *testing.T) {
 
 	store := func(period string, entities []EntityUpdate) {
 		t.Helper()
-		if err := runner.storeSummary(ctx, storeSummaryInput{
+		if _, err := runner.storeSummary(ctx, storeSummaryInput{
 			scope:  scope,
 			level:  "daily",
 			period: period,
@@ -202,7 +202,7 @@ func TestFindRelatedSummaries_ExcludesSupersededIncludesCorrection(t *testing.T)
 	})
 
 	wellsFargo := EntityUpdate{ID: "organization:wells-fargo", Kind: "organization", Name: "Wells Fargo"}
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2023-01-01",
@@ -224,7 +224,7 @@ func TestFindRelatedSummaries_ExcludesSupersededIncludesCorrection(t *testing.T)
 
 	// Correct v1 into v2 — the same mechanism checkCrossPeriodContradictions
 	// itself uses, so v1 ends up genuinely superseded.
-	if err := runner.Correct(ctx, scope, v1ID, ConsolidationOutput{
+	if _, err := runner.Correct(ctx, scope, v1ID, ConsolidationOutput{
 		Summary:         "corrected",
 		KeyFacts:        []KeyFactOutput{{Fact: "irrelevant"}},
 		EntitiesTouched: []EntityUpdate{wellsFargo},
@@ -239,7 +239,7 @@ func TestFindRelatedSummaries_ExcludesSupersededIncludesCorrection(t *testing.T)
 	}
 
 	// A later, unrelated-period triggering summary sharing the same entity.
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2023-02-01",
@@ -290,7 +290,7 @@ func TestCheckCrossPeriodContradictions_AppliesCorrection(t *testing.T) {
 		})
 	})
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2023-03-01",
@@ -304,7 +304,7 @@ func TestCheckCrossPeriodContradictions_AppliesCorrection(t *testing.T) {
 		t.Fatalf("seed old summary: %v", err)
 	}
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2023-03-15",
@@ -349,6 +349,34 @@ func TestCheckCrossPeriodContradictions_AppliesCorrection(t *testing.T) {
 	}
 	if corrected.Summary != "Discussed mortgage pre-approval, now at $300,000." {
 		t.Errorf("corrected.Summary = %q, want the model's corrected_prose to have replaced the stale prose too", corrected.Summary)
+	}
+
+	// Phase 3 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md: the corrected
+	// fact's own memories row must record an "updates" edge pointing
+	// back at the stale fact it replaced — zero new LLM risk, since this
+	// reuses the classification the assertions above already confirmed.
+	oldFactIDs, err := runner.loadKeyFactIDsByText(ctx, scope, oldID)
+	if err != nil {
+		t.Fatalf("load old fact ids: %v", err)
+	}
+	newFactIDs, err := runner.loadKeyFactIDsByText(ctx, scope, supersededBy.String)
+	if err != nil {
+		t.Fatalf("load corrected fact ids: %v", err)
+	}
+	oldMemID := memoryIDForKeyFact(oldFactIDs["Wells Fargo pre-approval amount is $250,000"])
+	newMemID := memoryIDForKeyFact(newFactIDs["Wells Fargo pre-approval amount is $300,000"])
+
+	var relationType string
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select relation_type from memory_relations
+			where from_memory_id = $1 and to_memory_id = $2 and scope_kind = $3 and scope_owner = $4
+		`, newMemID, oldMemID, scope.Kind, scope.Owner).Scan(&relationType)
+	}); err != nil {
+		t.Fatalf("load updates relation: %v", err)
+	}
+	if relationType != "updates" {
+		t.Errorf("relation_type = %q, want %q", relationType, "updates")
 	}
 }
 
@@ -404,7 +432,7 @@ func TestCheckCrossPeriodContradictions_AppliesRedundancyReinforcement(t *testin
 		})
 	})
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2022-11-04",
@@ -418,7 +446,7 @@ func TestCheckCrossPeriodContradictions_AppliesRedundancyReinforcement(t *testin
 		t.Fatalf("seed old summary: %v", err)
 	}
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2022-11-09",
@@ -499,7 +527,7 @@ func TestCheckCrossPeriodContradictions_EmptyResponseLeavesBothFactsIntact(t *te
 		})
 	})
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2022-04-25",
@@ -513,7 +541,7 @@ func TestCheckCrossPeriodContradictions_EmptyResponseLeavesBothFactsIntact(t *te
 		t.Fatalf("seed old summary: %v", err)
 	}
 
-	if err := runner.storeSummary(ctx, storeSummaryInput{
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
 		scope:  scope,
 		level:  "daily",
 		period: "2022-09-29",
