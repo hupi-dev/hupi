@@ -1079,3 +1079,168 @@ after hitting its own time limit — the run itself was never restarted
 from scratch; `cmd/hupi-bench`'s own `-out-file` resume mechanism
 picked up cleanly each time, skipping already-completed conversations).
 
+## 20. A 16.9pp "regression" that was never a regression — `HUPI_CONTEXT_CHAR_BUDGET` silently defaulting
+
+After Phase 5 (`extends` classification) and its related fixes merged
+(`is_inference` in `CurrentContent`, HPMF's `memory_relations` graph,
+the migration `0004` probe fix), a full 10-conversation timed run with
+the three opt-in consolidation flags on
+(`HUPI_ENABLE_REDUNDANCY_DEDUP`/`HUPI_ENABLE_EXTENDS_DETECTION`/
+`HUPI_ENABLE_INFERENCE_EXTRACTION`) scored **40.9% overall** — a 16.4pp
+drop from the §1 baseline (57.3%). A flags-OFF control on the same code
+scored **42.4%** — almost identical to flags-on, which already ruled
+out the three flags as the primary cause (they account for at most
+~1.5pp). Diffing the two runs' own consolidation logs did show flags-on
+firing ~60% more cross-period contradiction-correction events than
+flags-off for the same data (372 vs. a projected ~233), consistent with
+the longer three-way prompt (`contradiction.go`'s `redundancyDedupEnabled()`
+branch) being more trigger-happy — a real, measurable effect, but not
+large enough to explain the bulk of the drop, and superseded by the
+finding below before it was acted on.
+
+Tracing a sample of wrong-abstention questions (103 confirmed
+category-1/2/4 cases, LoCoMo's own F1 scorer, abstention-pattern-matched
+predictions) against their actual retrieved context
+(`-retrieved-context-out-file`) found **every single one of 239
+questions in the traced conversation got exactly 2,037 characters of
+context** — ending in the literal
+`"...[truncated to fit context budget]"` marker
+(`internal/store/retrieve.go`'s `truncateToBudget`). The budget itself:
+`contextCharBudget()` (`internal/store/retrieve.go:3007-3014`) falls
+back to `defaultContextCharBudget = 2000` unless
+`HUPI_CONTEXT_CHAR_BUDGET` is explicitly set — and neither timed run
+this session set it.
+[`docs/BENCHMARK_IMPROVEMENT_PLAN.md:18`](BENCHMARK_IMPROVEMENT_PLAN.md)
+already documents that **both previously-published runs used
+`HUPI_CONTEXT_CHAR_BUDGET=20000`** — a 10x larger budget — and
+[`docs/EVALMEM_INTEGRATION_PLAN.md:300`](EVALMEM_INTEGRATION_PLAN.md)
+had already flagged this exact trap once before, in almost identical
+words ("never set... despite using GPT-4.1"). It got silently repeated
+this session anyway. The high abstention rate that first looked like a
+`qaprompt.go` over-abstention problem was, on this evidence, a rational
+response to context that had been truncated to a tenth of its intended
+size — not a prompt regression at all.
+
+Re-running the flags-off control with `HUPI_CONTEXT_CHAR_BUDGET=20000`
+set correctly, same 10 conversations, same code:
+
+| Category | §1 baseline (budget=20000) | Flawed run (budget=2000, bug) | Corrected run (budget=20000) |
+|---|---|---|---|
+| 1 — multi-hop | 46.4% | 30.9% | 45.4% |
+| 2 — temporal | 61.1% | 32.1% | 58.7% |
+| 3 — open-domain | 35.3% | 27.3% | 29.2% |
+| 4 — single-hop | 56.4% | 31.6% | 61.4% |
+| 5 — adversarial | 68.2% | 80.7% | 76.7% |
+| **Overall** | **57.3%** | **42.4%** | **60.6%** |
+
+Overall accuracy with the budget corrected (60.6%) is actually *above*
+the original baseline, not below it — the entire apparent regression
+was this one missing environment variable in this session's own
+re-runs, not a defect in the three new consolidation flags, the
+`is_inference` fix, HPMF, or `qaprompt.go`. Only category 3 (open-domain)
+stayed down relative to baseline (29.2% vs. 35.3%); see §21.
+
+Artifacts: `bench/results/locomo_full10_budgetfix_noflags_predictions.json`,
+`bench/results/locomo_full10_budgetfix_noflags_stats.json`,
+`bench/results/locomo_full10_budgetfix_noflags.log`. The flawed flags-on/
+flags-off runs' own predictions/stats are at
+`bench/results/locomo_full10_flags_timed_*` and
+`bench/results/locomo_full10_noflags_timed_*` respectively, kept as the
+record of the false lead rather than deleted, consistent with this
+doc's own practice of reporting regressions honestly rather than
+quietly re-running until the number looks right.
+
+**Process note**: this is the second time
+`HUPI_CONTEXT_CHAR_BUDGET=20000` being unset has produced a misleading
+result despite an explicit prior warning in this doc's own
+cross-references. Worth considering whether `cmd/hupi-bench` should
+warn loudly (not just silently default) when the active budget is at
+`defaultContextCharBudget`, given how large the real-world impact of
+missing it has now proven to be twice.
+
+## 21. Open-domain (category 3) majority-bucket gap — three distinct, non-prompt-fixable causes
+
+With the budget bug fixed (§20), category 3 is the only category still
+below its §1 baseline (29.2% vs. 35.3%). Traced three of the "genuine
+retrieval/consolidation gap" cases identified during the earlier
+open-domain investigation
+([`docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`](MEMORY_MODEL_REARCHITECTURE_PLAN.md)'s
+companion plan work) against both the full, correctly-budgeted
+retrieved context (`bench/results/opendomain_trace_context.jsonl`,
+captured with `HUPI_CONTEXT_CHAR_BUDGET=20000`, confirmed clean of the
+§20 truncation bug — max length 20,037 chars, 1,464 unique lengths
+across 1,782 questions) and the raw LoCoMo conversation transcripts
+(`bench/data/locomo/data/locomo10.json`). Each case turned out to have
+a different root cause, none of them a safe `qaprompt.go` fix:
+
+- **"Which US state did Jolene visit during her internship?" (gold:
+  Alaska)** — initially misdiagnosed as a consolidation extraction
+  miss ("the place name was never captured"). That was wrong: the full
+  retrieved context contains the key fact verbatim — *"Jolene spent
+  yesterday morning doing yoga on top of mount Talkeetna"* (a real
+  place in Alaska) — extracted and retrieved correctly. The actual gap
+  is at answer time: the same shape as the already-shipped Fort
+  Wayne→Indiana geography-inference example in `qaprompt.go`, just a
+  harder instance (Talkeetna is a far less universally-known place
+  name than Fort Wayne). Not chased further here — one data point
+  isn't enough to justify broadening an inference paragraph that has
+  already caused two real adversarial regressions this session (see
+  §15 and the reverted relationship-inference attempt documented
+  directly in `qaprompt.go`'s own doc comment).
+- **"Which US state do Audrey and Andrew potentially live in?" (gold:
+  Minnesota)** — the cited evidence (`D11:9`) is an image of a trail
+  map; the actual place name is only legible in the photo's pixels.
+  The dialogue text and the auto-generated caption
+  (`"a photo of a map of a park with a lot of trees"`) are both too
+  generic to carry it. This is a structural gap — HUPI's consolidation
+  pipeline is text-only, so no prompt change on either the extraction
+  or answer side can produce a state name that was never in any text
+  it saw. Fixing this would require real image OCR/vision ingestion, a
+  materially larger feature, not a completeness bug.
+- **"What are John's suspected health problems?" (gold: Obesity)** —
+  the cited evidence (`D1:27`) is John joking *"my fingers are too big
+  [for bowling]... perhaps I should take up exercise"*. This is a much
+  thinner signal than the already-shipped allergy→asthma example (§15),
+  and licensing this kind of leap would reintroduce the same
+  fabrication risk the existing guard paragraph exists to block.
+  Judged not worth chasing — this reads as an overly aggressive gold
+  label, not a product gap.
+
+None of the three clears the bar this session has used throughout for
+shipping a prompt change (a concrete, narrow, well-evidenced cause,
+live-verified before a full re-run) — documented here as known,
+differentiated gaps per that same standard, rather than forcing a fix.
+
+## 22. Categories 1/2 zero-score sample — diffuse retrieval-ranking and benchmark-noise mix, no single fixable cause
+
+Sampled the §20 corrected run's zero-F1 cases in category 1 (multi-hop,
+47 of 282) and category 2 (temporal, 45 of 321) looking for another
+clean, high-leverage cause like §20's. Found none — unlike §20 or §21,
+this is a genuine mix of unrelated small causes:
+
+- **Retrieval-ranking misses (the majority)**. Traced one concretely:
+  *"What symbols are important to Caroline?"* (gold: rainbow flag,
+  transgender symbol) was answered *"Cross, heart"* — not a
+  hallucination, real data: Caroline's own necklace key fact literally
+  states "a necklace with a cross and a heart." The actually-relevant
+  attribute (`values_rainbow_flag_mural: "courage and strength for
+  trans community"`) exists too, but buried in a 50+-field attribute
+  dump never marked "(most relevant)," while the necklace fact was.
+  The model picked a real, true, but wrong-for-this-question fact out
+  of several real candidates — a ranking/selection problem for
+  abstract multi-attribute questions, not a bug with an obvious patch.
+- **Benchmark gold-data noise**. E.g. *"When did John start boot
+  camp?"* — gold is literally `"April.2023"` (a typo in LoCoMo's own
+  data); the model answered `"April 2023"`, semantically identical,
+  scored wrong regardless. Not fixable on this side.
+- **Specificity softness**. A few cases answer with a correct-gist
+  paraphrase instead of the literal gold string (`"Baked goods"` vs.
+  gold `"Cakes"`, `"A colleague"` vs. gold `"Rob"`) — possibly a
+  retrieval gap (the specific name never surfaced) rather than a
+  prompt-following issue; not isolated further.
+
+No action taken — none of these has the single, well-evidenced cause
+this session's other fixes required before shipping, and the dominant
+pattern (ranking among several true facts) is a materially bigger
+retrieval-design question than a wording change.
+
