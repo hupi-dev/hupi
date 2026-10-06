@@ -340,6 +340,17 @@ fields (same json tag names `consolidation.KeyFactOutput` already uses:
 `key_facts` on the summary record (referencing other facts by a stable
 id, not text — see MEMORY_FORMAT.md's own note on this).
 
+**Closed, for the sibling tool**: `internal/store/export.go`'s
+`ExportMemory` (`cmd/hupi-export-memory`, a separate diagnostic dump, not
+HPMF) had the identical gap in its own `ExportedKeyFact` type — fixed:
+`source_count`/`expires_at`/`expire_reason`/`is_inference` now round-trip
+there. `memory_relations` still isn't exported by this tool either
+(same remaining scope as HPMF's own `relations` array above) —
+`InferredFromEntityID`/`InferredFromAttributeKeys` aren't included
+because, per `hupi-correct`'s own fix above, they aren't persisted
+columns to read in the first place. HPMF itself (`internal/hpmf`) is
+untouched and still has the full gap described above.
+
 ---
 
 ## Priority order and rationale
@@ -353,7 +364,7 @@ id, not text — see MEMORY_FORMAT.md's own note on this).
 | 5 | Structured-output hardening | Open | Medium | A robustness improvement, not a correctness bug — today's approach works when the model behaves; this makes it work when it doesn't. |
 | 6 | Integration testing | Open | Medium | Should really happen *alongside* 1-5, not after — noted last only because it needs an external Postgres instance this environment doesn't have on hand. |
 | 7 | Tier 3 | Open | Large | Deliberately last per the original build order; nothing above depends on it, and it depends on everything above being solid first. |
-| 8 | HPMF export/import gap (relations/expiration/inference) | Open | Small | Low risk today (nothing outside the live store reads these fields yet), but the cheapest open item on this list — worth closing opportunistically rather than letting more fields accumulate on top of an export path that's already behind. |
+| 8 | HPMF export/import gap (relations/expiration/inference) | Open — HPMF itself; **closed** for the sibling `hupi-export-memory` tool | Small | Low risk today (nothing outside the live store reads these fields yet), but the cheapest open item on this list — worth closing opportunistically rather than letting more fields accumulate on top of an export path that's already behind. |
 
 **#1, #2, and #3 are now closed** — the two active correctness bugs plus
 the recall gap that was small enough to close without a scheduling

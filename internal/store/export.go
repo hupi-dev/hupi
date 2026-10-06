@@ -34,9 +34,19 @@ type ExportedEntity struct {
 	Attributes string `json:"attributes"`
 }
 
+// ExportedKeyFact's fields beyond Fact/Grounded were missing until this
+// was found as a diagnostic-tooling gap alongside internal/hpmf's own
+// identical one (docs/DESIGN_VS_BUILT.md #8): a scope's full memory dump
+// silently omitted source_count/expires_at/expire_reason/is_inference —
+// everything docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md added to a key
+// fact's record.
 type ExportedKeyFact struct {
-	Fact     string `json:"fact"`
-	Grounded bool   `json:"grounded"`
+	Fact         string `json:"fact"`
+	Grounded     bool   `json:"grounded"`
+	SourceCount  int    `json:"source_count"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+	ExpireReason string `json:"expire_reason,omitempty"`
+	IsInference  bool   `json:"is_inference"`
 }
 
 type ExportedSummary struct {
@@ -208,13 +218,16 @@ func (s *Store) exportSummaries(ctx context.Context, scope identity.Scope) ([]Ex
 
 func (s *Store) exportKeyFacts(ctx context.Context, scope identity.Scope, summaryID string, enc *crypto.Encryptor) ([]ExportedKeyFact, error) {
 	type row struct {
-		factCT   []byte
-		grounded bool
+		factCT                  []byte
+		grounded, isInference   bool
+		sourceCount             int
+		expiresAt, expireReason sql.NullString
 	}
 	var rows []row
 	err := dbscope.Run(ctx, s.db, scope, scope, func(tx *sql.Tx) error {
 		res, err := tx.QueryContext(ctx, `
-			select fact, grounded from summary_key_facts
+			select fact, grounded, source_count, expires_at::text, expire_reason, is_inference
+			from summary_key_facts
 			where summary_id = $1
 			order by id
 		`, summaryID)
@@ -224,7 +237,7 @@ func (s *Store) exportKeyFacts(ctx context.Context, scope identity.Scope, summar
 		defer res.Close()
 		for res.Next() {
 			var r row
-			if err := res.Scan(&r.factCT, &r.grounded); err != nil {
+			if err := res.Scan(&r.factCT, &r.grounded, &r.sourceCount, &r.expiresAt, &r.expireReason, &r.isInference); err != nil {
 				return err
 			}
 			rows = append(rows, r)
@@ -241,7 +254,14 @@ func (s *Store) exportKeyFacts(ctx context.Context, scope identity.Scope, summar
 		if err != nil {
 			return nil, fmt.Errorf("store: decrypt key fact for summary %s: %w", summaryID, err)
 		}
-		out = append(out, ExportedKeyFact{Fact: fact, Grounded: r.grounded})
+		out = append(out, ExportedKeyFact{
+			Fact:         fact,
+			Grounded:     r.grounded,
+			SourceCount:  r.sourceCount,
+			ExpiresAt:    r.expiresAt.String,
+			ExpireReason: r.expireReason.String,
+			IsInference:  r.isInference,
+		})
 	}
 	return out, nil
 }

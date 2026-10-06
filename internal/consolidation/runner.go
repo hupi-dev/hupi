@@ -534,7 +534,7 @@ func (r *Runner) CurrentContent(ctx context.Context, scope identity.Scope, summa
 	var keyFacts []KeyFactOutput
 	err = dbscope.Run(ctx, r.db, scope, scope, func(tx *sql.Tx) error {
 		rows, queryErr := tx.QueryContext(ctx, `
-			select fact, source_episode_ids, expires_at::text, expire_reason, source_count
+			select fact, source_episode_ids, expires_at::text, expire_reason, source_count, is_inference
 			from summary_key_facts where summary_id = $1
 		`, summaryID)
 		if queryErr != nil {
@@ -546,24 +546,38 @@ func (r *Runner) CurrentContent(ctx context.Context, scope identity.Scope, summa
 			var sourceIDsLit string
 			var expiresAt, expireReason sql.NullString
 			var sourceCount int
-			if scanErr := rows.Scan(&factCT, &sourceIDsLit, &expiresAt, &expireReason, &sourceCount); scanErr != nil {
+			var isInference bool
+			if scanErr := rows.Scan(&factCT, &sourceIDsLit, &expiresAt, &expireReason, &sourceCount, &isInference); scanErr != nil {
 				return scanErr
 			}
 			factText, decErr := enc.Decrypt(factCT)
 			if decErr != nil {
 				return fmt.Errorf("decrypt key fact: %w", decErr)
 			}
-			// expires_at/expire_reason/source_count round-trip here too
-			// (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md Phases 1-2) — a
-			// manual correction that doesn't touch a given fact must not
-			// silently lose its expiration or reset its reinforcement
-			// count back to 1.
+			// expires_at/expire_reason/source_count/is_inference all
+			// round-trip here (docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md
+			// Phases 1-2 and 4) — a manual correction that doesn't touch
+			// a given fact must not silently lose its expiration, reset
+			// its reinforcement count back to 1, or (a real, confirmed
+			// bug, fixed here) lose its is_inference marking and get
+			// routed through the real grounding check instead, where an
+			// inferred fact — never extracted from source text to begin
+			// with — reliably comes back ungrounded and vanishes from
+			// retrieval. InferredFromEntityID/InferredFromAttributeKeys
+			// still don't round-trip: unlike is_inference, they were
+			// never persisted as their own summary_key_facts columns
+			// (only used transiently at write time to record the
+			// `derives` memory_relations edge), so a corrected inferred
+			// fact keeps its is_inference flag and grounding exemption,
+			// but a fresh correction can't re-derive which specific
+			// attributes it came from — a smaller, separate gap.
 			keyFacts = append(keyFacts, KeyFactOutput{
 				Fact:             factText,
 				SourceEpisodeIDs: pgfmt.ParseTextArray(sourceIDsLit),
 				ExpiresAt:        expiresAt.String,
 				ExpireReason:     expireReason.String,
 				SourceCount:      sourceCount,
+				IsInference:      isInference,
 			})
 		}
 		return rows.Err()

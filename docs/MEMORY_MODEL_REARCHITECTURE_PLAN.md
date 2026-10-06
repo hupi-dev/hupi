@@ -505,6 +505,30 @@ level improvement that hasn't been measured, same discipline as Phase
 1's own "not yet done" live-prompt-check note before credentials became
 available.
 
+**Real bug found and fixed, later (while auditing every `cmd/` binary
+for compatibility with this whole plan)**: `Runner.CurrentContent` —
+what `hupi-correct -dump-template` reads, and what any `Correct` call
+resubmits — selected `fact, source_episode_ids, expires_at, expire_reason,
+source_count` but not `is_inference`. Confirmed live with a real test:
+correcting *any* unrelated part of a summary containing an inferred fact
+silently flattened that fact to `IsInference: false`, which routed it
+through the real grounding check it was always meant to skip — and an
+inferred fact, never extracted from source text, reliably comes back
+ungrounded there, silently vanishing from retrieval. Fixed by adding
+`is_inference` to `CurrentContent`'s select (`runner.go`), with a
+regression test (`TestCurrentContent_DumpTemplateThenCorrectPreservesInferredFact`)
+reproducing the exact dump → edit-something-unrelated → resubmit
+sequence `hupi-correct` performs. `InferredFromEntityID`/
+`InferredFromAttributeKeys` still don't round-trip — unlike
+`is_inference`, they were never persisted as their own
+`summary_key_facts` columns (only used transiently at write time to
+record the `derives` edge), so a fact corrected this way keeps its
+inference status and grounding exemption, but a fresh correction can't
+re-derive which specific attributes it came from, and no new `derives`
+edge gets written for it going forward. Smaller, separate, still-open
+gap — would need either new persisted columns or reconstructing the
+provenance from the fact's existing `memory_relations` rows.
+
 ### Phase 5 — `extends` classification (deferred from Phase 3, shipped
 via dedicated prompt engineering)
 
