@@ -1709,6 +1709,140 @@ func TestCurrentContent_DumpTemplateThenCorrectPreservesUntouchedAttributes(t *t
 	}
 }
 
+// TestCurrentContent_DumpTemplateThenCorrectPreservesInferredFact is a
+// regression test for a real, confirmed bug: CurrentContent's key-fact
+// select didn't include is_inference, so every fact (inferred or not)
+// round-tripped through hupi-correct's own -dump-template/Correct flow
+// as IsInference: false. storeSummary then routed the resubmitted
+// "literal" fact through the real grounding check — which an inferred
+// fact, never extracted from source text, reliably fails — silently
+// dropping it from retrieval the next time *any* unrelated correction
+// touched the same summary. Confirmed by reproducing exactly that
+// sequence before the fix (CurrentContent omitting is_inference) landed.
+func TestCurrentContent_DumpTemplateThenCorrectPreservesInferredFact(t *testing.T) {
+	groundingJSON := `{"grounded": []}`
+	runner, db := testRunner(t, "", groundingJSON)
+
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-correct-preserves-inference"}
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+			_, _ = tx.Exec(`delete from summaries where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from memories where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			_, _ = tx.Exec(`delete from entities where scope_kind = $1 and scope_owner = $2`, scope.Kind, scope.Owner)
+			return nil
+		})
+	})
+
+	if _, err := runner.storeSummary(ctx, storeSummaryInput{
+		scope: scope, level: "daily", period: "2026-01-01",
+		output: ConsolidationOutput{
+			Summary: "Discussed Joanna's allergies.",
+			EntitiesTouched: []EntityUpdate{
+				{ID: "person:joanna", Kind: "person", Name: "Joanna", Attributes: map[string]string{
+					"allergic_to":             "most reptiles and animals with fur",
+					"allergic_to_cockroaches": "yes",
+				}},
+			},
+		},
+		actor: systemActor,
+	}); err != nil {
+		t.Fatalf("seed Joanna's attributes: %v", err)
+	}
+
+	summaryID, err := runner.storeSummary(ctx, storeSummaryInput{
+		scope: scope, level: "daily", period: "2026-01-15",
+		output: ConsolidationOutput{
+			Summary: "Joanna went hiking.",
+			KeyFacts: []KeyFactOutput{
+				{Fact: "Joanna went on a hike near Fort Wayne.", SourceEpisodeIDs: []string{"ep1"}},
+				{
+					Fact:                      "Joanna likely has asthma.",
+					IsInference:               true,
+					InferredFromEntityID:      "person:joanna",
+					InferredFromAttributeKeys: []string{"allergic_to", "allergic_to_cockroaches"},
+				},
+			},
+		},
+		actor: systemActor,
+	})
+	if err != nil {
+		t.Fatalf("storeSummary with inferred fact: %v", err)
+	}
+
+	dump, err := runner.CurrentContent(ctx, scope, summaryID)
+	if err != nil {
+		t.Fatalf("CurrentContent: %v", err)
+	}
+	var dumpedInferredFact *KeyFactOutput
+	for i := range dump.KeyFacts {
+		if dump.KeyFacts[i].Fact == "Joanna likely has asthma." {
+			dumpedInferredFact = &dump.KeyFacts[i]
+		}
+	}
+	if dumpedInferredFact == nil {
+		t.Fatalf("dumped KeyFacts = %+v, want the asthma fact present", dump.KeyFacts)
+	}
+	if !dumpedInferredFact.IsInference {
+		t.Fatalf("dumped asthma fact IsInference = false, want true — CurrentContent must preserve it so hupi-correct's own dump/resubmit round-trip doesn't silently demote an inferred fact to literal")
+	}
+
+	// The real hupi-correct flow: an operator edits something unrelated
+	// (the prose) and resubmits exactly what CurrentContent gave them.
+	dump.Summary = "Joanna went hiking. (typo fixed)"
+	correctedID, err := runner.Correct(ctx, scope, summaryID, dump, "fixed a typo", "test-operator", "")
+	if err != nil {
+		t.Fatalf("Correct with dumped content: %v", err)
+	}
+
+	var factGrounded, factIsInference bool
+	var found bool
+	if err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		var keyVersion int
+		if err := tx.QueryRowContext(ctx, `select key_version from summaries where id = $1`, correctedID).Scan(&keyVersion); err != nil {
+			return err
+		}
+		enc, err := runner.keys.GetVersion(ctx, scope, keyVersion)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `select fact, grounded, is_inference from summary_key_facts where summary_id = $1`, correctedID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var factCT []byte
+			var grounded, isInf bool
+			if err := rows.Scan(&factCT, &grounded, &isInf); err != nil {
+				return err
+			}
+			fact, err := enc.Decrypt(factCT)
+			if err != nil {
+				return err
+			}
+			if fact == "Joanna likely has asthma." {
+				found = true
+				factGrounded = grounded
+				factIsInference = isInf
+			}
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("load corrected key facts: %v", err)
+	}
+
+	if !found {
+		t.Fatal("the asthma fact is missing entirely from the corrected summary")
+	}
+	if !factIsInference {
+		t.Error("corrected asthma fact: is_inference = false, want true (should survive an unrelated correction)")
+	}
+	if !factGrounded {
+		t.Error("corrected asthma fact: grounded = false, want true — an inferred fact must stay exempt from the real grounding check across a correction, not get silently dropped from retrieval")
+	}
+}
+
 // TestStoreSummary_CanonicalizesEntityIDByKindAndName is a regression test
 // for a real gap found via live end-to-end testing: two separate
 // consolidation runs generated two different id strings ("project:falcon"

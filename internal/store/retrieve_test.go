@@ -241,6 +241,33 @@ func insertKeyFactWithExpiration(t *testing.T, s *Store, scope identity.Scope, s
 	}
 }
 
+// insertInferredKeyFactWithSourceCount is insertKeyFact's sibling for an
+// inferred fact with an explicit source_count — covers the
+// is_inference/source_count pair ExportedKeyFact gained alongside
+// insertKeyFactWithExpiration's own expires_at field (see
+// internal/store/export_test.go).
+func insertInferredKeyFactWithSourceCount(t *testing.T, s *Store, scope identity.Scope, summaryID, fact string, sourceCount int) {
+	t.Helper()
+	enc, keyVersion, err := s.keys.GetOrCreate(context.Background(), scope)
+	if err != nil {
+		t.Fatalf("resolve test encryption key: %v", err)
+	}
+	factCT, err := enc.Encrypt(fact)
+	if err != nil {
+		t.Fatalf("encrypt test key fact: %v", err)
+	}
+	err = dbscope.Run(context.Background(), s.db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into summary_key_facts (summary_id, fact, grounded, key_version, scope_kind, scope_owner, is_inference, source_count)
+			values ($1, $2, true, $3, $4, $5, true, $6)
+		`, summaryID, factCT, keyVersion, scope.Kind, scope.Owner, sourceCount)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test inferred key fact for %s: %v", summaryID, err)
+	}
+}
+
 // TestRetrieve_FiltersExpiredKeyFacts is the real-infra regression for
 // Phase 1 of docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md (native fact
 // expiration): loadKeyFacts must exclude a fact whose expires_at has

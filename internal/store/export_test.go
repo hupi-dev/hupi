@@ -26,6 +26,8 @@ func TestExportMemory_ReturnsEntitiesSummariesKeyFactsAndRelationships(t *testin
 	insertSummary(t, s, scope, summaryID, period, "Alex went to the beach and relaxed.", "")
 	insertKeyFact(t, s, scope, summaryID, "Alex camped at the beach.", true)
 	insertKeyFact(t, s, scope, summaryID, "Alex camped on the moon.", false)
+	insertKeyFactWithExpiration(t, s, scope, summaryID, "Alex has a dentist appointment tomorrow.", "2026-01-02")
+	insertInferredKeyFactWithSourceCount(t, s, scope, summaryID, "Alex likely has asthma.", 3)
 
 	insertRelationship(t, s, scope, "rel_test1", "person:alex", "visited", "place:beach")
 
@@ -44,16 +46,37 @@ func TestExportMemory_ReturnsEntitiesSummariesKeyFactsAndRelationships(t *testin
 	if sum.Text != "Alex went to the beach and relaxed." {
 		t.Errorf("summary text = %q", sum.Text)
 	}
-	if len(sum.KeyFacts) != 2 {
-		t.Fatalf("len(KeyFacts) = %d, want 2", len(sum.KeyFacts))
+	if len(sum.KeyFacts) != 4 {
+		t.Fatalf("len(KeyFacts) = %d, want 4", len(sum.KeyFacts))
 	}
-	foundGrounded, foundUngrounded := false, false
+	foundGrounded, foundUngrounded, foundExpiring, foundInferred := false, false, false, false
 	for _, kf := range sum.KeyFacts {
-		if kf.Fact == "Alex camped at the beach." && kf.Grounded {
-			foundGrounded = true
-		}
-		if kf.Fact == "Alex camped on the moon." && !kf.Grounded {
-			foundUngrounded = true
+		switch kf.Fact {
+		case "Alex camped at the beach.":
+			if kf.Grounded {
+				foundGrounded = true
+			}
+		case "Alex camped on the moon.":
+			if !kf.Grounded {
+				foundUngrounded = true
+			}
+		case "Alex has a dentist appointment tomorrow.":
+			// docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md Phase 1 — a
+			// diagnostic export is exactly where you'd want to see an
+			// expiration date surfaced, same reasoning as the
+			// ungrounded fact above: this tool shows the full store,
+			// not just what's safe to inject as live context.
+			if kf.ExpiresAt == "2026-01-02" {
+				foundExpiring = true
+			}
+		case "Alex likely has asthma.":
+			// Phase 4 — the gap this test exists for: before the fix,
+			// ExportedKeyFact had no IsInference/SourceCount fields at
+			// all, so an inferred fact in a full memory dump was
+			// indistinguishable from a literal one.
+			if kf.IsInference && kf.SourceCount == 3 {
+				foundInferred = true
+			}
 		}
 	}
 	if !foundGrounded {
@@ -61,6 +84,12 @@ func TestExportMemory_ReturnsEntitiesSummariesKeyFactsAndRelationships(t *testin
 	}
 	if !foundUngrounded {
 		t.Error("missing the ungrounded key fact (export should include it, unlike Retrieve — a diagnostic export needs the full store, not just what's safe to inject as context)")
+	}
+	if !foundExpiring {
+		t.Error("missing the expiring key fact's expires_at")
+	}
+	if !foundInferred {
+		t.Error("missing the inferred key fact's is_inference/source_count")
 	}
 
 	if len(export.Relationships) != 1 {
