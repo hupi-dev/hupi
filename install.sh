@@ -447,7 +447,13 @@ migration_probe() {
     0001_init.sql)                     echo "select (to_regclass('public.episodes') is not null)" ;;
     0002_tier3_phase1_identity.sql)    echo "select exists(select 1 from information_schema.columns where table_name='episodes' and column_name='scope_kind')" ;;
     0003_tier3_phase2_retrieved_refs.sql) echo "select exists(select 1 from information_schema.columns where table_name='episodes' and column_name='retrieved_refs')" ;;
-    0004_hardening_phase1_app_role.sql) echo "select exists(select 1 from pg_roles where rolname='hupi_app')" ;;
+    # Checks a per-database GRANT, not just pg_roles' role existence —
+    # see schema/migrate.sh's own copy of this probe for the full real-
+    # bug writeup (roles are cluster-wide, 0004's grants are not; on a
+    # cluster that already has hupi_app, this used to silently skip
+    # 0004 against a fresh database, leaving hupi_app with zero
+    # privileges there).
+    0004_hardening_phase1_app_role.sql) echo "select exists(select 1 from information_schema.table_privileges where table_name='episodes' and grantee='hupi_app' and privilege_type='SELECT')" ;;
     0005_hardening_phase3_rls.sql)     echo "select coalesce((select relrowsecurity from pg_class where relname='episodes'), false)" ;;
     0006_hardening_phase4_scope_keys.sql) echo "select (to_regclass('public.scope_keys') is not null)" ;;
     0007_audit_log.sql)                echo "select (to_regclass('public.audit_log') is not null)" ;;
