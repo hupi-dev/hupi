@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 
 	"hupi/internal/audit"
@@ -37,6 +38,18 @@ type ImportStats struct {
 	// imported, but as an unlinked version rather than a correction, so
 	// this is the only record that lineage was lost (see importSummaries).
 	SummariesWithDanglingSupersedes int
+
+	MemoryRelationsImported int
+	// MemoryRelationsSkipped counts an edge whose from/to MemoryLocator
+	// couldn't be resolved against this import run's own freshly-written
+	// data — its summary's period was skipped as already-present (a
+	// merge import only ever tracks *this run's* exported-id -> new-id
+	// mapping, not every summary that happens to already exist in the
+	// target scope from some earlier import or consolidation run), or an
+	// attribute's entity/key no longer has a current row. Not an error:
+	// same posture as SummariesWithDanglingSupersedes — the edge is
+	// genuinely unresolvable this run, not a sign of a corrupt bundle.
+	MemoryRelationsSkipped int
 }
 
 // ImportScope loads one scope's exported directory (dir — an absolute
@@ -105,7 +118,14 @@ func ImportScope(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, dir str
 	if err := logPhase("entities", stats.EntitiesImported, stats.EntitiesSkipped, nil); err != nil {
 		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for entity import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
 	}
-	if err := importSummaries(ctx, db, enc, keyVersion, dir, targetScope, &stats); err != nil {
+	// summaryIDMap collects exported summary id -> freshly-assigned id
+	// across every period file importSummaries processes (not just one
+	// file's own local remapping) — importMemoryRelations needs the
+	// complete picture to resolve a key-fact locator that references any
+	// summary this run actually imported, regardless of which file it
+	// came from.
+	summaryIDMap := map[string]string{}
+	if err := importSummaries(ctx, db, enc, keyVersion, dir, targetScope, &stats, summaryIDMap); err != nil {
 		return stats, wrapPartialImportFailure(err, targetScope, merge)
 	}
 	if err := logPhase("summaries", stats.SummariesImported, stats.SummariesSkipped, map[string]any{"dangling_supersedes": stats.SummariesWithDanglingSupersedes}); err != nil {
@@ -116,6 +136,15 @@ func ImportScope(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, dir str
 	}
 	if err := logPhase("episodes", stats.EpisodesImported, stats.EpisodesSkipped, nil); err != nil {
 		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for episode import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
+	}
+	// Last: a relation can reference either a key fact (just imported
+	// above, resolved via summaryIDMap) or an entity attribute (imported
+	// first, above) — both phases' data needs to already be committed.
+	if err := importMemoryRelations(ctx, db, enc, dir, targetScope, summaryIDMap, &stats); err != nil {
+		return stats, wrapPartialImportFailure(err, targetScope, merge)
+	}
+	if err := logPhase("memory_relations", stats.MemoryRelationsImported, stats.MemoryRelationsSkipped, nil); err != nil {
+		return stats, wrapPartialImportFailure(fmt.Errorf("hpmf: audit log write for memory relation import into %s:%s: %w", targetScope.Kind, targetScope.Owner, err), targetScope, merge)
 	}
 	return stats, nil
 }
@@ -242,7 +271,7 @@ func importEntities(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, keyV
 // each other), but *within* a file always inserts in array order, since
 // a later version's `supersedes` can only point at an earlier one in the
 // same file (see ImportScope's doc comment).
-func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, keyVersion int, dir string, scope identity.Scope, stats *ImportStats) error {
+func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, keyVersion int, dir string, scope identity.Scope, stats *ImportStats, summaryIDMap map[string]string) error {
 	files, err := findFiles(filepath.Join(dir, "summaries"), ".json")
 	if err != nil {
 		return err
@@ -274,7 +303,12 @@ func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, key
 				return nil
 			}
 
-			idMap := map[string]string{} // exported id -> newly generated id, this file only
+			// supersedes only ever points within the same file (a
+			// period's own version chain) — summaryIDMap is shared
+			// across every file only so importMemoryRelations can look
+			// up any of this run's summaries afterward, not because
+			// cross-file supersedes resolution is expected here.
+			idMap := summaryIDMap
 			for _, r := range versions {
 				newID, err := nextImportSummaryID(ctx, tx, scope, level, period)
 				if err != nil {
@@ -323,12 +357,31 @@ func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, key
 					if err != nil {
 						return fmt.Errorf("hpmf: encrypt key fact for %s: %w", newID, err)
 					}
-					_, err = tx.ExecContext(ctx, `
-						insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner)
-						values ($1, $2, $3::text[], $4, $5, $6, $7)
-					`, newID, factCT, pgfmt.TextArray(kf.SourceEpisodeIDs), kf.Grounded, keyVersion, scope.Kind, scope.Owner)
+					var factRowID int64
+					err = tx.QueryRowContext(ctx, `
+						insert into summary_key_facts (summary_id, fact, source_episode_ids, grounded, key_version, scope_kind, scope_owner, source_count, expires_at, expire_reason, is_inference)
+						values ($1, $2, $3::text[], $4, $5, $6, $7, $8, $9::date, $10, $11)
+						returning id
+					`, newID, factCT, pgfmt.TextArray(kf.SourceEpisodeIDs), kf.Grounded, keyVersion, scope.Kind, scope.Owner,
+						keyFactSourceCountOrDefault(kf.SourceCount), pgfmt.Nullable(kf.ExpiresAt), pgfmt.Nullable(kf.ExpireReason), kf.IsInference).Scan(&factRowID)
 					if err != nil {
 						return fmt.Errorf("hpmf: insert key fact for %s: %w", newID, err)
+					}
+
+					// Mirrored into memories under the same deterministic
+					// id scheme storeSummary's own live write uses
+					// (memoryIDForImportedKeyFact) — without this, an
+					// imported fact would have no memories row at all,
+					// breaking RefKindMemory citation resolution for it
+					// and leaving nothing for importMemoryRelations below
+					// to point an edge at.
+					if _, err := tx.ExecContext(ctx, `
+						insert into memories (id, scope_kind, scope_owner, summary_id, content, key_version, is_static, grounded, source_episode_ids, expires_at, expire_reason, source_count, is_inference)
+						values ($1, $2, $3, $4, $5, $6, false, $7, $8::text[], $9::date, $10, $11, $12)
+					`, memoryIDForImportedKeyFact(factRowID), scope.Kind, scope.Owner, newID, factCT, keyVersion, kf.Grounded,
+						pgfmt.TextArray(kf.SourceEpisodeIDs), pgfmt.Nullable(kf.ExpiresAt), pgfmt.Nullable(kf.ExpireReason),
+						keyFactSourceCountOrDefault(kf.SourceCount), kf.IsInference); err != nil {
+						return fmt.Errorf("hpmf: insert memories mirror for key fact %d (%s): %w", factRowID, newID, err)
 					}
 				}
 				idMap[r.ID] = newID
@@ -341,6 +394,30 @@ func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, key
 		}
 	}
 	return nil
+}
+
+// keyFactSourceCountOrDefault treats an unset (zero-value) SourceCount
+// as 1, the schema's own column default — needed because a bundle
+// exported before KeyFactRecord gained this field (or a hand-edited one
+// that simply omits it, since the json tag is omitempty) unmarshals to
+// 0, not 1, and 0 would otherwise misrepresent a never-reinforced fact
+// as somehow reinforced zero times.
+func keyFactSourceCountOrDefault(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	return n
+}
+
+// memoryIDForImportedKeyFact mirrors
+// internal/consolidation/store.go's own memoryIDForKeyFact exactly
+// (same id scheme: "mem_fact_" + the summary_key_facts row id) —
+// duplicated rather than imported, same established precedent as that
+// function's own doc comment (internal/gateway/attribution.go's
+// extractJSON): a one-line, self-contained helper isn't worth a
+// cross-package dependency.
+func memoryIDForImportedKeyFact(factID int64) string {
+	return "mem_fact_" + strconv.FormatInt(factID, 10)
 }
 
 func periodExists(ctx context.Context, q dbscope.Querier, scope identity.Scope, level, period string) (bool, error) {
@@ -365,6 +442,135 @@ func nextImportSummaryID(ctx context.Context, q dbscope.Querier, scope identity.
 		return "", fmt.Errorf("hpmf: determine next summary version for %s %s: %w", level, period, err)
 	}
 	return fmt.Sprintf("sum_%s_%s_%s_v%d", scope.Owner, period, level, maxVersion+1), nil
+}
+
+// importMemoryRelations reads memory_relations.jsonl and recreates each
+// edge against the data this same run just imported — run after both
+// importEntities and importSummaries have committed, since a relation
+// can reference either. Each MemoryLocator is resolved to a real,
+// freshly-written memories.id: a key fact locator via summaryIDMap (the
+// exported summary id -> this run's own new id) plus a by-text match
+// among that summary's own key facts; an attribute locator via
+// entityattrs.CurrentRowIDs. Either resolution failing means the edge is
+// unresolvable this run (see ImportStats.MemoryRelationsSkipped's own
+// doc comment) — skipped with a warning logged, never a hard failure,
+// same posture importSummaries already takes for a dangling supersedes
+// reference.
+func importMemoryRelations(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, dir string, scope identity.Scope, summaryIDMap map[string]string, stats *ImportStats) error {
+	path := filepath.Join(dir, "memory_relations.jsonl")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	records, err := readJSONL[MemoryRelationRecord](path)
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return nil
+	}
+
+	return dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		// Cached per (new summary id) so a summary with several
+		// relations referencing it only decrypts its key facts once,
+		// not once per edge.
+		keyFactsBySummary := map[string]map[string]string{} // new summary id -> fact text -> memories id
+
+		resolve := func(loc MemoryLocator) (string, bool, error) {
+			if loc.EntityID != "" {
+				ids, err := entityattrs.CurrentRowIDs(ctx, tx, scope, loc.EntityID)
+				if err != nil {
+					return "", false, fmt.Errorf("hpmf: load current attribute ids for entity %s: %w", loc.EntityID, err)
+				}
+				id, ok := ids[loc.AttributeKey]
+				return id, ok, nil
+			}
+			newSummaryID, ok := summaryIDMap[loc.SummaryID]
+			if !ok {
+				return "", false, nil
+			}
+			byText, ok := keyFactsBySummary[newSummaryID]
+			if !ok {
+				rows, err := tx.QueryContext(ctx, `
+					select id, content from memories
+					where scope_kind = $1 and scope_owner = $2 and summary_id = $3 and is_static = false
+				`, scope.Kind, scope.Owner, newSummaryID)
+				if err != nil {
+					return "", false, fmt.Errorf("hpmf: load key fact memories for summary %s: %w", newSummaryID, err)
+				}
+				byText = map[string]string{}
+				for rows.Next() {
+					var id string
+					var contentCT []byte
+					if err := rows.Scan(&id, &contentCT); err != nil {
+						rows.Close()
+						return "", false, err
+					}
+					fact, err := enc.Decrypt(contentCT)
+					if err != nil {
+						rows.Close()
+						return "", false, fmt.Errorf("hpmf: decrypt key fact memories row %s: %w", id, err)
+					}
+					byText[fact] = id
+				}
+				if err := rows.Err(); err != nil {
+					rows.Close()
+					return "", false, err
+				}
+				rows.Close()
+				keyFactsBySummary[newSummaryID] = byText
+			}
+			id, ok := byText[loc.Fact]
+			return id, ok, nil
+		}
+
+		for _, r := range records {
+			fromID, ok, err := resolve(r.From)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				slog.Warn("hpmf: memory relation's from-side couldn't be resolved this run, skipping", "relation_type", r.RelationType, "from", r.From, "scope_kind", scope.Kind, "scope_owner", scope.Owner)
+				stats.MemoryRelationsSkipped++
+				continue
+			}
+			toID, ok, err := resolve(r.To)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				slog.Warn("hpmf: memory relation's to-side couldn't be resolved this run, skipping", "relation_type", r.RelationType, "to", r.To, "scope_kind", scope.Kind, "scope_owner", scope.Owner)
+				stats.MemoryRelationsSkipped++
+				continue
+			}
+
+			relID, err := newImportRelationID()
+			if err != nil {
+				return fmt.Errorf("hpmf: generate memory_relations id: %w", err)
+			}
+			// Guards a bundle imported twice (by mistake, or a repeated
+			// -merge run) from doubling every edge — this run's own
+			// freshly-resolved ids are a reliable dedup key even though
+			// relation rows have no natural unique constraint of their
+			// own (schema/0025's own comment on why).
+			res, err := tx.ExecContext(ctx, `
+				insert into memory_relations (id, scope_kind, scope_owner, from_memory_id, to_memory_id, relation_type)
+				select $1, $2, $3, $4, $5, $6
+				where not exists (
+					select 1 from memory_relations
+					where scope_kind = $2 and scope_owner = $3 and from_memory_id = $4 and to_memory_id = $5 and relation_type = $6
+				)
+			`, relID, scope.Kind, scope.Owner, fromID, toID, r.RelationType)
+			if err != nil {
+				return fmt.Errorf("hpmf: insert memory relation %s -> %s: %w", fromID, toID, err)
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				stats.MemoryRelationsImported++
+			} else {
+				stats.MemoryRelationsSkipped++
+			}
+		}
+		return nil
+	})
 }
 
 func importEpisodes(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, keyVersion int, dir string, scope identity.Scope, stats *ImportStats) error {
@@ -480,6 +686,17 @@ func importEpisodes(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, keyV
 		}
 		return nil
 	})
+}
+
+// newImportRelationID mirrors internal/consolidation/store.go's own
+// newRelationshipID exactly (same "rel_" + random hex shape) — same
+// duplication reasoning as memoryIDForImportedKeyFact above.
+func newImportRelationID() (string, error) {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate relation id: %w", err)
+	}
+	return "rel_" + hex.EncodeToString(buf), nil
 }
 
 // newImportEpisodeID mirrors internal/gateway's unexported newEpisodeID

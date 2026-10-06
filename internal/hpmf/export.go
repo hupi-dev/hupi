@@ -71,6 +71,17 @@ func ExportScope(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scope i
 	if err := logPhase("entities", m.EntityCount); err != nil {
 		return ScopeManifest{}, fmt.Errorf("hpmf: audit log write for entity export of %s:%s: %w", scope.Kind, scope.Owner, err)
 	}
+	// Last, not interleaved with summaries/entities above: a relation
+	// can point at either a key fact (from the summaries phase) or an
+	// entity attribute (from the entities phase), so resolving its
+	// locator (resolveMemoryLocator) re-queries memories directly rather
+	// than depending on either phase's own already-closed result set.
+	if err := exportMemoryRelations(ctx, db, keys, scope, dir, &m); err != nil {
+		return ScopeManifest{}, err
+	}
+	if err := logPhase("memory_relations", m.MemoryRelationCount); err != nil {
+		return ScopeManifest{}, fmt.Errorf("hpmf: audit log write for memory relation export of %s:%s: %w", scope.Kind, scope.Owner, err)
+	}
 	return m, nil
 }
 
@@ -275,7 +286,8 @@ func exportSummaries(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, sco
 
 func loadKeyFacts(ctx context.Context, q dbscope.Querier, keys *crypto.KeyStore, scope identity.Scope, summaryID string) ([]KeyFactRecord, error) {
 	rows, err := q.QueryContext(ctx, `
-		select fact, source_episode_ids, grounded, key_version from summary_key_facts where summary_id = $1 order by fact
+		select fact, source_episode_ids, grounded, key_version, source_count, expires_at::text, expire_reason, is_inference
+		from summary_key_facts where summary_id = $1 order by fact
 	`, summaryID)
 	if err != nil {
 		return nil, fmt.Errorf("hpmf: query key facts for %s: %w", summaryID, err)
@@ -288,7 +300,8 @@ func loadKeyFacts(ctx context.Context, q dbscope.Querier, keys *crypto.KeyStore,
 		var sourceIDsLit string
 		var kf KeyFactRecord
 		var keyVersion int
-		if err := rows.Scan(&factCT, &sourceIDsLit, &kf.Grounded, &keyVersion); err != nil {
+		var expiresAt, expireReason sql.NullString
+		if err := rows.Scan(&factCT, &sourceIDsLit, &kf.Grounded, &keyVersion, &kf.SourceCount, &expiresAt, &expireReason, &kf.IsInference); err != nil {
 			return nil, fmt.Errorf("hpmf: scan key fact for %s: %w", summaryID, err)
 		}
 		enc, err := keys.GetVersion(ctx, scope, keyVersion)
@@ -301,6 +314,8 @@ func loadKeyFacts(ctx context.Context, q dbscope.Querier, keys *crypto.KeyStore,
 		}
 		kf.Fact = fact
 		kf.SourceEpisodeIDs = pgfmt.ParseTextArray(sourceIDsLit)
+		kf.ExpiresAt = expiresAt.String
+		kf.ExpireReason = expireReason.String
 		out = append(out, kf)
 	}
 	return out, rows.Err()
@@ -362,6 +377,109 @@ func exportEntities(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scop
 		}
 		return nil
 	})
+}
+
+// exportMemoryRelations writes memory_relations.jsonl — one line per
+// edge, each endpoint resolved to a portable MemoryLocator rather than
+// the live schema's own memories.id (see that type's doc comment for
+// why). Rows are fully scanned and closed before resolveMemoryLocator's
+// own per-row queries run on the same tx, the same two-pass convention
+// exportSummaries already uses for its own nested loadKeyFacts calls.
+func exportMemoryRelations(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scope identity.Scope, dir string, m *ScopeManifest) error {
+	type rawRelation struct {
+		relationType, fromID, toID string
+	}
+	var raw []rawRelation
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select relation_type, from_memory_id, to_memory_id from memory_relations
+			where scope_kind = $1 and scope_owner = $2
+			order by created_at, id
+		`, scope.Kind, scope.Owner)
+		if err != nil {
+			return fmt.Errorf("hpmf: query memory relations: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r rawRelation
+			if err := rows.Scan(&r.relationType, &r.fromID, &r.toID); err != nil {
+				return err
+			}
+			raw = append(raw, r)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+
+	var records []MemoryRelationRecord
+	err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		for _, r := range raw {
+			from, err := resolveMemoryLocator(ctx, tx, keys, scope, r.fromID)
+			if err != nil {
+				return fmt.Errorf("hpmf: resolve from_memory_id %s: %w", r.fromID, err)
+			}
+			to, err := resolveMemoryLocator(ctx, tx, keys, scope, r.toID)
+			if err != nil {
+				return fmt.Errorf("hpmf: resolve to_memory_id %s: %w", r.toID, err)
+			}
+			records = append(records, MemoryRelationRecord{RelationType: r.relationType, From: from, To: to})
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	w, err := newJSONLWriter(filepath.Join(dir, "memory_relations.jsonl"))
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	for _, rec := range records {
+		if err := w.Write(rec); err != nil {
+			return err
+		}
+		m.MemoryRelationCount++
+	}
+	return nil
+}
+
+// resolveMemoryLocator turns one memories.id into a portable
+// MemoryLocator — a key fact (is_static = false: its owning summary's
+// own id + decrypted fact text, the same content summary_key_facts.fact
+// holds, since storeSummary writes both atomically from the same
+// plaintext) or an entity attribute (is_static = true: entity_id +
+// attribute_key, never needing decryption since those two columns are
+// the locator itself, not the attribute's value).
+func resolveMemoryLocator(ctx context.Context, tx *sql.Tx, keys *crypto.KeyStore, scope identity.Scope, memoryID string) (MemoryLocator, error) {
+	var isStatic bool
+	var summaryID, entityID, attributeKey sql.NullString
+	var contentCT []byte
+	var keyVersion int
+	err := tx.QueryRowContext(ctx, `
+		select is_static, summary_id, entity_id, attribute_key, content, key_version
+		from memories where id = $1 and scope_kind = $2 and scope_owner = $3
+	`, memoryID, scope.Kind, scope.Owner).Scan(&isStatic, &summaryID, &entityID, &attributeKey, &contentCT, &keyVersion)
+	if err != nil {
+		return MemoryLocator{}, fmt.Errorf("hpmf: load memories row %s: %w", memoryID, err)
+	}
+	if isStatic {
+		return MemoryLocator{EntityID: entityID.String, AttributeKey: attributeKey.String}, nil
+	}
+	enc, err := keys.GetVersion(ctx, scope, keyVersion)
+	if err != nil {
+		return MemoryLocator{}, fmt.Errorf("hpmf: resolve encryption key for memories row %s: %w", memoryID, err)
+	}
+	fact, err := enc.Decrypt(contentCT)
+	if err != nil {
+		return MemoryLocator{}, fmt.Errorf("hpmf: decrypt memories row %s: %w", memoryID, err)
+	}
+	return MemoryLocator{SummaryID: summaryID.String, Fact: fact}, nil
 }
 
 // writeJSONFile writes v as indented JSON to path, creating parent

@@ -143,11 +143,12 @@ func ensureScopeExists(ctx context.Context, store *auth.Store, scope identity.Sc
 }
 
 func printStats(scope identity.Scope, stats hpmf.ImportStats) {
-	fmt.Printf("%s:%s — episodes: %d imported, %d skipped; summaries: %d imported, %d skipped; entities: %d imported, %d skipped\n",
+	fmt.Printf("%s:%s — episodes: %d imported, %d skipped; summaries: %d imported, %d skipped; entities: %d imported, %d skipped; memory relations: %d imported, %d skipped\n",
 		scope.Kind, scope.Owner,
 		stats.EpisodesImported, stats.EpisodesSkipped,
 		stats.SummariesImported, stats.SummariesSkipped,
 		stats.EntitiesImported, stats.EntitiesSkipped,
+		stats.MemoryRelationsImported, stats.MemoryRelationsSkipped,
 	)
 }
 

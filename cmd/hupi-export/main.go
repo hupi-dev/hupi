@@ -94,8 +94,8 @@ func run() error {
 
 	fmt.Printf("wrote %s: %d scope(s)\n", *out, len(manifest.Scopes))
 	for _, sm := range manifest.Scopes {
-		fmt.Printf("  %s:%s — %d episodes, %d summaries, %d entities\n",
-			sm.ScopeKind, sm.ScopeOwner, sm.EpisodeCount, sm.SummaryCount, sm.EntityCount)
+		fmt.Printf("  %s:%s — %d episodes, %d summaries, %d entities, %d memory relations\n",
+			sm.ScopeKind, sm.ScopeOwner, sm.EpisodeCount, sm.SummaryCount, sm.EntityCount, sm.MemoryRelationCount)
 	}
 	return nil
 }

@@ -34,16 +34,12 @@ called out again at the relevant section:
 2. **Entities are one file, not one per kind.** `entities.jsonl` with
    `kind` inline, not `people.jsonl`/`projects.jsonl`/etc. — simpler, and
    no file's existence depends on which kind values happen to be in use.
-3. **Known gap, not yet closed**: the live schema's `memory_relations`
-   table and a `key_fact`'s `expires_at`/`expire_reason`/`source_count`/
-   `is_inference` fields (see [Key fact fields](#key-fact-fields) below)
-   have no representation in `internal/hpmf`'s export/import code today
-   (`loadKeyFacts`, `internal/hpmf/export.go`, only selects `fact,
-   source_episode_ids, grounded, key_version`) — an export/import
-   round-trip silently drops them. Fine for the common "move to a new
-   deployment" case (nothing *reads* these fields outside the live
-   store's own retrieval/consolidation path yet), but worth knowing
-   before relying on an export as a complete backup of this data.
+3. **`memory_relations.jsonl`** (see [Memory relations](#memory-relations-fact-to-fact-graph)
+   below) is new since this document's original design — a `key_fact`'s
+   `expires_at`/`expire_reason`/`source_count`/`is_inference` and the
+   `memory_relations` graph itself had no portable representation at all
+   until `docs/DESIGN_VS_BUILT.md`'s #8 was closed; every field now
+   round-trips.
 
 ## Design principles
 
@@ -129,6 +125,9 @@ summaries/                          # hierarchical rollups (all rebuildable)
 ├── monthly/2026-09.json            # version and its correction_reason don't
 └── yearly/2026.json                # get dropped just because it's exported
 entities.jsonl                      # one line per entity, `kind` inline — see below
+memory_relations.jsonl              # one line per fact-to-fact/fact-to-attribute
+                                     # edge (updates/extends/derives) — see below;
+                                     # omitted entirely if the scope has none
 ```
 
 A **whole-deployment export** (`hupi-export -all`) nests one of the above
@@ -141,11 +140,13 @@ scopes/
 ├── private-user_alice/
 │   ├── episodes/...
 │   ├── summaries/...
-│   └── entities.jsonl
+│   ├── entities.jsonl
+│   └── memory_relations.jsonl
 └── shared-team_acme-eng/
     ├── episodes/...
     ├── summaries/...
-    └── entities.jsonl
+    ├── entities.jsonl
+    └── memory_relations.jsonl
 ```
 
 Everything here is the durable, portable core, matching the live Postgres
@@ -438,13 +439,38 @@ document). Each edge has exactly one `relation_type`:
 - **`derives`** — an inferred fact (see [Inferred facts](#inferred-facts)
   above) and the specific attribute(s) it was inferred from.
 
-There is no JSON representation for this graph in the export format
-today (see the gap note near the top of this document) — it exists only
-in the live Postgres schema. A future HPMF revision that closes this gap
-would most naturally add a `relations` array alongside `key_facts` on the
-summary record, referencing other facts by a stable id rather than by
-text (unlike the live schema's own text-based join, used there only
-because that's the one thing the classifying LLM call ever echoes back).
+**Portable representation**: `memory_relations.jsonl`, one line per edge
+— `{relation_type, from, to}`, where `from`/`to` are each a
+`MemoryLocator`, never the live schema's own `memories.id` (a bigserial-
+derived or random internal id, meaningless — and not even unique — in a
+freshly re-imported database):
+
+```json
+{
+  "relation_type": "updates",
+  "from": {"summary_id": "sum_2026-09-15_daily_v2", "fact": "Wells Fargo pre-approval amount is $300,000"},
+  "to": {"summary_id": "sum_2026-09-01_daily_v1", "fact": "Wells Fargo pre-approval amount is $250,000"}
+}
+{
+  "relation_type": "derives",
+  "from": {"summary_id": "sum_2026-09-20_daily_v1", "fact": "Joanna likely has asthma."},
+  "to": {"entity_id": "person:joanna", "attribute_key": "allergic_to"}
+}
+```
+
+A key fact is located by its owning summary's own portable id plus its
+exact text — the same by-text join
+`internal/consolidation/contradiction.go`'s `recordUpdateRelations`
+already uses to resolve a fact without a stable row id to depend on, not
+a weaker substitute for one. An attribute is located by entity id plus
+attribute key, both already portable elsewhere in this format. On
+import, `hupi-import` resolves each locator against whatever it just
+wrote in this same run (tracking which exported summary id became which
+freshly-assigned one) — a relation whose summary was skipped as
+already-present in the target scope (a `-merge` import where that period
+predates this run) can't be resolved and is skipped, logged, and counted
+(`ImportStats.MemoryRelationsSkipped`), the same posture an unresolvable
+`supersedes` reference already takes.
 
 ## Entity record (entities/*.jsonl)
 
