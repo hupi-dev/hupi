@@ -283,6 +283,23 @@ Runs independently of any live chat (nightly cron is enough):
    `internal/reembed`'s doc comment for why comparing vectors across
    models isn't safe and how this stays resumable without a persisted
    cursor.
+5. **Relation graph & inference, best-effort, after storage** (all
+   off by default — see [docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md](docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md)):
+   cross-period contradiction detection compares today's facts against
+   other current summaries sharing a touched entity and applies a real
+   correction (§ below) when one genuinely conflicts, recording an
+   `updates` edge in `memory_relations`; an opt-in second pass
+   (`HUPI_ENABLE_EXTENDS_DETECTION`) records an `extends` edge when a new
+   fact is a concrete follow-up development of an existing one, without
+   contradicting it; an opt-in third pass
+   (`HUPI_ENABLE_INFERENCE_EXTRACTION`) checks whether a known entity's
+   combined attributes directly imply an unstated condition, storing a
+   qualifying result as a new, clearly-marked inferred fact with a
+   `derives` edge back to the attributes it came from. Each is a wholly
+   separate, dedicated LLM call with its own narrow prompt — bolting any
+   of these three judgments onto the main consolidation or grounding
+   prompt was tried and real-verified not to work, live, against GPT-4.1
+   (that prompt's own dominant framing suppresses the added judgment).
 
 Raw episodes are **not** pruned by this pipeline. Storage is cheap relative
 to the value of being able to trace a summary claim back to what was
@@ -311,7 +328,18 @@ things in the design push back on this (details in
    wrong "memory" later, the fix is a new summary version with `supersedes`
    and `correction_reason` set — the wrong version stays in the bundle as a
    record of what went wrong, which is also the raw material for improving
-   the grounding check over time.
+   the grounding check over time. Some corrections now happen without a
+   human noticing first: a best-effort, after-storage step checks a new
+   day's facts against other current summaries sharing a touched entity
+   and applies the same `supersedes`-based correction automatically when
+   one genuinely conflicts (see Consolidation engine step 5, above).
+4. **An inferred fact is always labeled as one, never presented with a
+   literal fact's confidence.** Opt-in inference extraction (step 5,
+   above) is the one place consolidation stores a claim nothing in the
+   conversation actually said — it's marked `is_inference` at the row
+   level and surfaced with an explicit `[inferred]` prefix wherever it's
+   cited, so a reader (or the attribution judge, when `X-Hupi-Explain:
+   deep` runs) can't mistake it for something stated outright.
 
 This costs real, recurring LLM calls (the grounding check roughly doubles
 the number of consolidation calls) — accepted deliberately, because the
@@ -458,9 +486,14 @@ flag, not a gap HUPI tries to paper over by reintroducing app-managed FUSE.
 
 **Layer 2 — application-level field encryption, inside the gateway, on top of whatever Layer 1 provides (defense in depth, not a replacement for it).**
 - Sensitive text columns — `input_text`/`output_text` on episodes,
-  `summary`/`key_facts[].fact` on summaries, `attributes` on entities — are
-  encrypted with AES-256-GCM before being written to Postgres, and
-  decrypted only in the gateway process after a read.
+  `summary`/`key_facts[].fact` on summaries, `attributes` on entities,
+  `content` on `memories` (the unified per-fact/per-attribute mirror,
+  see [docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md](docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md))
+  — are encrypted with AES-256-GCM before being written to Postgres, and
+  decrypted only in the gateway process after a read. `memory_relations`
+  (the `updates`/`extends`/`derives` graph between two `memories` rows)
+  carries no text of its own to encrypt — just two row ids and a relation
+  type.
 - Envelope key scheme: a per-deployment (per-tenant, for Tier 3) data
   encryption key (DEK) does the actual field encryption; the DEK itself is
   encrypted at rest by a key-encryption key (KEK) sourced from wherever the

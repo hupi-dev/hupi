@@ -97,7 +97,26 @@ authentication and created any teams, not a different product.
 - **Correction**: the only sanctioned way to fix a wrong memory. Nothing
   is ever silently edited — a correction is a brand new version that
   supersedes the old one, with a reason recorded, so there's always an
-  audit trail of what was wrong and why it was changed.
+  audit trail of what was wrong and why it was changed. The system now
+  also catches and applies some corrections on its own — see §8.
+- **Fact expiration**: a one-time or time-bound fact ("has a dentist
+  appointment tomorrow") is tagged, at the moment it's recorded, with a
+  date after which it should stop reading as current state. A stable
+  fact (a job title, a city of residence) never gets one and stays valid
+  indefinitely — this only applies to facts that were true for a limited
+  window to begin with.
+- **Inferred fact**: a fact the system never heard stated outright, but
+  concluded from other recorded facts about the same person considered
+  together (an allergy pattern implying asthma, say). Always labeled as
+  an inference, never presented with the same unqualified confidence as
+  something you or the AI actually said — off by default, since it's new
+  and narrower-scoped than the rest of memory.
+- **Memory relations**: a link between two individual facts, recorded
+  alongside them — "this fact updates that one," "this fact is a
+  follow-up development of that one," "this fact was inferred from
+  those ones." Lets a later audit (or a curious user) see not just what
+  the system remembers, but how one memory led to or connects with
+  another.
 
 ## 4. Setting up a deployment (what an operator actually does)
 
@@ -236,6 +255,18 @@ directly. What happens depends on which layer is doing the protecting:
 5. From this point on, retrieval only ever surfaces the corrected
    version — but the wrong one, and the reason it was wrong, both remain
    in the historical record rather than disappearing.
+6. **Some of this now happens automatically, without a human filing
+   feedback first.** Every night, after writing a new day's summary, the
+   system separately checks whether anything in it contradicts a fact
+   from a different day about the same person or thing — if a mortgage
+   pre-approval amount changed, say. A genuine contradiction is corrected
+   the same way step 4 describes (a new, superseded version, re-checked
+   against real source text), fully logged, with the connection between
+   the old and new fact recorded for later audit. This narrows, but
+   doesn't replace, the human-reported path above — it only ever
+   compares facts the system has already stored, so a wrong memory with
+   nothing else around it to contradict still needs a human to notice
+   and report it.
 
 ## 9. Scenario: changing which AI you use
 

@@ -409,6 +409,50 @@ this information," and the model correctly says nothing is available.
   the gold answer and the real judge actually say before treating an
   abstention as a miss.
 
+## N. Fact relations and inference (updates/extends/derives)
+
+**Example**: a later message describes a concrete training run; an
+earlier, still-current fact says the same person is training for a
+marathon. Separately, a person's recorded allergy attributes (`allergic_to:
+most reptiles and animals with fur`, `allergic_to_cockroaches: yes`)
+directly imply an unstated condition (asthma) nothing in the conversation
+ever said outright.
+
+- **What's happening**: scenario G's automatic contradiction correction
+  now also writes an explicit `updates` graph edge
+  (`memory_relations`) linking the new fact back to the one it replaced.
+  Two further, independent, opt-in passes (both off by default) were
+  added alongside it, each its own standalone LLM call rather than a
+  bolt-on to an existing prompt: `extends` detection records a graph edge
+  when a new fact is a concrete follow-up development of an existing one
+  without contradicting it (the training-run example above); inference
+  extraction checks whether a known entity's combined attributes directly
+  imply an unstated condition and, if so, stores it as a new fact flagged
+  `is_inference` with a `derives` edge back to the attributes it came
+  from (the asthma example above).
+- **Why two separate bolt-on attempts failed first**: both `extends` and
+  inference extraction were tried, twice each, as additions to the
+  existing contradiction-check and consolidation prompts respectively —
+  both attempts failed to fire live against real GPT-4.1, even with
+  directly-matching worked examples. Root cause, confirmed by an isolated
+  capability check (the model could make the identical judgment
+  correctly when asked in isolation, with no surrounding task framing):
+  the host prompt's own dominant framing (skeptical "report nothing" for
+  contradiction-check, "extract only what's literally stated" for
+  consolidation) suppresses any single bolt-on exception. A wholly
+  separate, standalone prompt with no competing framing fired reliably on
+  the first attempt for inference extraction, and after one prompt
+  tightening (a vague topical restatement was briefly a false positive)
+  for `extends`.
+- **Status**: ✅ real-verified at the unit/integration level — real
+  Postgres, real GPT-4.1 batteries (4/4 for inference, 7/7 for `extends`
+  after the one fix above) — but **not yet verified at benchmark scale**.
+  Both passes are off by default
+  (`HUPI_ENABLE_EXTENDS_DETECTION`/`HUPI_ENABLE_INFERENCE_EXTRACTION`); a
+  full re-ingest, category-level before/after comparison hasn't been run.
+  See [MEMORY_MODEL_REARCHITECTURE_PLAN.md](MEMORY_MODEL_REARCHITECTURE_PLAN.md)
+  Phases 3-5 for the complete verification record.
+
 ---
 
 ## Open items, in priority order

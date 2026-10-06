@@ -105,6 +105,23 @@ after base64 decode, before any parsing/upstream call).
 **Optional header**: `X-Hupi-Memory: off` — bypasses retrieval entirely
 for this one request (not even the anchor is injected).
 
+**Optional header**: `X-Hupi-Explain: on|deep` — adds a `hupi_citations`
+array to the response, each entry `{ref, snippet, used, parent_summary_id,
+is_inference, relations}`. `on` is free — exactly what retrieval already
+computed, no extra call. `deep` additionally runs one real judge LLM
+call (`attributionCheck`) to fill in `used` (whether the generated
+answer actually relied on that specific snippet, not just whether it was
+available) — `used` is `null`/omitted until checked, never defaulted to
+`false`. `is_inference` is a real, always-populated true/false for a
+fact-level (`RefKindMemory`) citation — `true` when the consolidation LLM
+inferred it rather than found it stated outright (see
+[MEMORY_MODEL_REARCHITECTURE_PLAN.md](MEMORY_MODEL_REARCHITECTURE_PLAN.md)
+Phase 4) — and omitted for an entity-attribute or summary/episode-level
+citation, where there's no such verdict to report. `relations` lists any
+`updates`/`extends`/`derives` edges touching that fact (same doc, Phases
+3/5), omitted when there are none. See
+[PROCESS_REFERENCE.md §2.7](PROCESS_REFERENCE.md) for the full behavior.
+
 **Response** (non-streaming, `chatCompletionResponse`):
 
 ```json

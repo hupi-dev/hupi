@@ -24,7 +24,7 @@ allowed to imply fields the other can't represent.
 **Built** (`cmd/hupi-export`, `cmd/hupi-import`, `internal/hpmf`, see
 [GAP_CLOSURE_PLAN.md §4.2](GAP_CLOSURE_PLAN.md)) — this document predates
 Tier 3's multi-tenancy and originally assumed one deployment, one owner.
-Two deltas between what's written below and what actually shipped, both
+Three deltas between what's written below and what actually shipped, all
 called out again at the relevant section:
 
 1. **Scope-aware.** Every export is per-scope (`-scope-kind`/`-scope-owner`)
@@ -34,6 +34,16 @@ called out again at the relevant section:
 2. **Entities are one file, not one per kind.** `entities.jsonl` with
    `kind` inline, not `people.jsonl`/`projects.jsonl`/etc. — simpler, and
    no file's existence depends on which kind values happen to be in use.
+3. **Known gap, not yet closed**: the live schema's `memory_relations`
+   table and a `key_fact`'s `expires_at`/`expire_reason`/`source_count`/
+   `is_inference` fields (see [Key fact fields](#key-fact-fields) below)
+   have no representation in `internal/hpmf`'s export/import code today
+   (`loadKeyFacts`, `internal/hpmf/export.go`, only selects `fact,
+   source_episode_ids, grounded, key_version`) — an export/import
+   round-trip silently drops them. Fine for the common "move to a new
+   deployment" case (nothing *reads* these fields outside the live
+   store's own retrieval/consolidation path yet), but worth knowing
+   before relying on an export as a complete backup of this data.
 
 ## Design principles
 
@@ -265,12 +275,20 @@ mutated in place (corrections are new records referencing the old `id`).
     {
       "fact": "Decided to use PostgreSQL + pgvector as the vector index",
       "source_episode_ids": ["01J8Z3FA..."],
-      "grounded": true
+      "grounded": true,
+      "source_count": 1,
+      "expires_at": null,
+      "expire_reason": null,
+      "is_inference": false
     },
     {
       "fact": "Working directory for the project is ~/repos/hupi",
       "source_episode_ids": ["01J8Z3F9K2..."],
-      "grounded": true
+      "grounded": true,
+      "source_count": 1,
+      "expires_at": null,
+      "expire_reason": null,
+      "is_inference": false
     }
   ],
   "entities_touched": ["project:hupi"],
@@ -350,6 +368,83 @@ one flips it to `"reviewed"`. This is off by default (retrieval treats
 `draft` and `reviewed` the same) but gives you a place to plug in review
 without redesigning the format later, and is most worth turning on for
 monthly/yearly rollups, where compounding drift risk is highest.
+
+### Key fact fields
+
+Beyond `fact`/`source_episode_ids`/`grounded` (above):
+
+- **`source_count`** (default `1`): incremented, never reset, when a later
+  period restates the exact same fact with no new information
+  (opt-in, `HUPI_ENABLE_REDUNDANCY_DEDUP`) — a reinforcement signal for
+  retrieval ranking, not a trust/grounding judgment. A fact mentioned
+  three separate times outranks an equally-relevant one mentioned once,
+  all else equal.
+- **`expires_at`** / **`expire_reason`** (both `null` unless set): a date
+  past which the fact should no longer read as current state — "has a
+  dentist appointment tomorrow" shouldn't still surface as if true a year
+  later. Set by the consolidation LLM itself at extraction time, based on
+  the fact's own content (a one-time future event, an explicit "until
+  such-and-such date," etc.) — most facts never get one and stay valid
+  indefinitely, which is the correct default for stable facts (a job
+  title, a city of residence).
+- **`is_inference`** (default `false`): `true` for a fact the consolidation
+  LLM never saw stated outright, but inferred from an entity's existing
+  attributes considered together (an allergy pattern implying asthma,
+  say) — see [Inferred facts](#inferred-facts) below. Never grounded
+  against source text (it wasn't extracted from any), and always
+  surfaced to a reader as `[inferred]`, never presented with the same
+  unqualified confidence as a literal fact.
+
+### Inferred facts
+
+An inferred key fact (`is_inference: true`) additionally has
+`inferred_from_entity_id` and `inferred_from_attribute_keys`, naming the
+specific entity and attribute(s) the inference was drawn from — the
+provenance a reader (or a later audit) needs to judge whether the
+inference still holds if those attributes ever change:
+
+```json
+{
+  "fact": "Joanna likely has asthma.",
+  "is_inference": true,
+  "inferred_from_entity_id": "person:joanna",
+  "inferred_from_attribute_keys": ["allergic_to", "allergic_to_cockroaches"],
+  "grounded": true,
+  "source_count": 1
+}
+```
+
+`grounded` is always `true` for an inferred fact — it was never going to
+match against raw source text (nothing in the conversation stated it),
+so it's trusted on the extraction prompt's own verified precision bar
+instead of re-checked the normal way.
+
+### Memory relations (fact-to-fact graph)
+
+A separate construct from `key_facts` themselves: an edge between two
+facts, recorded in the live store's `memory_relations` table (not yet
+represented in an HPMF export — see the gap noted near the top of this
+document). Each edge has exactly one `relation_type`:
+
+- **`updates`** — a later fact replaced an earlier one's value for the
+  same specific claim (a mortgage pre-approval amount that changed). The
+  earlier fact's own text was rewritten in place via the same correction
+  mechanism described above — the edge records *that* a correction
+  happened and which two fact versions it connects.
+- **`extends`** — a later fact is a concrete, specific follow-up
+  development of an earlier one (a particular training run developing a
+  "training for a marathon" fact), without contradicting or replacing it
+  — both facts' own text stay exactly as written.
+- **`derives`** — an inferred fact (see [Inferred facts](#inferred-facts)
+  above) and the specific attribute(s) it was inferred from.
+
+There is no JSON representation for this graph in the export format
+today (see the gap note near the top of this document) — it exists only
+in the live Postgres schema. A future HPMF revision that closes this gap
+would most naturally add a `relations` array alongside `key_facts` on the
+summary record, referencing other facts by a stable id rather than by
+text (unlike the live schema's own text-based join, used there only
+because that's the one thing the classifying LLM call ever echoes back).
 
 ## Entity record (entities/*.jsonl)
 
