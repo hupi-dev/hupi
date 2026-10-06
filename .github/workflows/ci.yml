@@ -22,7 +22,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      PGPASSWORD: hupi
       # hupi_app, not the postgres superuser: row-level security
       # (schema/0005) is bypassed by table owners and superusers, so
       # connecting as postgres here would make internal/store's RLS tests
@@ -30,30 +29,21 @@ jobs:
       # all. This is also exactly what bootstrap.go's own
       # resolveDatabaseURL doc comment already says a real deployment
       # should do.
+      HUPI_ADMIN_DATABASE_URL: postgres://postgres:hupi@localhost:5432/hupi?sslmode=disable
       HUPI_TEST_DATABASE_URL: postgres://hupi_app:hupi_app_test_only@localhost:5432/hupi?sslmode=disable
+      HUPI_APP_DB_PASSWORD: hupi_app_test_only
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-      # schema/0*.sql are numbered and must be applied in order — later
-      # migrations depend on tables/columns earlier ones create (same
-      # sequence docs/INSTALL.md's manual-setup path documents).
-      # schema/0004 deliberately creates hupi_app with no password (so
-      # none lands in a file meant to be checked in) — set one here,
-      # out of band, same as a real install.sh run would.
-      - name: Apply schema migrations
-        run: |
-          for f in schema/0*.sql; do
-            psql -h localhost -U postgres -d hupi -f "$f"
-          done
-          psql -h localhost -U postgres -d hupi -c "alter role hupi_app with password 'hupi_app_test_only'"
-      - name: go build
-        run: go build ./...
-      - name: go vet
-        run: go vet ./...
-      - name: go test
-        run: go test ./...
+      # master-test.sh is the single source of truth for "is this repo's
+      # Go side green" — schema migrations, gofmt, go build, go vet, go
+      # test, in that order — runnable identically here and on a
+      # developer's own machine (docs/MASTER_TEST_PLAN.md). Not
+      # duplicated inline here so the two can't silently drift apart.
+      - name: Master test gate (migrations, gofmt, build, vet, test)
+        run: ./master-test.sh
 
   vscode-extension:
     runs-on: ubuntu-latest
@@ -135,3 +125,22 @@ jobs:
             -e 's/^HUPI_KEK=$/HUPI_KEK=ci-dummy/' \
             .env
           docker compose config > /dev/null
+
+  # A single, stable required-status-check name covering every other job
+  # — docs/MASTER_TEST_PLAN.md §4. Branch protection should point at
+  # *this* job's name, not any individual one above: adding a new CI job
+  # later only needs updating this job's `needs:` list, not every
+  # branch-protection rule that references job names directly.
+  master-test-gate:
+    runs-on: ubuntu-latest
+    needs: [go, vscode-extension, site, deploy]
+    if: always()
+    steps:
+      - name: All required jobs passed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more required jobs did not succeed:"
+            echo "${{ toJSON(needs) }}"
+            exit 1
+          fi
+          echo "All required jobs passed."
