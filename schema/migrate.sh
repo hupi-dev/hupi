@@ -26,7 +26,19 @@ probe() {
     0001_init.sql)                        echo "select (to_regclass('public.episodes') is not null)" ;;
     0002_tier3_phase1_identity.sql)       echo "select exists(select 1 from information_schema.columns where table_name='episodes' and column_name='scope_kind')" ;;
     0003_tier3_phase2_retrieved_refs.sql) echo "select exists(select 1 from information_schema.columns where table_name='episodes' and column_name='retrieved_refs')" ;;
-    0004_hardening_phase1_app_role.sql)   echo "select exists(select 1 from pg_roles where rolname='hupi_app')" ;;
+    # Checks a per-database GRANT, not just pg_roles' role existence —
+    # roles are cluster-wide but 0004's grant statements are scoped to
+    # whichever database this script runs against. On a cluster that
+    # already has hupi_app (from a different, already-migrated
+    # database), probing pg_roles alone reports "already applied" and
+    # silently skips 0004 against a *fresh* database — the role exists,
+    # but it has zero privileges here, so every real binary later fails
+    # with "permission denied for table users". Real, reproduced bug,
+    # found by an E2E harness pass hitting it directly against a shared
+    # dev Postgres cluster. `episodes` is guaranteed to exist by the
+    # time this probe runs (0001 already created it), so this is safe
+    # to check unconditionally.
+    0004_hardening_phase1_app_role.sql)   echo "select exists(select 1 from information_schema.table_privileges where table_name='episodes' and grantee='hupi_app' and privilege_type='SELECT')" ;;
     0005_hardening_phase3_rls.sql)        echo "select coalesce((select relrowsecurity from pg_class where relname='episodes'), false)" ;;
     0006_hardening_phase4_scope_keys.sql) echo "select (to_regclass('public.scope_keys') is not null)" ;;
     0007_audit_log.sql)                   echo "select (to_regclass('public.audit_log') is not null)" ;;
