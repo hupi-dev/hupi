@@ -34,14 +34,15 @@ type Manifest struct {
 // whole-deployment export — hupi-import reads Dir rather than inferring
 // the layout, so the two shapes never need separate detection logic.
 type ScopeManifest struct {
-	ScopeKind         string     `json:"scope_kind"`
-	ScopeOwner        string     `json:"scope_owner"`
-	Dir               string     `json:"dir"`
-	EpisodeCount      int        `json:"episode_count"`
-	SummaryCount      int        `json:"summary_count"`
-	EntityCount       int        `json:"entity_count"`
-	EarliestEpisodeAt *time.Time `json:"earliest_episode_at,omitempty"`
-	LatestEpisodeAt   *time.Time `json:"latest_episode_at,omitempty"`
+	ScopeKind           string     `json:"scope_kind"`
+	ScopeOwner          string     `json:"scope_owner"`
+	Dir                 string     `json:"dir"`
+	EpisodeCount        int        `json:"episode_count"`
+	SummaryCount        int        `json:"summary_count"`
+	EntityCount         int        `json:"entity_count"`
+	MemoryRelationCount int        `json:"memory_relation_count"`
+	EarliestEpisodeAt   *time.Time `json:"earliest_episode_at,omitempty"`
+	LatestEpisodeAt     *time.Time `json:"latest_episode_at,omitempty"`
 }
 
 func (m ScopeManifest) Scope() identity.Scope {
@@ -109,10 +110,53 @@ type SummaryRecord struct {
 	KeyFacts             []KeyFactRecord `json:"key_facts,omitempty"`
 }
 
+// KeyFactRecord's SourceCount/ExpiresAt/ExpireReason/IsInference were
+// added alongside memory_relations.jsonl (see MemoryRelationRecord
+// below) — docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md's fields had no
+// portable-format representation at all until this, documented as a
+// known gap in docs/DESIGN_VS_BUILT.md #8.
 type KeyFactRecord struct {
 	Fact             string   `json:"fact"`
 	SourceEpisodeIDs []string `json:"source_episode_ids,omitempty"`
 	Grounded         bool     `json:"grounded"`
+	SourceCount      int      `json:"source_count,omitempty"`
+	ExpiresAt        string   `json:"expires_at,omitempty"`
+	ExpireReason     string   `json:"expire_reason,omitempty"`
+	IsInference      bool     `json:"is_inference,omitempty"`
+}
+
+// MemoryLocator identifies one memories row within a bundle in a way
+// that survives a re-import — never the live schema's own memories.id
+// (either a bigserial-derived "mem_fact_<id>" or a random "mem_<hex>",
+// neither of which is meaningful, or necessarily unique, in a fresh
+// target database; summary_key_facts.id in particular is a plain
+// per-database bigserial, nothing like episodes'/summaries' own
+// globally-unique string ids). Exactly one of the two field pairs is
+// set:
+//   - a key fact: SummaryID (the *exported* summary's own portable id,
+//     matching a SummaryRecord.ID elsewhere in the same bundle) + Fact
+//     (its exact text) — the same by-text join
+//     internal/consolidation/contradiction.go's recordUpdateRelations
+//     already uses to resolve a fact without a stable row id to depend
+//     on, reused here for the identical reason.
+//   - an entity attribute: EntityID + AttributeKey — both already
+//     portable, stable strings elsewhere in the format (EntityRecord.ID,
+//     and the attributes map's own keys).
+type MemoryLocator struct {
+	SummaryID    string `json:"summary_id,omitempty"`
+	Fact         string `json:"fact,omitempty"`
+	EntityID     string `json:"entity_id,omitempty"`
+	AttributeKey string `json:"attribute_key,omitempty"`
+}
+
+// MemoryRelationRecord is one line of memory_relations.jsonl — a single
+// fact-to-fact (or fact-to-attribute) edge from the live memory_relations
+// table (schema/0025). RelationType is "updates", "extends", or
+// "derives" — see docs/MEMORY_FORMAT.md § Memory relations.
+type MemoryRelationRecord struct {
+	RelationType string        `json:"relation_type"`
+	From         MemoryLocator `json:"from"`
+	To           MemoryLocator `json:"to"`
 }
 
 // EntityRecord is one line of entities.jsonl. MEMORY_FORMAT.md's

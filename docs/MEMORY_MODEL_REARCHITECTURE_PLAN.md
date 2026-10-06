@@ -529,6 +529,28 @@ edge gets written for it going forward. Smaller, separate, still-open
 gap — would need either new persisted columns or reconstructing the
 provenance from the fact's existing `memory_relations` rows.
 
+**Same audit, second finding, since closed**: HPMF (`cmd/hupi-export`/
+`cmd/hupi-import`) didn't carry any of this plan's fields either —
+`source_count`/`expires_at`/`expire_reason`/`is_inference` on a key fact,
+and the whole `memory_relations` graph, silently dropped on every
+export/import round trip (`docs/DESIGN_VS_BUILT.md` #8). Closed: a new
+`memory_relations.jsonl` carries the relation graph (each edge's
+endpoints as a portable `MemoryLocator` — summary id + fact text for a
+key fact, entity id + attribute key for an attribute — resolved against
+whatever the same import run just wrote, never the live schema's own
+non-portable `memories.id`), and `KeyFactRecord` carries the four
+key-fact fields. Closing this surfaced a real, separate, adjacent gap:
+imported key facts never got mirrored into `memories` at all (unlike a
+live `storeSummary` write, which always has) — fixed in the same pass,
+since `memory_relations` import needs a real `memories` row on both
+ends to point an edge at. See
+[MEMORY_FORMAT.md § Memory relations](MEMORY_FORMAT.md#memory-relations-fact-to-fact-graph)
+for the portable format itself. Same residual gap as
+`Runner.CurrentContent`'s own fix above:
+`inferred_from_entity_id`/`inferred_from_attribute_keys` still don't
+round-trip, for the identical reason (never persisted columns to begin
+with).
+
 ### Phase 5 — `extends` classification (deferred from Phase 3, shipped
 via dedicated prompt engineering)
 

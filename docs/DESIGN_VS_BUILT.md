@@ -11,10 +11,10 @@ For each gap: what the design says, what the code actually does today
 (file/function-level), why the gap exists, what breaks if it's never
 closed, and rough effort to close it.
 
-**Update**: #1, #2, and #3 below are now closed — see the "Closed" note at
-the top of each. #4-#7 remain open, as originally described. #8 is a new,
-small gap added by this doc's own convention once it was found, not part
-of the original review.
+**Update**: #1, #2, #3, and #8 below are now closed — see the "Closed"
+note at the top of each. #4-#7 remain open, as originally described. #8
+is a new gap added by this doc's own convention once it was found, not
+part of the original review.
 
 ---
 
@@ -305,51 +305,65 @@ own project.
 
 ## 8. HPMF export/import doesn't carry the memory-relation/expiration/inference fields
 
+**Closed.** `internal/hpmf`'s `KeyFactRecord` now carries
+`source_count`/`expires_at`/`expire_reason`/`is_inference`, and a new
+`memory_relations.jsonl` (one line per `updates`/`extends`/`derives`
+edge, each endpoint a portable `MemoryLocator` — summary id + fact text
+for a key fact, entity id + attribute key for an attribute — never the
+live schema's own non-portable `memories.id`) carries the relation graph.
+Import resolves each locator against what it just wrote this run
+(tracking exported-summary-id -> freshly-assigned-id as it goes) and
+also now mirrors every imported key fact into `memories` — a real,
+separate gap this closure surfaced: imported key facts never got a
+`memories` row at all before this, which `memory_relations` import
+needed fixed to have anything to point an edge at. The description below
+is kept as a record of the original gap.
+
 **Design**: [MEMORY_FORMAT.md § Key fact fields](MEMORY_FORMAT.md#key-fact-fields)
 and [§ Memory relations](MEMORY_FORMAT.md#memory-relations-fact-to-fact-graph)
 (added by `docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`) describe `source_count`,
 `expires_at`/`expire_reason`, `is_inference`/`inferred_from_*` as part of
 a `key_fact`'s record, and `memory_relations` as part of the live schema.
 
-**Built**: the live schema has all of it (`schema/0025`, `0029`-`0032`).
-`internal/hpmf`'s export/import does not — `loadKeyFacts`
-(`internal/hpmf/export.go`) only selects `fact, source_episode_ids,
-grounded, key_version`, and `memory_relations` has no export
-representation at all. An export/import round-trip silently drops every
-one of these fields.
+**Built** (at the time this gap was found): the live schema had all of
+it (`schema/0025`, `0029`-`0032`). `internal/hpmf`'s export/import did
+not — `loadKeyFacts` (`internal/hpmf/export.go`) only selected `fact,
+source_episode_ids, grounded, key_version`, and `memory_relations` had
+no export representation at all. An export/import round-trip silently
+dropped every one of these fields.
 
 **Why**: sequencing — these fields shipped as application code on top of
 an already-existing export/import implementation that nothing went back
 to extend, same shape as #3's original gap (episode-level vector search
 shipping before HPMF's own export logic accounted for it).
 
-**Risk**: low today. Nothing outside the live store's own
-retrieval/consolidation path reads these fields yet, so a deployment that
-exports and re-imports loses reinforcement counts, expiration dates, and
-the relation graph, but not anything currently load-bearing for
-retrieval correctness. Worth closing before any of these fields becomes
-something a product surface depends on existing after a migration.
+**Risk** (at the time): low. Nothing outside the live store's own
+retrieval/consolidation path read these fields, so a deployment that
+exported and re-imported lost reinforcement counts, expiration dates,
+and the relation graph, but not anything load-bearing for retrieval
+correctness at the time.
 
-**Effort to close**: small. `KeyFactRecord` (`internal/hpmf/types.go`)
-only has `Fact`/`SourceEpisodeIDs`/`Grounded` today — add the missing
-fields (same json tag names `consolidation.KeyFactOutput` already uses:
-`source_count`, `expires_at`, `expire_reason`, `is_inference`,
-`inferred_from_entity_id`, `inferred_from_attribute_keys`), extend
-`loadKeyFacts`'s `select` and the corresponding `insert` in
-`internal/hpmf/import.go`, and add a `relations` array alongside
-`key_facts` on the summary record (referencing other facts by a stable
-id, not text — see MEMORY_FORMAT.md's own note on this).
+**Remaining, smaller gap, not closed here**: `inferred_from_entity_id`/
+`inferred_from_attribute_keys` still have no portable representation,
+since they were never persisted as their own `summary_key_facts`
+columns to begin with — only used transiently at write time to record
+the `derives` edge. (`Runner.CurrentContent` has the identical gap, for
+the identical reason, fixed separately — see
+`docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`'s own note on it.) An
+inferred fact's `is_inference` flag, text, and its `derives` edge all
+round-trip correctly here; only the edge's *why* (which specific
+attributes) would need new columns or a different mechanism to
+preserve.
 
-**Closed, for the sibling tool**: `internal/store/export.go`'s
+**Also closed, for the sibling tool**: `internal/store/export.go`'s
 `ExportMemory` (`cmd/hupi-export-memory`, a separate diagnostic dump, not
-HPMF) had the identical gap in its own `ExportedKeyFact` type — fixed:
-`source_count`/`expires_at`/`expire_reason`/`is_inference` now round-trip
-there. `memory_relations` still isn't exported by this tool either
-(same remaining scope as HPMF's own `relations` array above) —
-`InferredFromEntityID`/`InferredFromAttributeKeys` aren't included
-because, per `hupi-correct`'s own fix above, they aren't persisted
-columns to read in the first place. HPMF itself (`internal/hpmf`) is
-untouched and still has the full gap described above.
+HPMF) had the identical gap in its own `ExportedKeyFact` type — fixed in
+a sibling PR: `source_count`/`expires_at`/`expire_reason`/`is_inference`
+now round-trip there too. `memory_relations` still isn't exported by
+this tool (it was never the one carrying backup/migration
+responsibility HPMF does, so wasn't extended to match) — a diagnostic
+dump missing the relation graph is a smaller, lower-priority gap than
+HPMF's own was.
 
 ---
 
@@ -364,10 +378,11 @@ untouched and still has the full gap described above.
 | 5 | Structured-output hardening | Open | Medium | A robustness improvement, not a correctness bug — today's approach works when the model behaves; this makes it work when it doesn't. |
 | 6 | Integration testing | Open | Medium | Should really happen *alongside* 1-5, not after — noted last only because it needs an external Postgres instance this environment doesn't have on hand. |
 | 7 | Tier 3 | Open | Large | Deliberately last per the original build order; nothing above depends on it, and it depends on everything above being solid first. |
-| 8 | HPMF export/import gap (relations/expiration/inference) | Open — HPMF itself; **closed** for the sibling `hupi-export-memory` tool | Small | Low risk today (nothing outside the live store reads these fields yet), but the cheapest open item on this list — worth closing opportunistically rather than letting more fields accumulate on top of an export path that's already behind. |
+| 8 | HPMF export/import gap (relations/expiration/inference) | **Closed** | Small | Low risk, but the cheapest open item on the list at the time — closed opportunistically rather than letting more fields accumulate on top of an export path that was already behind. A smaller residual gap remains (`inferred_from_*` provenance, see #8's own text) along with the imported-key-facts-never-mirrored-into-`memories` gap this closure surfaced and also fixed. |
 
-**#1, #2, and #3 are now closed** — the two active correctness bugs plus
+**#1, #2, #3, and #8 are now closed** — the two active correctness bugs,
 the recall gap that was small enough to close without a scheduling
-subsystem. #4-#7 remain open, scoped future work as described above. #8
-is a new, small gap surfaced by `docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`
-shipping fields the export path was never extended to carry.
+subsystem, and the HPMF/export-path gap surfaced once
+`docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md` shipped fields the export
+path was never extended to carry. #4-#7 remain open, scoped future work
+as described above.
