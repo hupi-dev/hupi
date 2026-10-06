@@ -169,6 +169,26 @@ rollup's own creation time against its sources' most recent change and
 regenerates/cascades upward when needed, triggered by same-day
 re-consolidation or by a contradiction correction.
 
+A later pass (`docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`) added a parallel
+`memories`/`memory_relations` graph alongside the above, each piece its own
+narrow, dedicated LLM call rather than an addition to an existing prompt —
+real-verified live, twice, that bolting a new judgment onto
+`contradictionCheckPrompt`'s or `summarySystemPrompt`'s own dominant framing
+just doesn't fire. A genuine contradiction now also writes an `updates`
+edge linking the corrected fact back to the one it replaced; an opt-in pass
+(`HUPI_ENABLE_EXTENDS_DETECTION`) writes an `extends` edge when a new fact
+is a concrete follow-up development of an existing one without
+contradicting it; an opt-in pass (`HUPI_ENABLE_INFERENCE_EXTRACTION`) checks
+whether a known entity's combined attributes directly imply an unstated
+condition, storing a qualifying result as a new fact flagged
+`is_inference` with a `derives` edge back to the attributes it came from —
+never grounding-checked (there's no source text to check it against),
+trusted on the extraction prompt's own live-verified precision instead.
+Separately, a restated (not contradicted) fact can now increment a
+`source_count` reinforcement counter instead of being deleted, and any
+`key_facts` entry can carry an `expires_at`/`expire_reason` pair so a
+one-time event doesn't read as permanent state.
+
 ## 5. Identity, auth, crypto, and row-level security
 
 `identity.Scope{Kind, Owner}` is the universal tenancy key — ids alone
@@ -176,7 +196,7 @@ aren't globally unique (two teams can each have an entity called the same
 slug), so every scoped table's real primary key includes scope. Every
 scoped query goes through `dbscope.Run`/`SetSession`, which sets four
 Postgres session variables; RLS policies on `episodes`/`summaries`/
-`entities`/`entity_relationships` check those variables via
+`entities`/`entity_relationships`/`memories`/`memory_relations` check those variables via
 `current_setting(..., true)`, which returns NULL when unset — and
 `NULL = anything` is never true, so a transaction that skips this setup is
 denied every row, not granted all of them. This is backed by connecting as
@@ -263,17 +283,30 @@ the same fallback shape `Grounding()` already uses for `Consolidation()`.
 
 ## 9. Schema and migrations
 
-Fifteen migrations evolved the schema from a single-tenant prototype
-(episodes/summaries/entities only) through scoping, RLS, key-rotation
-support, audit logging, vector search for entities, embedding-model
-tracking, the public demo, and an entity-relationship graph. Every
-`NOT NULL` column added to an existing table correctly supplies a
-`DEFAULT`, so none of the `ALTER TABLE`s would fail against pre-existing
-rows. `entity_relationships` is the one table whose foreign keys are
-deliberately composite (`scope_kind, scope_owner, subject_id`) rather than
-a bare reference to `entities(id)`, specifically because entity ids aren't
-globally unique post-scoping — exactly the kind of real cross-scope leak a
-bare FK would otherwise allow.
+Fifteen migrations, as of this review, evolved the schema from a
+single-tenant prototype (episodes/summaries/entities only) through
+scoping, RLS, key-rotation support, audit logging, vector search for
+entities, embedding-model tracking, the public demo, and an
+entity-relationship graph. Every `NOT NULL` column added to an existing
+table correctly supplies a `DEFAULT`, so none of the `ALTER TABLE`s would
+fail against pre-existing rows. `entity_relationships` is the one table
+whose foreign keys are deliberately composite (`scope_kind, scope_owner,
+subject_id`) rather than a bare reference to `entities(id)`, specifically
+because entity ids aren't globally unique post-scoping — exactly the kind
+of real cross-scope leak a bare FK would otherwise allow.
+
+The count has since grown to 32 (`schema/0016` onward) — demo-session
+decoupling, a `summaries.supersedes` uniqueness constraint, per-fact
+embeddings and their index, dashboard sessions, and, most recently
+(`0025`-`0032`, `docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`), the unified
+`memories`/`memory_relations` tables and `summary_key_facts`'
+`expires_at`/`expire_reason`/`source_count`/`is_inference` columns.
+`memories.entity_id` follows the same composite-FK reasoning as
+`entity_relationships` above (`summary_id` stays a plain FK, since
+`summaries.id` is globally unique by construction and doesn't need
+scope-qualifying); `0030` had to retrofit `ON DELETE CASCADE` onto both
+FKs after a real test-infrastructure bug surfaced it (see that
+migration's own comment).
 
 ## 10. The VS Code extension
 

@@ -12,7 +12,9 @@ For each gap: what the design says, what the code actually does today
 closed, and rough effort to close it.
 
 **Update**: #1, #2, and #3 below are now closed — see the "Closed" note at
-the top of each. #4-#7 remain open, as originally described.
+the top of each. #4-#7 remain open, as originally described. #8 is a new,
+small gap added by this doc's own convention once it was found, not part
+of the original review.
 
 ---
 
@@ -301,6 +303,45 @@ own project.
 
 ---
 
+## 8. HPMF export/import doesn't carry the memory-relation/expiration/inference fields
+
+**Design**: [MEMORY_FORMAT.md § Key fact fields](MEMORY_FORMAT.md#key-fact-fields)
+and [§ Memory relations](MEMORY_FORMAT.md#memory-relations-fact-to-fact-graph)
+(added by `docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`) describe `source_count`,
+`expires_at`/`expire_reason`, `is_inference`/`inferred_from_*` as part of
+a `key_fact`'s record, and `memory_relations` as part of the live schema.
+
+**Built**: the live schema has all of it (`schema/0025`, `0029`-`0032`).
+`internal/hpmf`'s export/import does not — `loadKeyFacts`
+(`internal/hpmf/export.go`) only selects `fact, source_episode_ids,
+grounded, key_version`, and `memory_relations` has no export
+representation at all. An export/import round-trip silently drops every
+one of these fields.
+
+**Why**: sequencing — these fields shipped as application code on top of
+an already-existing export/import implementation that nothing went back
+to extend, same shape as #3's original gap (episode-level vector search
+shipping before HPMF's own export logic accounted for it).
+
+**Risk**: low today. Nothing outside the live store's own
+retrieval/consolidation path reads these fields yet, so a deployment that
+exports and re-imports loses reinforcement counts, expiration dates, and
+the relation graph, but not anything currently load-bearing for
+retrieval correctness. Worth closing before any of these fields becomes
+something a product surface depends on existing after a migration.
+
+**Effort to close**: small. `KeyFactRecord` (`internal/hpmf/types.go`)
+only has `Fact`/`SourceEpisodeIDs`/`Grounded` today — add the missing
+fields (same json tag names `consolidation.KeyFactOutput` already uses:
+`source_count`, `expires_at`, `expire_reason`, `is_inference`,
+`inferred_from_entity_id`, `inferred_from_attribute_keys`), extend
+`loadKeyFacts`'s `select` and the corresponding `insert` in
+`internal/hpmf/import.go`, and add a `relations` array alongside
+`key_facts` on the summary record (referencing other facts by a stable
+id, not text — see MEMORY_FORMAT.md's own note on this).
+
+---
+
 ## Priority order and rationale
 
 | # | Gap | Status | Effort | Why this order |
@@ -312,7 +353,10 @@ own project.
 | 5 | Structured-output hardening | Open | Medium | A robustness improvement, not a correctness bug — today's approach works when the model behaves; this makes it work when it doesn't. |
 | 6 | Integration testing | Open | Medium | Should really happen *alongside* 1-5, not after — noted last only because it needs an external Postgres instance this environment doesn't have on hand. |
 | 7 | Tier 3 | Open | Large | Deliberately last per the original build order; nothing above depends on it, and it depends on everything above being solid first. |
+| 8 | HPMF export/import gap (relations/expiration/inference) | Open | Small | Low risk today (nothing outside the live store reads these fields yet), but the cheapest open item on this list — worth closing opportunistically rather than letting more fields accumulate on top of an export path that's already behind. |
 
 **#1, #2, and #3 are now closed** — the two active correctness bugs plus
 the recall gap that was small enough to close without a scheduling
-subsystem. #4-#7 remain open, scoped future work as described above.
+subsystem. #4-#7 remain open, scoped future work as described above. #8
+is a new, small gap surfaced by `docs/MEMORY_MODEL_REARCHITECTURE_PLAN.md`
+shipping fields the export path was never extended to carry.

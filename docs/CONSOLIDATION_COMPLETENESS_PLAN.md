@@ -929,6 +929,14 @@ belonging here:
 
 ### Status: every phase in this document's original scope is now done
 
+**Since this document's own scope closed**: Phase C's contradiction
+detection was extended, not reopened — a real correction now also writes
+an explicit `updates` graph edge, and two new standalone, independently
+LLM-verified passes (`extends` detection, inference extraction) and a
+`source_count` reinforcement signal were added alongside it. All new
+scope, not a follow-up to anything unfinished here — see
+[MEMORY_MODEL_REARCHITECTURE_PLAN.md](MEMORY_MODEL_REARCHITECTURE_PLAN.md).
+
 All five phases (A revert, B, C, D, E) plus both of Phase B's own
 follow-up options (per-episode fact extraction) are implemented and
 real-verified against real GPT-4.1. Two deterministic follow-ups to the

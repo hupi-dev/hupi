@@ -344,13 +344,17 @@ day; vector search covers both `summaries` and high-importance `episodes`
 
 **Still open**:
 
-- **Weekly/monthly/yearly rollups have no scheduler.** `Runner.RunRollup`
-  exists and works given a period + source period list, but nothing in
-  this repo computes ISO week/month/year boundaries and calls it — that's
-  calendar logic still owed to the cron layer.
-- **Tier 3 (Professional Shared) doesn't exist in code at all** — no
-  `scope` column, no per-user access control, no workspace routing. Tiers
-  1/2 (this whole document) are what's built.
+- ~~Weekly/monthly/yearly rollups have no scheduler~~ **Built** —
+  `runDueRollups`/`dueRollups` (`cmd/hupi-consolidate/rollup.go`, see
+  CODE_GUIDE.md §5) compute calendar boundaries and call `RunRollup`
+  itself; see [GAP_CLOSURE_PLAN.md §4.1](GAP_CLOSURE_PLAN.md) and
+  [DESIGN_VS_BUILT.md #4](DESIGN_VS_BUILT.md).
+- ~~Tier 3 (Professional Shared) doesn't exist in code at all~~ **Built**
+  — `identity.ScopeKindShared`, `resolveTeamScope`, workspace-routed
+  requests, and team-voice consolidation all exist; this section
+  predates that work. See [TIER3_PLAN.md](TIER3_PLAN.md) and
+  [HARDENING_PLAN.md](HARDENING_PLAN.md) for what Tier 3 actually
+  includes, not this document's own now-outdated Tiers 1/2 framing.
 - **The consolidation LLM's structured output is parsed with a naive
   `{...}` substring extraction** (`extractJSON`), not a real
   structured-output/tool-calling mode — fragile against a model that
