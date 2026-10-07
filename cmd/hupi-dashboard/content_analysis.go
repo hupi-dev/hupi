@@ -18,6 +18,18 @@
 // Neither handler ever returns raw decrypted text — only an aggregated
 // term list (2a) or a model-generated narrative paragraph (2b), and
 // neither logs the decrypted text itself anywhere (only counts/errors).
+//
+// One explicit, deliberate exception to "never raw text": the memory-map
+// feature's topics overlay (memory_map.go's handleMemoryMapTopics, built
+// on decryptConversations/aggregateConversationTopics below) returns a
+// short, hard-capped excerpt of each conversation's own decrypted text
+// alongside its extracted topic terms — a real product decision (shown
+// per-conversation on the map, not just an aggregate term list), gated
+// behind this same HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS flag rather
+// than a new one: the risk profile is identical (decrypt, local keyword
+// frequency only, never cached, never logged), so a second flag would
+// just fragment "is decrypt-on-view enabled" into two toggles an
+// operator has to reason about together for no behavioral difference.
 package main
 
 import (
@@ -26,11 +38,13 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
 	"hupi/internal/identity"
+	"hupi/internal/pgfmt"
 	"hupi/internal/provider"
 )
 
@@ -113,6 +127,86 @@ func decryptRecentText(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, s
 	return text, nil
 }
 
+// ConversationContent is one episode's own decrypted text, already
+// capped per-row (see decryptConversations' own doc comment for why a
+// per-row cap is required here in addition to decryptRecentText's
+// existing total-budget cap).
+type ConversationContent struct {
+	EpisodeID string
+	TS        time.Time
+	Text      string
+}
+
+// decryptConversations is decryptRecentText's sibling for the memory
+// map's topics overlay (memory_map.go): keyed by an explicit episode-id
+// list — the same set conversationsInRange already returned for the
+// graph endpoint — instead of a day window, and returns one decrypted
+// string per episode instead of one concatenated blob, since the
+// memory map attributes topics/excerpts back to individual conversation
+// nodes rather than showing one scope-wide aggregate.
+//
+// maxCharsPerConversation bounds a single row in addition to
+// maxTotalChars' existing whole-request budget (same constant shape as
+// decryptRecentText's maxChars) — without a per-row cap, one
+// pathologically long conversation sorted to the front of the window
+// (ordered by recency) could consume the entire total budget and starve
+// every other conversation's own topics/excerpt.
+func decryptConversations(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scope identity.Scope, episodeIDs []string, maxCharsPerConversation, maxTotalChars int) ([]ConversationContent, error) {
+	if len(episodeIDs) == 0 {
+		return nil, nil
+	}
+	var out []ConversationContent
+	totalChars := 0
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select id, ts, input_text, output_text, key_version from episodes
+			where scope_kind = $1 and scope_owner = $2 and id = any($3::text[])
+			  and (input_text is not null or output_text is not null)
+			order by ts desc
+		`, scope.Kind, scope.Owner, pgfmt.TextArray(episodeIDs))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			if totalChars >= maxTotalChars {
+				break
+			}
+			var id string
+			var ts time.Time
+			var inputCT, outputCT []byte
+			var keyVersion int
+			if err := rows.Scan(&id, &ts, &inputCT, &outputCT, &keyVersion); err != nil {
+				return err
+			}
+			enc, err := keys.GetVersion(ctx, scope, keyVersion)
+			if err != nil {
+				return err
+			}
+			var sb strings.Builder
+			if inputCT != nil {
+				if text, err := enc.Decrypt(inputCT); err == nil {
+					sb.WriteString(text)
+					sb.WriteByte('\n')
+				}
+			}
+			if outputCT != nil {
+				if text, err := enc.Decrypt(outputCT); err == nil {
+					sb.WriteString(text)
+				}
+			}
+			text := sb.String()
+			if len(text) > maxCharsPerConversation {
+				text = text[:maxCharsPerConversation]
+			}
+			out = append(out, ConversationContent{EpisodeID: id, TS: ts, Text: text})
+			totalChars += len(text)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 // TermFrequency is one term's raw count across the decrypted window.
 type TermFrequency struct {
 	Term  string `json:"term"`
@@ -134,6 +228,19 @@ var contentAnalysisStopwords = map[string]bool{
 	"do": true, "does": true, "did": true, "have": true, "has": true, "had": true,
 	"not": true, "so": true, "if": true, "my": true, "your": true, "our": true,
 	"can": true, "will": true, "would": true, "could": true, "should": true,
+	// Extended after the memory map's topic nodes surfaced these as
+	// noise on short, real conversations (e.g. "how"/"any"/"up"/"far"
+	// tying with genuine signal terms at count=1) — still the same
+	// "conservative" tradeoff this list's own doc comment describes,
+	// just covering more of the common-function-word space that a
+	// handful of real sentences actually exercises.
+	"how": true, "any": true, "up": true, "far": true, "about": true,
+	"out": true, "just": true, "now": true, "than": true, "too": true,
+	"very": true, "really": true, "much": true, "more": true, "most": true,
+	"some": true, "such": true, "no": true, "nor": true, "only": true,
+	"own": true, "same": true, "few": true, "both": true, "each": true,
+	"where": true, "when": true, "why": true, "what": true, "which": true,
+	"who": true, "whom": true, "there": true, "here": true, "then": true,
 }
 
 // localKeywordThemes counts word frequency over text, excluding
@@ -162,6 +269,44 @@ func localKeywordThemes(text string, topN int) []TermFrequency {
 			return terms[i].Count > terms[j].Count
 		}
 		return terms[i].Term < terms[j].Term // deterministic tie-break, same reasoning bm25_tiebreak_test.go documents
+	})
+	if len(terms) > topN {
+		terms = terms[:topN]
+	}
+	return terms
+}
+
+// ConversationTopics is one conversation's own extracted topic terms —
+// localKeywordThemes run over just that conversation's decrypted text,
+// not the whole window's combined text the way handleContentThemes'
+// scope-wide panel does.
+type ConversationTopics struct {
+	EpisodeID string
+	Topics    []TermFrequency
+}
+
+// aggregateConversationTopics sums each conversation's own topic-term
+// counts into one scope-wide ranked list — the memory map's global topic
+// nodes. Pure and DB-free, deliberately: this is the one easily
+// unit-testable piece of the topics overlay's otherwise decrypt-dependent
+// path, same reasoning localKeywordThemes' own separation from
+// decryptRecentText already follows.
+func aggregateConversationTopics(perConv []ConversationTopics, topN int) []TermFrequency {
+	counts := map[string]int{}
+	for _, c := range perConv {
+		for _, t := range c.Topics {
+			counts[t.Term] += t.Count
+		}
+	}
+	terms := make([]TermFrequency, 0, len(counts))
+	for term, count := range counts {
+		terms = append(terms, TermFrequency{Term: term, Count: count})
+	}
+	sort.Slice(terms, func(i, j int) bool {
+		if terms[i].Count != terms[j].Count {
+			return terms[i].Count > terms[j].Count
+		}
+		return terms[i].Term < terms[j].Term // deterministic tie-break, same reasoning localKeywordThemes' own sort uses
 	})
 	if len(terms) > topN {
 		terms = terms[:topN]

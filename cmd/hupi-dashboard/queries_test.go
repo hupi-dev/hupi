@@ -134,6 +134,41 @@ func insertEntityRelationship(t *testing.T, db *sql.DB, scope identity.Scope, id
 	}
 }
 
+// insertEntityRelationshipWithValidity is insertEntityRelationship's
+// sibling for entityRelationshipGraphInRange's own tests, which need
+// control over valid_from/valid_until — pass "" for either to leave it
+// null (unknown-start / still-current).
+func insertEntityRelationshipWithValidity(t *testing.T, db *sql.DB, scope identity.Scope, id, subject, predicate, object, validFrom, validUntil string) {
+	t.Helper()
+	err := dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into entity_relationships (id, scope_kind, scope_owner, subject_id, predicate, object_id, valid_from, valid_until)
+			values ($1, $2, $3, $4, $5, $6, nullif($7, '')::date, nullif($8, '')::date)
+		`, id, scope.Kind, scope.Owner, subject, predicate, object, validFrom, validUntil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test entity relationship %s: %v", id, err)
+	}
+}
+
+// insertDailySummaryWithEpisodes is insertSummaryRow's sibling for
+// conversationEntityMentions' own tests, which need source_episode_ids
+// populated (insertSummaryRow's existing callers never do).
+func insertDailySummaryWithEpisodes(t *testing.T, db *sql.DB, scope identity.Scope, id, period string, episodeIDs, entitiesTouched []string, supersedes string) {
+	t.Helper()
+	err := dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			insert into summaries (id, period, level, status, grounding_checked, source_episode_ids, entities_touched, supersedes, scope_kind, scope_owner)
+			values ($1, $2, 'daily', 'draft', true, $3::text[], $4::text[], $5, $6, $7)
+		`, id, period, pgfmt.TextArray(episodeIDs), pgfmt.TextArray(entitiesTouched), pgfmt.Nullable(supersedes), scope.Kind, scope.Owner)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert test daily summary %s: %v", id, err)
+	}
+}
+
 func insertScopeCorpusSize(t *testing.T, db *sql.DB, scope identity.Scope, episodeCount, summaryCount int) {
 	t.Helper()
 	err := dbscope.Run(context.Background(), db, scope, scope, func(tx *sql.Tx) error {
@@ -366,5 +401,138 @@ func TestSecurityPosture_ReturnsKeyRotationAndFiltersToSecurityRelevantEvents(t 
 	}
 	if len(posture.RecentEvents) != 1 || posture.RecentEvents[0].EventType != "export" {
 		t.Errorf("recent events = %+v, want exactly one export event (retrieve must be filtered out)", posture.RecentEvents)
+	}
+}
+
+func TestEntityRelationshipGraphInRange_JoinsNamesAndFiltersByValidityWindow(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-rel-range"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	insertEntityRow(t, db, scope, "person:alex", "person", "Alex")
+	insertEntityRow(t, db, scope, "project:hupi", "project", "HUPI")
+	insertEntityRow(t, db, scope, "project:old", "project", "Old Project")
+
+	// Inside the window.
+	insertEntityRelationshipWithValidity(t, db, scope, "rel_current", "person:alex", "works_on", "project:hupi", "2026-01-01", "")
+	// Closed before the window starts — excluded.
+	insertEntityRelationshipWithValidity(t, db, scope, "rel_closed_before", "person:alex", "worked_on", "project:old", "2020-01-01", "2020-06-01")
+	// Unknown start, still current — always overlaps.
+	insertEntityRelationshipWithValidity(t, db, scope, "rel_undated", "person:alex", "knows", "project:hupi", "", "")
+
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	rels, err := entityRelationshipGraphInRange(context.Background(), db, scope, from, to, 200)
+	if err != nil {
+		t.Fatalf("entityRelationshipGraphInRange: %v", err)
+	}
+	byID := map[string]EntityRelationshipWithNames{}
+	for _, r := range rels {
+		byID[r.Predicate] = r
+	}
+	if _, ok := byID["works_on"]; !ok {
+		t.Errorf("expected rel_current (works_on) in window, got %+v", rels)
+	}
+	if _, ok := byID["knows"]; !ok {
+		t.Errorf("expected rel_undated (knows, null validity) to always overlap, got %+v", rels)
+	}
+	if _, ok := byID["worked_on"]; ok {
+		t.Errorf("rel_closed_before (worked_on) closed before the window should be excluded, got %+v", rels)
+	}
+	if byID["works_on"].SubjectName != "Alex" || byID["works_on"].ObjectName != "HUPI" {
+		t.Errorf("names not joined correctly: %+v", byID["works_on"])
+	}
+}
+
+func TestEntityRelationshipGraphInRange_ScopeIsolation(t *testing.T) {
+	db := testDB(t)
+	scopeA := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-rel-scope-a"}
+	scopeB := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-rel-scope-b"}
+	t.Cleanup(func() { cleanupScope(t, db, scopeA) })
+	t.Cleanup(func() { cleanupScope(t, db, scopeB) })
+
+	insertEntityRow(t, db, scopeA, "person:alex", "person", "Alex")
+	insertEntityRow(t, db, scopeA, "project:hupi", "project", "HUPI")
+	insertEntityRelationshipWithValidity(t, db, scopeA, "rel_a", "person:alex", "works_on", "project:hupi", "", "")
+
+	from := time.Now().AddDate(-1, 0, 0)
+	to := time.Now().AddDate(1, 0, 0)
+	rels, err := entityRelationshipGraphInRange(context.Background(), db, scopeB, from, to, 200)
+	if err != nil {
+		t.Fatalf("entityRelationshipGraphInRange: %v", err)
+	}
+	if len(rels) != 0 {
+		t.Errorf("scope B saw scope A's relationship: %+v", rels)
+	}
+}
+
+func TestConversationsInRange_FiltersByTypeAndDate(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-convs"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	now := time.Now().UTC()
+	insertEpisode(t, db, scope, "ep_in_range", now.Add(-5*24*time.Hour), 0.5)
+	insertEpisode(t, db, scope, "ep_out_of_range", now.Add(-60*24*time.Hour), 0.5)
+
+	from := now.Add(-10 * 24 * time.Hour)
+	to := now
+	nodes, err := conversationsInRange(context.Background(), db, scope, from, to, 100)
+	if err != nil {
+		t.Fatalf("conversationsInRange: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].EpisodeID != "ep_in_range" {
+		t.Errorf("nodes = %+v, want exactly ep_in_range", nodes)
+	}
+}
+
+func TestConversationsInRange_OrdersByRecencyAndRespectsLimit(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-convs-limit"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	now := time.Now().UTC()
+	insertEpisode(t, db, scope, "ep_oldest", now.Add(-3*24*time.Hour), 0.5)
+	insertEpisode(t, db, scope, "ep_middle", now.Add(-2*24*time.Hour), 0.5)
+	insertEpisode(t, db, scope, "ep_newest", now.Add(-1*24*time.Hour), 0.5)
+
+	nodes, err := conversationsInRange(context.Background(), db, scope, now.Add(-10*24*time.Hour), now, 2)
+	if err != nil {
+		t.Fatalf("conversationsInRange: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("got %d nodes, want 2 (limit)", len(nodes))
+	}
+	if nodes[0].EpisodeID != "ep_newest" || nodes[1].EpisodeID != "ep_middle" {
+		t.Errorf("nodes not ordered by recency: %+v", nodes)
+	}
+}
+
+func TestConversationEntityMentions_UsesCurrentDailySummaryOnly(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-mentions"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	now := time.Now().UTC()
+	insertEpisode(t, db, scope, "ep_mentioned", now, 0.5)
+	insertEpisode(t, db, scope, "ep_not_passed_in", now, 0.5)
+	insertEntityRow(t, db, scope, "project:hupi", "project", "HUPI")
+
+	// Superseded summary — its entities_touched must NOT surface.
+	insertDailySummaryWithEpisodes(t, db, scope, "sum_old", "2026-01-01", []string{"ep_mentioned"}, []string{"project:hupi"}, "")
+	// Current summary superseding it.
+	insertDailySummaryWithEpisodes(t, db, scope, "sum_new", "2026-01-01", []string{"ep_mentioned"}, []string{"project:hupi"}, "sum_old")
+	// Also covers ep_not_passed_in, but that episode id isn't in our query list.
+	insertDailySummaryWithEpisodes(t, db, scope, "sum_other", "2026-01-02", []string{"ep_not_passed_in"}, []string{"project:hupi"}, "")
+
+	mentions, err := conversationEntityMentions(context.Background(), db, scope, []string{"ep_mentioned"})
+	if err != nil {
+		t.Fatalf("conversationEntityMentions: %v", err)
+	}
+	if len(mentions) != 1 {
+		t.Fatalf("got %d mentions, want exactly 1 (sum_old's superseded row must not double it up): %+v", len(mentions), mentions)
+	}
+	if mentions[0].EpisodeID != "ep_mentioned" || mentions[0].EntityID != "project:hupi" || mentions[0].EntityName != "HUPI" {
+		t.Errorf("mention = %+v, want ep_mentioned/project:hupi/HUPI", mentions[0])
 	}
 }

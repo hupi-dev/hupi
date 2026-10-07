@@ -112,3 +112,92 @@ func TestDecryptRecentText_RespectsMaxChars(t *testing.T) {
 		t.Errorf("decrypted text length = %d, want capped at 50", len(text))
 	}
 }
+
+func TestDecryptConversations_ReturnsOneEntryPerEpisodeWithinIDList(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-decrypt-convs"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	keys := crypto.NewKeyStore(db, make([]byte, 32))
+	now := time.Now().UTC()
+	insertEpisodeWithText(t, db, keys, scope, "ep_wanted", now, "discussing the zorbathon pipeline", "noted")
+	insertEpisodeWithText(t, db, keys, scope, "ep_not_requested", now, "an entirely different topic", "noted")
+
+	contents, err := decryptConversations(context.Background(), db, keys, scope, []string{"ep_wanted"}, 2000, 200_000)
+	if err != nil {
+		t.Fatalf("decryptConversations: %v", err)
+	}
+	if len(contents) != 1 || contents[0].EpisodeID != "ep_wanted" {
+		t.Fatalf("contents = %+v, want exactly one entry for ep_wanted", contents)
+	}
+	if !strings.Contains(contents[0].Text, "zorbathon") {
+		t.Errorf("decrypted text missing expected content, got: %q", contents[0].Text)
+	}
+}
+
+func TestDecryptConversations_RespectsPerConversationAndTotalCharCaps(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-decrypt-caps"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	keys := crypto.NewKeyStore(db, make([]byte, 32))
+	now := time.Now().UTC()
+	insertEpisodeWithText(t, db, keys, scope, "ep_long_1", now, strings.Repeat("word ", 1000), "")
+	insertEpisodeWithText(t, db, keys, scope, "ep_long_2", now.Add(-time.Minute), strings.Repeat("word ", 1000), "")
+
+	// Per-conversation cap: each row individually capped at 30 chars.
+	contents, err := decryptConversations(context.Background(), db, keys, scope, []string{"ep_long_1", "ep_long_2"}, 30, 200_000)
+	if err != nil {
+		t.Fatalf("decryptConversations: %v", err)
+	}
+	if len(contents) != 2 {
+		t.Fatalf("got %d entries, want 2", len(contents))
+	}
+	for _, c := range contents {
+		if len(c.Text) > 30 {
+			t.Errorf("episode %s text length = %d, want capped at 30", c.EpisodeID, len(c.Text))
+		}
+	}
+
+	// Total budget cap: second row should be dropped entirely once the
+	// first row alone exceeds maxTotalChars.
+	contents, err = decryptConversations(context.Background(), db, keys, scope, []string{"ep_long_1", "ep_long_2"}, 2000, 100)
+	if err != nil {
+		t.Fatalf("decryptConversations: %v", err)
+	}
+	if len(contents) != 1 {
+		t.Errorf("got %d entries, want exactly 1 once the total budget is exhausted by the first row: %+v", len(contents), contents)
+	}
+}
+
+func TestAggregateConversationTopics_SumsAcrossConversationsAndRanksByFrequency(t *testing.T) {
+	perConv := []ConversationTopics{
+		{EpisodeID: "ep_1", Topics: []TermFrequency{{Term: "pipeline", Count: 2}, {Term: "refactor", Count: 1}}},
+		{EpisodeID: "ep_2", Topics: []TermFrequency{{Term: "pipeline", Count: 3}, {Term: "launch", Count: 5}}},
+	}
+	terms := aggregateConversationTopics(perConv, 10)
+
+	byTerm := map[string]int{}
+	for _, t := range terms {
+		byTerm[t.Term] = t.Count
+	}
+	if byTerm["pipeline"] != 5 {
+		t.Errorf("pipeline total = %d, want 5 (summed across both conversations)", byTerm["pipeline"])
+	}
+	if byTerm["launch"] != 5 || byTerm["refactor"] != 1 {
+		t.Errorf("terms = %+v, want launch=5 refactor=1", terms)
+	}
+	if len(terms) < 2 || terms[0].Count < terms[1].Count {
+		t.Errorf("terms not sorted by descending count: %+v", terms)
+	}
+}
+
+func TestAggregateConversationTopics_RespectsTopNLimit(t *testing.T) {
+	perConv := []ConversationTopics{
+		{EpisodeID: "ep_1", Topics: []TermFrequency{{Term: "a", Count: 1}, {Term: "b", Count: 1}, {Term: "c", Count: 1}}},
+	}
+	terms := aggregateConversationTopics(perConv, 2)
+	if len(terms) != 2 {
+		t.Errorf("got %d terms, want exactly 2 (topN)", len(terms))
+	}
+}

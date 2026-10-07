@@ -106,6 +106,94 @@ export interface Workspace {
   name: string;
 }
 
+// --- memory map ------------------------------------------------------------
+// Mirror cmd/hupi-dashboard/memory_map.go's response shapes exactly.
+// Two endpoints, two response shapes — the cheap always-on graph
+// (MemoryMapGraph) and the decrypt-gated topics overlay
+// (MemoryMapTopicsResponse) — merged into one cytoscape element list by
+// lib/memoryMapGraph.ts, not here.
+
+export interface MemoryMapEntityPayload {
+  entity_id: string;
+  kind: string;
+}
+
+export interface MemoryMapConversationPayload {
+  episode_id: string;
+  ts: string;
+  importance?: number;
+}
+
+export interface MemoryMapTopicPayload {
+  term: string;
+  count: number;
+}
+
+export interface MemoryMapNode {
+  id: string;
+  type: "entity" | "conversation" | "topic";
+  label: string;
+  entity?: MemoryMapEntityPayload;
+  conversation?: MemoryMapConversationPayload;
+  topic?: MemoryMapTopicPayload;
+}
+
+export interface MemoryMapRelationshipPayload {
+  predicate: string;
+  valid_from?: string;
+  valid_until?: string;
+}
+
+export interface MemoryMapEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: "relationship" | "mentions" | "tagged_with";
+  relationship?: MemoryMapRelationshipPayload;
+}
+
+export interface MemoryMapGraph {
+  range: { from: string; to: string };
+  nodes: MemoryMapNode[];
+  edges: MemoryMapEdge[];
+  total_node_count: number;
+  truncated: boolean;
+}
+
+export interface MemoryMapConversationTopicsEntry {
+  episode_id: string;
+  excerpt: string;
+  topics: TermFrequency[];
+}
+
+export interface MemoryMapTopicsResponse {
+  enabled: boolean;
+  truncated?: boolean;
+  conversations?: MemoryMapConversationTopicsEntry[];
+  topics?: MemoryMapNode[];
+  edges?: MemoryMapEdge[];
+}
+
+export interface MemoryMapDateFilter {
+  days?: number;
+  from?: string;
+  to?: string;
+}
+
+function memoryMapQueryString(filter: MemoryMapDateFilter, extra?: Record<string, number>): string {
+  const params = new URLSearchParams();
+  if (filter.from && filter.to) {
+    params.set("from", filter.from);
+    params.set("to", filter.to);
+  } else {
+    params.set("days", String(filter.days ?? 30));
+  }
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) params.set(k, String(v));
+  }
+  return params.toString();
+}
+
 // --- error type --------------------------------------------------------
 
 export class ApiError extends Error {
@@ -197,4 +285,15 @@ export const api = {
   contentThemesNarrative: (days = 30) =>
     request<{ enabled: boolean; narrative?: string }>(`/content-themes/narrative?days=${days}`),
   listWorkspaces: () => request<Workspace[] | null>("/workspaces").then(orEmpty).catch(() => [] as Workspace[]),
+  memoryMap: (filter: MemoryMapDateFilter, maxConversations?: number, maxRelationships?: number) =>
+    request<MemoryMapGraph>(
+      `/memory-map?${memoryMapQueryString(filter, {
+        ...(maxConversations ? { max_conversations: maxConversations } : {}),
+        ...(maxRelationships ? { max_relationships: maxRelationships } : {}),
+      })}`,
+    ),
+  memoryMapTopics: (filter: MemoryMapDateFilter, maxConversations?: number) =>
+    request<MemoryMapTopicsResponse>(
+      `/memory-map/topics?${memoryMapQueryString(filter, maxConversations ? { max_conversations: maxConversations } : undefined)}`,
+    ),
 };
