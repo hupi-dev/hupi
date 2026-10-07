@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"hupi/internal/crypto"
 	"hupi/internal/provider"
@@ -40,6 +41,8 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /api/export", s.handleExport)
 	mux.HandleFunc("GET /api/content-themes", s.handleContentThemes)
 	mux.HandleFunc("GET /api/content-themes/narrative", s.handleContentThemesNarrative)
+	mux.HandleFunc("GET /api/memory-map", s.handleMemoryMap)
+	mux.HandleFunc("GET /api/memory-map/topics", s.handleMemoryMapTopics)
 	mux.HandleFunc("GET /api/whoami", s.handleWhoami)
 
 	return mux
@@ -213,6 +216,26 @@ func queryInt(r *http.Request, key string, def int) int {
 		}
 	}
 	return def
+}
+
+// queryDateRange resolves the memory map's date window: explicit
+// from/to (YYYY-MM-DD, inclusive start / exclusive-next-day end) win if
+// given; otherwise days (default defaultDays) computes the window back
+// from now. Shared by both memory-map routes (memory_map.go).
+func queryDateRange(r *http.Request, defaultDays int) (from, to time.Time) {
+	to = time.Now().UTC()
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			to = t.AddDate(0, 0, 1)
+		}
+	}
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			return t, to
+		}
+	}
+	days := queryInt(r, "days", defaultDays)
+	return to.AddDate(0, 0, -days), to
 }
 
 func queryFloat(r *http.Request, key string, def float64) float64 {

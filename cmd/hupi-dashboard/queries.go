@@ -15,6 +15,7 @@ import (
 	"hupi/internal/audit"
 	"hupi/internal/dbscope"
 	"hupi/internal/identity"
+	"hupi/internal/pgfmt"
 )
 
 // ConversationVolumePoint is one day's interaction-episode count.
@@ -147,6 +148,177 @@ func entityRelationshipGraph(ctx context.Context, db *sql.DB, scope identity.Sco
 		return rows.Err()
 	})
 	return rels, err
+}
+
+// EntityRelationshipWithNames is entityRelationshipGraph's data joined
+// to entities for display names/kinds, plus a date-range filter — built
+// for the memory-map feature (memory_map.go), which needs to show
+// "Alex" not "person:alex" and needs to scope the graph to whatever
+// window the user picked. Kept as a separate function rather than
+// changing entityRelationshipGraph itself: that function's shape is the
+// live, committed /api/entity-relationships response contract
+// (web/src/lib/api.ts mirrors it exactly) — changing it would silently
+// break that existing panel.
+type EntityRelationshipWithNames struct {
+	SubjectID   string    `json:"subject_id"`
+	SubjectName string    `json:"subject_name"`
+	SubjectKind string    `json:"subject_kind"`
+	Predicate   string    `json:"predicate"`
+	ObjectID    string    `json:"object_id"`
+	ObjectName  string    `json:"object_name"`
+	ObjectKind  string    `json:"object_kind"`
+	ValidFrom   *string   `json:"valid_from,omitempty"`
+	ValidUntil  *string   `json:"valid_until,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// entityRelationshipGraphInRange filters by the relationship's own
+// bi-temporal validity window (valid_from/valid_until), not by when it
+// was recorded (source_summary_id -> summaries.created_at) —
+// deliberately: a relationship that's still true, or was true with an
+// unknown start date, shouldn't disappear just because the view is
+// zoomed into a narrow recent range. coalesce to -infinity/infinity so
+// a null (unknown-start or still-current) bound always overlaps any
+// requested window.
+func entityRelationshipGraphInRange(ctx context.Context, db *sql.DB, scope identity.Scope, from, to time.Time, limit int) ([]EntityRelationshipWithNames, error) {
+	var rels []EntityRelationshipWithNames
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select er.subject_id, se.name, se.kind, er.predicate,
+			       er.object_id, oe.name, oe.kind,
+			       to_char(er.valid_from, 'YYYY-MM-DD'), to_char(er.valid_until, 'YYYY-MM-DD'), er.created_at
+			from entity_relationships er
+			join entities se on se.scope_kind = er.scope_kind and se.scope_owner = er.scope_owner and se.id = er.subject_id
+			join entities oe on oe.scope_kind = er.scope_kind and oe.scope_owner = er.scope_owner and oe.id = er.object_id
+			where er.scope_kind = $1 and er.scope_owner = $2
+			  and coalesce(er.valid_from, '-infinity'::date) <= $3::date
+			  and coalesce(er.valid_until, 'infinity'::date) >= $4::date
+			order by er.created_at desc
+			limit $5
+		`, scope.Kind, scope.Owner, to, from, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var rel EntityRelationshipWithNames
+			var validFrom, validUntil sql.NullString
+			if err := rows.Scan(&rel.SubjectID, &rel.SubjectName, &rel.SubjectKind, &rel.Predicate,
+				&rel.ObjectID, &rel.ObjectName, &rel.ObjectKind, &validFrom, &validUntil, &rel.CreatedAt); err != nil {
+				return err
+			}
+			if validFrom.Valid {
+				rel.ValidFrom = &validFrom.String
+			}
+			if validUntil.Valid {
+				rel.ValidUntil = &validUntil.String
+			}
+			rels = append(rels, rel)
+		}
+		return rows.Err()
+	})
+	return rels, err
+}
+
+// ConversationNode is one interaction episode as the memory map's
+// "conversation" node — plaintext only (id/timestamp/importance); the
+// decrypted excerpt/topics overlay is a separate, decrypt-gated
+// endpoint (content_analysis.go's decryptConversations, wired up in
+// memory_map.go).
+type ConversationNode struct {
+	EpisodeID  string    `json:"episode_id"`
+	TS         time.Time `json:"ts"`
+	Importance *float64  `json:"importance,omitempty"`
+}
+
+// conversationsInRange is the memory map's conversation-node source —
+// same filter shape conversationVolume already uses, ordered by
+// recency and capped so a wide-open "all time" window can't return an
+// unbounded result.
+func conversationsInRange(ctx context.Context, db *sql.DB, scope identity.Scope, from, to time.Time, limit int) ([]ConversationNode, error) {
+	var nodes []ConversationNode
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select id, ts, importance from episodes
+			where type = 'interaction' and scope_kind = $1 and scope_owner = $2
+			  and ts >= $3 and ts < $4
+			order by ts desc
+			limit $5
+		`, scope.Kind, scope.Owner, from, to, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var n ConversationNode
+			var importance sql.NullFloat64
+			if err := rows.Scan(&n.EpisodeID, &n.TS, &importance); err != nil {
+				return err
+			}
+			if importance.Valid {
+				n.Importance = &importance.Float64
+			}
+			nodes = append(nodes, n)
+		}
+		return rows.Err()
+	})
+	return nodes, err
+}
+
+// ConversationEntityMention links one conversation to one entity it
+// mentions — the memory map's conversation->entity edge source.
+type ConversationEntityMention struct {
+	EpisodeID  string `json:"episode_id"`
+	EntityID   string `json:"entity_id"`
+	EntityName string `json:"entity_name"`
+	EntityKind string `json:"entity_kind"`
+}
+
+// conversationEntityMentions is the only plaintext link from an
+// individual episode to the entities it touched: episodes have no
+// direct entity FK of their own, only the owning DAILY summary's
+// entities_touched carries that (weekly/monthly/yearly summaries roll
+// up via source_summary_periods instead and never carry
+// source_episode_ids — see internal/consolidation/runner.go). Takes the
+// exact episode id list conversationsInRange just returned, not an
+// independent query, so every mention edge this produces targets a
+// conversation node actually present in the same response. Reuses
+// themeWordCloud's own unnest(entities_touched) + "current summary
+// only" technique, just scoped to specific episode ids instead of the
+// whole scope; the entities join has no explicit scope condition for
+// the same reason themeWordCloud's doesn't — RLS already restricts
+// every visible row to this scope.
+func conversationEntityMentions(ctx context.Context, db *sql.DB, scope identity.Scope, episodeIDs []string) ([]ConversationEntityMention, error) {
+	if len(episodeIDs) == 0 {
+		return nil, nil
+	}
+	var mentions []ConversationEntityMention
+	err := dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			select ep.id, e.id, e.name, e.kind
+			from episodes ep
+			join summaries s
+			  on s.scope_kind = ep.scope_kind and s.scope_owner = ep.scope_owner
+			 and s.level = 'daily' and ep.id = any(s.source_episode_ids)
+			 and not exists (select 1 from summaries newer where newer.supersedes = s.id)
+			join lateral unnest(s.entities_touched) as touched(entity_id) on true
+			join entities e on e.id = touched.entity_id
+			where ep.scope_kind = $1 and ep.scope_owner = $2 and ep.id = any($3::text[])
+		`, scope.Kind, scope.Owner, pgfmt.TextArray(episodeIDs))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var m ConversationEntityMention
+			if err := rows.Scan(&m.EpisodeID, &m.EntityID, &m.EntityName, &m.EntityKind); err != nil {
+				return err
+			}
+			mentions = append(mentions, m)
+		}
+		return rows.Err()
+	})
+	return mentions, err
 }
 
 // MemoryHealth summarizes how much of a scope's history exists and how

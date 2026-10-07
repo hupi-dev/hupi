@@ -5,6 +5,7 @@ import {
   Eye,
   GitBranch,
   HeartPulse,
+  Map as MapIcon,
   ShieldCheck,
   Sparkles,
   Tags,
@@ -25,6 +26,7 @@ import {
 } from "../lib/api";
 import { loadWorkspace, saveWorkspace } from "../lib/session";
 import { Card, CardHeader, CardIcon, CardTitle } from "../components/Card";
+import { MemoryMap } from "./MemoryMap";
 
 function useLoaded<T>(load: () => Promise<T>): T | null {
   const [value, setValue] = useState<T | null>(null);
@@ -62,6 +64,7 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
   // GET /api/workspaces at all), so the switcher below renders nothing.
   const workspaces = useLoaded<Workspace[]>(() => api.listWorkspaces());
   const [exporting, setExporting] = useState(false);
+  const [tab, setTab] = useState<"overview" | "memory-map">("overview");
 
   const handleWorkspaceChange = (teamID: string) => {
     saveWorkspace(teamID);
@@ -103,7 +106,7 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
         className="bg-grid pointer-events-none absolute inset-x-0 top-0 h-80 [mask-image:radial-gradient(ellipse_60%_60%_at_50%_0%,black,transparent)]"
       />
 
-      <div className="relative mx-auto max-w-5xl space-y-5 p-6">
+      <div className="relative mx-auto max-w-5xl space-y-5 p-6 pb-0">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/5 pb-5">
           <div>
             <p className="font-mono-tight text-xs uppercase tracking-widest text-ember-500">memory, in view</p>
@@ -138,6 +141,34 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
           </div>
         </header>
 
+        <div className="flex gap-1 pt-5">
+          <button
+            onClick={() => setTab("overview")}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+              tab === "overview" ? "bg-ember-500/15 text-ember-500" : "text-fog-500 hover:bg-white/5 hover:text-fog-100"
+            }`}
+          >
+            <Eye size={14} />
+            Overview
+          </button>
+          <button
+            onClick={() => setTab("memory-map")}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+              tab === "memory-map" ? "bg-ember-500/15 text-ember-500" : "text-fog-500 hover:bg-white/5 hover:text-fog-100"
+            }`}
+          >
+            <MapIcon size={14} />
+            Memory Map
+          </button>
+        </div>
+      </div>
+
+      {tab === "memory-map" ? (
+        <div className="relative px-6 pb-6 pt-4">
+          <MemoryMap />
+        </div>
+      ) : (
+      <div className="relative mx-auto max-w-5xl space-y-5 p-6 pt-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <Card>
             <CardHeader>
@@ -400,6 +431,7 @@ export function Dashboard({ whoami }: { whoami: Whoami }) {
           </Card>
         </div>
       </div>
+      )}
     </div>
   );
 }
