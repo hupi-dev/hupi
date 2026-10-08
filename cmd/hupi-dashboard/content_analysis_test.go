@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
@@ -199,5 +200,57 @@ func TestAggregateConversationTopics_RespectsTopNLimit(t *testing.T) {
 	terms := aggregateConversationTopics(perConv, 2)
 	if len(terms) != 2 {
 		t.Errorf("got %d terms, want exactly 2 (topN)", len(terms))
+	}
+}
+
+func TestTruncateRunes_NeverSplitsAMultiByteCharacter(t *testing.T) {
+	s := "héllo wörld 日本語 🙂 done"
+	total := utf8.RuneCountInString(s)
+	for n := 0; n <= total+2; n++ {
+		got := truncateRunes(s, n)
+		if !utf8.ValidString(got) {
+			t.Fatalf("truncateRunes(%q, %d) = %q, not valid UTF-8", s, n, got)
+		}
+		if want := min(n, total); utf8.RuneCountInString(got) != want {
+			t.Errorf("truncateRunes(_, %d) has %d characters, want %d", n, utf8.RuneCountInString(got), want)
+		}
+	}
+}
+
+func TestDecryptConversations_TruncatesNonASCIIByCharacterNotByte(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-mm-decrypt-utf8"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	keys := crypto.NewKeyStore(db, make([]byte, 32))
+	// "é" is two bytes, so a 7-byte cut would land mid-character.
+	insertEpisodeWithText(t, db, keys, scope, "ep_utf8", time.Now().UTC(), strings.Repeat("é", 100), "")
+
+	contents, err := decryptConversations(context.Background(), db, keys, scope, []string{"ep_utf8"}, 7, 200_000)
+	if err != nil {
+		t.Fatalf("decryptConversations: %v", err)
+	}
+	if len(contents) != 1 {
+		t.Fatalf("got %d entries, want 1", len(contents))
+	}
+	if !utf8.ValidString(contents[0].Text) || utf8.RuneCountInString(contents[0].Text) != 7 {
+		t.Errorf("text = %q, want exactly 7 whole characters", contents[0].Text)
+	}
+}
+
+func TestDecryptRecentText_TruncatesNonASCIIByCharacterNotByte(t *testing.T) {
+	db := testDB(t)
+	scope := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-dashboard-content-analysis-utf8"}
+	t.Cleanup(func() { cleanupScope(t, db, scope) })
+
+	keys := crypto.NewKeyStore(db, make([]byte, 32))
+	insertEpisodeWithText(t, db, keys, scope, "ep_ca_utf8", time.Now().UTC(), strings.Repeat("é", 100), "")
+
+	text, err := decryptRecentText(context.Background(), db, keys, scope, 30, 7)
+	if err != nil {
+		t.Fatalf("decryptRecentText: %v", err)
+	}
+	if !utf8.ValidString(text) || utf8.RuneCountInString(text) != 7 {
+		t.Errorf("text = %q, want exactly 7 whole characters", text)
 	}
 }

@@ -40,6 +40,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
@@ -120,11 +121,15 @@ func decryptRecentText(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, s
 	if err != nil {
 		return "", err
 	}
-	text := sb.String()
-	if len(text) > maxChars {
-		text = text[:maxChars]
+	return truncateRunes(sb.String(), maxChars), nil
+}
+
+// truncateRunes cuts by character, not byte, so non-ASCII text never splits mid-rune (same rule as internal/store's hardTruncate).
+func truncateRunes(s string, maxChars int) string {
+	if utf8.RuneCountInString(s) <= maxChars {
+		return s
 	}
-	return text, nil
+	return string([]rune(s)[:maxChars])
 }
 
 // ConversationContent is one episode's own decrypted text, already
@@ -195,12 +200,9 @@ func decryptConversations(ctx context.Context, db *sql.DB, keys *crypto.KeyStore
 					sb.WriteString(text)
 				}
 			}
-			text := sb.String()
-			if len(text) > maxCharsPerConversation {
-				text = text[:maxCharsPerConversation]
-			}
+			text := truncateRunes(sb.String(), maxCharsPerConversation)
 			out = append(out, ConversationContent{EpisodeID: id, TS: ts, Text: text})
-			totalChars += len(text)
+			totalChars += utf8.RuneCountInString(text)
 		}
 		return rows.Err()
 	})

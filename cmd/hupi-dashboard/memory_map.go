@@ -260,12 +260,8 @@ func (s *server) handleMemoryMapTopics(w http.ResponseWriter, r *http.Request) {
 		topics := localKeywordThemes(c.Text, defaultMemoryMapTopTermsPerConversation)
 		perConv = append(perConv, ConversationTopics{EpisodeID: c.EpisodeID, Topics: topics})
 
-		excerpt := c.Text
-		if len(excerpt) > defaultMemoryMapExcerptChars {
-			excerpt = excerpt[:defaultMemoryMapExcerptChars]
-		}
 		convEntries = append(convEntries, MemoryMapConversationTopicsEntry{
-			EpisodeID: c.EpisodeID, Excerpt: excerpt, Topics: topics,
+			EpisodeID: c.EpisodeID, Excerpt: truncateRunes(c.Text, defaultMemoryMapExcerptChars), Topics: topics,
 		})
 		for _, t := range topics {
 			mentionEdges = append(mentionEdges, MemoryMapEdge{
