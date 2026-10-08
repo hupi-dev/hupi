@@ -7,7 +7,7 @@ import { GITHUB_URL } from '../lib/links.js';
     class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4"
     aria-label="Primary"
   >
-    <a href="/#top" class="flex items-center gap-2 text-lg font-bold tracking-tight text-fog-100">
+    <a href="/#top" class="flex shrink-0 items-center gap-2 text-lg font-bold tracking-tight text-fog-100">
       <span class="flex h-7 w-7 items-center justify-center rounded-md bg-navy-700 text-ember-500">
         <svg viewBox="0 0 32 32" class="h-4 w-4" aria-hidden="true">
           <path
@@ -26,10 +26,9 @@ import { GITHUB_URL } from '../lib/links.js';
          correctly from /docs and /faq too, not just from "/" itself —
          same-document scroll when already on "/", full navigation
          followed by a scroll otherwise. -->
-    <div class="hidden items-center gap-6 text-sm text-fog-300 lg:flex">
+    <div class="hidden items-center gap-4 whitespace-nowrap text-sm text-fog-300 lg:flex xl:gap-6">
       <a href="/#how-it-works" class="transition-colors hover:text-fog-100">How it works</a>
       <a href="/#editor" class="transition-colors hover:text-fog-100">Editor</a>
-      <a href="/#memory-map" class="transition-colors hover:text-fog-100">Memory Map</a>
       <a href="/#security" class="transition-colors hover:text-fog-100">Security</a>
       <a href="/#deploy" class="transition-colors hover:text-fog-100">Deploy</a>
       <a href="/downloads" class="transition-colors hover:text-fog-100">Downloads</a>
@@ -43,7 +42,7 @@ import { GITHUB_URL } from '../lib/links.js';
 
     <a
       href="/demo"
-      class="rounded-md border border-ember-500/50 px-3 py-1.5 text-sm font-medium text-ember-400 transition-colors hover:border-ember-500 hover:bg-ember-500/10"
+      class="shrink-0 whitespace-nowrap rounded-md border border-ember-500/50 px-3 py-1.5 text-sm font-medium text-ember-400 transition-colors hover:border-ember-500 hover:bg-ember-500/10"
     >
       Try it live
     </a>
