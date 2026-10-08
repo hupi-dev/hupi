@@ -69,11 +69,18 @@ job, deliberately CLI-only).
 Conversation volume, theme word cloud, entity-relationship graph,
 memory health, retrieval-governance transparency, and a security-posture
 panel (key rotation history, recent audit events) over one scope's own
-memory. No login in this OSS build (every request resolves to
-`identity.DefaultScope`); Tier 3 adds real sign-in.
+memory — plus a Memory Map tab: an interactive, date-filterable graph of
+conversations, entities, relationships, and topics (see
+[DASHBOARD.md](DASHBOARD.md#memory-map)). No login in this OSS build
+(every request resolves to `identity.DefaultScope`); Tier 3 adds real
+sign-in.
 
 - **Flags**: none.
-- **Env vars**: `HUPI_DASHBOARD_LISTEN_ADDR` (default `127.0.0.1:8790`).
+- **Env vars**: `HUPI_DASHBOARD_LISTEN_ADDR` (default `127.0.0.1:8790`);
+  `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` (default `false`) turns on the
+  decrypt-on-view panels — content themes and the Memory Map's
+  topics/excerpts overlay; `HUPI_ENABLE_DASHBOARD_LLM_THEMES` (default
+  `false`) the LLM narrative panel.
 - **Run it**:
   `HUPI_DASHBOARD_LISTEN_ADDR=127.0.0.1:8790 ./hupi-dashboard`
 

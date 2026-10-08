@@ -2,8 +2,10 @@
 
 `cmd/hupi-dashboard` is a read-only analytics surface over one scope's
 own memory: conversation volume, a theme word cloud, entity
-relationships, memory health, retrieval governance transparency, and a
-security posture panel. It answers the questions users actually ask about
+relationships, memory health, retrieval governance transparency, a
+security posture panel, and a Memory Map — an interactive graph of
+conversations, entities, relationships, and topics (see "Memory Map"
+below). It answers the questions users actually ask about
 a memory system: what themes come up, how much history exists, whether
 keyword search is still running at full strength for this scope, and
 whether the deployment looks secure (key rotation status, recent
@@ -116,6 +118,7 @@ anywhere in `cmd/hupi-dashboard/queries.go`:
 | Retrieval governance | `scope_corpus_size` + the same thresholds `internal/store/retrieve.go`'s `keywordSearchTierForScope` uses |
 | Security posture | `key_rotations`, `audit_log` (export/import/key_rotation/correct/dashboard_login events) |
 | Export | `GET /api/export` — not a read-only plaintext panel like the rest, this one decrypts: it reuses `internal/store.Store.ExportMemory` exactly as `cmd/hupi-export-memory` does (same `store.New(db, keys, embedder)` construction), which already writes its own `audit_log` entry |
+| Memory Map (graph) | `GET /api/memory-map` — `episodes.ts`/`.importance`, `entity_relationships` joined to `entities.name`/`.kind`, and the owning daily summary's `entities_touched` for conversation→entity mention edges. Its topics overlay is decrypt-gated — see "Memory Map" below |
 
 `audit_log` has **no row-level-security restriction on `SELECT`** (its
 own migration's comment: "audit_log's entire purpose is cross-scope
@@ -125,6 +128,60 @@ never call it without both, or a Tier 3 user would see every other user's
 audit trail. `hupi_app` also has no `DELETE` grant on `audit_log` at all
 (append-only by design) — relevant if you're ever cleaning up test data
 against a real database, not just this package's own tests.
+
+## Memory Map
+
+A "Memory Map" tab next to the panel overview renders one scope's memory
+as an interactive [cytoscape.js](https://js.cytoscape.org/) graph:
+entities (circles, colored by `entities.kind`, sized by edge count),
+conversations (squares), topics (diamonds), relationship edges
+(entity → entity, labeled with the predicate), mention edges
+(conversation → entity), and `tagged_with` edges (conversation → topic).
+Three layouts: Network (`cytoscape-fcose` force-directed), Timeline
+(fcose with conversation nodes pinned left-to-right by timestamp), and
+Circular (cytoscape's built-in `concentric`, most-connected nodes toward
+the center). Clicking a node opens a detail panel built from the
+already-fetched data — no extra request.
+
+It's split into two endpoints by cost profile, the same split as
+`/api/entity-relationships` (plaintext, always on) vs.
+`/api/content-themes` (decrypt-gated):
+
+- **`GET /api/memory-map`** — plaintext only, always on. Entity and
+  conversation nodes, relationship and mention edges
+  (`cmd/hupi-dashboard/memory_map.go`'s `handleMemoryMap`, built on
+  `queries.go`'s `conversationsInRange`, `entityRelationshipGraphInRange`,
+  and `conversationEntityMentions`). Relationships are filtered by their
+  own bi-temporal validity window (`valid_from`/`valid_until` overlapping
+  the requested range, nulls treated as open-ended), not by when they were
+  recorded — a long-valid fact doesn't disappear just because the view is
+  zoomed into a narrow recent window. Mention edges come from the owning
+  **daily** summary's `entities_touched`, the only plaintext link from an
+  individual episode to an entity (weekly/monthly/yearly summaries don't
+  carry `source_episode_ids`).
+- **`GET /api/memory-map/topics`** — gated by the same
+  `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` flag as `/api/content-themes`
+  (returns `{"enabled": false}` when off; the graph still renders, just
+  without topics). Decrypts the same conversation set the graph endpoint
+  returns (`decryptConversations`), runs the same local keyword extraction
+  per conversation, and aggregates the results into topic nodes. **One
+  deliberate exception** to Phase 2's "never returns raw text" rule
+  below: each conversation gets a short excerpt (first 280 characters)
+  of its own decrypted text, shown in the detail panel. A term must occur
+  at least twice across the whole range to become a topic node, so
+  one-off words on short conversations don't clutter the graph.
+
+Both take `?days=` (default 30) or explicit `?from=YYYY-MM-DD&to=YYYY-MM-DD`
+(inclusive start, inclusive end day). Defaults are reasoned, not measured:
+the graph endpoint caps at 500 conversations and 500 relationships
+(`?max_conversations=`/`?max_relationships=`); the topics endpoint caps at
+150 conversations, 2,000 decrypted characters per conversation, and
+200,000 per request — the per-conversation cap stops one very long
+conversation from consuming the whole budget. Either endpoint sets
+`truncated: true` when a cap was hit, and the frontend shows a "narrow the
+date range" banner; separately, the frontend declines to lay out more
+than 1,500 elements at once rather than stall the browser. Nothing is
+cached, matching Phase 2's existing posture.
 
 ## Phase 2 — decrypt-on-view themes
 
@@ -160,7 +217,7 @@ history — this is a display feature, not a retrieval path.
 | Var | Meaning | Default |
 |---|---|---|
 | `HUPI_DASHBOARD_LISTEN_ADDR` | Listen address | `127.0.0.1:8790` |
-| `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` | Phase 2a local keyword themes | `false` |
+| `HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS` | Phase 2a local keyword themes, and the Memory Map's topics/excerpts overlay | `false` |
 | `HUPI_ENABLE_DASHBOARD_LLM_THEMES` | Phase 2b LLM narrative themes | `false` |
 
 Same bind-to-localhost posture as `cmd/hupi-admin-ui` — this reads real

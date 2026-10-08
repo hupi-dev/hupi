@@ -1,0 +1,211 @@
+---
+import { GITHUB_URL, docFileURL } from '../lib/links.js';
+
+// Same kind→color vocabulary the real dashboard uses
+// (cmd/hupi-dashboard/web/src/lib/memoryMapGraph.ts), so this
+// illustration reads exactly like the real thing.
+const color = {
+  person: '#ff8a4c',
+  project: '#60a5fa',
+  place: '#fbbf24',
+  organization: '#f472b6',
+  conversation: '#ff8a4c',
+  topic: '#2dd4bf',
+};
+
+const entities = [
+  { id: 'alex', label: 'Alex', kind: 'person', x: 210, y: 150, r: 22 },
+  { id: 'hupi', label: 'HUPI', kind: 'project', x: 322, y: 92, r: 16 },
+  { id: 'sf', label: 'San Francisco', kind: 'place', x: 106, y: 78, r: 14 },
+  { id: 'jamie', label: 'Jamie', kind: 'person', x: 124, y: 222, r: 18 },
+  { id: 'acme', label: 'Acme Corp', kind: 'organization', x: 46, y: 156, r: 13 },
+];
+const conversations = [
+  { id: 'c1', x: 270, y: 124 },
+  { id: 'c2', x: 160, y: 108 },
+  { id: 'c3', x: 84, y: 196 },
+  { id: 'c4', x: 176, y: 200 },
+];
+const topics = [
+  { id: 'launch', label: 'launch', x: 372, y: 176 },
+  { id: 'pipeline', label: 'pipeline', x: 346, y: 34 },
+  { id: 'hiking', label: 'hiking', x: 176, y: 34 },
+];
+
+const pos = Object.fromEntries([...entities, ...conversations, ...topics].map((n) => [n.id, n]));
+
+const relationships = [
+  ['alex', 'hupi'],
+  ['alex', 'sf'],
+  ['jamie', 'alex'],
+  ['jamie', 'acme'],
+];
+const mentions = [
+  ['c1', 'alex'],
+  ['c1', 'hupi'],
+  ['c2', 'alex'],
+  ['c2', 'sf'],
+  ['c3', 'jamie'],
+  ['c3', 'acme'],
+  ['c4', 'jamie'],
+  ['c4', 'alex'],
+];
+const tagged = [
+  ['c1', 'launch'],
+  ['c1', 'pipeline'],
+  ['c2', 'hiking'],
+  ['c4', 'launch'],
+];
+
+// Shortens a relationship line so its arrowhead lands on the target
+// circle's edge instead of hidden under its center.
+function trimmed(fromId, toId) {
+  const a = pos[fromId];
+  const b = pos[toId];
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy);
+  const pad = (b.r ?? 8) + 4;
+  return { x1: a.x, y1: a.y, x2: b.x - (dx / len) * pad, y2: b.y - (dy / len) * pad };
+}
+
+const features = [
+  {
+    title: 'Everything your memory knows, on one map',
+    body:
+      "Entities — people, projects, places, organizations — color-coded by kind and sized by how connected they are. Every conversation as its own node. Every relationship between entities, with the exact predicate and the dates it was actually true. Every line from a conversation to the entities it mentioned.",
+  },
+  {
+    title: 'Network, timeline, or circular',
+    body:
+      'Network clusters things by how related they are. Timeline lines conversations up oldest-to-newest. Circular rings entities by how connected they are — the hub of your memory, the one person or project everything else runs through, sits right in the center, visible at a glance.',
+  },
+  {
+    title: 'Filter by time',
+    body:
+      "The last 7, 30, or 90 days, six months, a year, or all of it. Relationships are filtered by when they were actually true, not when HUPI happened to record them — a long-running fact doesn't vanish just because you zoomed into last week.",
+  },
+  {
+    title: 'Topics, private by default',
+    body:
+      "Real recurring themes and per-conversation excerpts need actual conversation text, which HUPI encrypts at rest. So that layer is opt-in, behind the dashboard's existing decrypt-on-view flag. The base map — entities, conversations, relationships — needs no decryption at all.",
+  },
+  {
+    title: 'Click anything',
+    body:
+      "An entity shows its relationships. A conversation shows its excerpt, its topics, and the entities it mentioned. A topic shows every conversation tagged with it and the entities that keep showing up alongside it. Jump node to node without leaving the map.",
+  },
+  {
+    title: 'Part of the free dashboard',
+    body:
+      'It ships inside hupi-dashboard — the same MIT-licensed, self-hosted analytics binary that already ships with HUPI. No new service, no separate install: open the dashboard, click the Memory Map tab.',
+  },
+];
+---
+
+<section id="memory-map" class="border-b border-white/5">
+  <div class="mx-auto grid max-w-6xl gap-12 px-6 py-20 sm:py-28 md:grid-cols-2 md:items-center">
+    <div>
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">In your dashboard</h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        Memory Map — see what your AI actually remembers, not just query it.
+      </p>
+      <p class="mt-5 leading-relaxed text-fog-300">
+        Every conversation, every entity, every relationship between them, and every recurring
+        topic in your memory, rendered as one interactive graph you can filter, rearrange, and
+        click through.
+      </p>
+      <p class="mt-4 leading-relaxed text-fog-300">
+        Citations show you what fed a single answer. Memory Map shows you the whole picture —
+        the gaps (a project nothing has touched in months), the hubs (the one person everything
+        connects through), the shape of what your system knows.
+      </p>
+      <div class="mt-6 flex flex-wrap gap-3">
+        <a
+          href={`${docFileURL('DASHBOARD.md')}#memory-map`}
+          class="rounded-lg bg-ember-500 px-5 py-2.5 text-center text-sm font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400"
+        >
+          Read the docs
+        </a>
+        <a
+          href={`${GITHUB_URL}/tree/main/cmd/hupi-dashboard`}
+          class="rounded-lg border border-white/15 px-5 py-2.5 text-center text-sm font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5"
+        >
+          View source
+        </a>
+      </div>
+    </div>
+
+    <figure class="rounded-xl border border-white/10 bg-navy-900/70 p-4 shadow-2xl shadow-black/40">
+      <svg viewBox="0 0 420 270" class="h-auto w-full" role="img" aria-labelledby="memory-map-illustration-title">
+        <title id="memory-map-illustration-title">
+          Illustration of a Memory Map: entities as colored circles, conversations as small squares, topics as teal diamonds, connected by relationship, mention, and topic edges.
+        </title>
+        <defs>
+          <marker id="mm-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0L10 5L0 10z" fill={color.person} />
+          </marker>
+        </defs>
+
+        {tagged.map(([a, b]) => (
+          <line x1={pos[a].x} y1={pos[a].y} x2={pos[b].x} y2={pos[b].y} stroke={color.topic} stroke-width="1" stroke-dasharray="1 4" stroke-linecap="round" opacity="0.6" />
+        ))}
+        {mentions.map(([a, b]) => (
+          <line x1={pos[a].x} y1={pos[a].y} x2={pos[b].x} y2={pos[b].y} stroke="#5b637a" stroke-width="1" stroke-dasharray="4 3" opacity="0.7" />
+        ))}
+        {relationships.map(([a, b]) => {
+          const l = trimmed(a, b);
+          return <line {...l} stroke={color.person} stroke-width="1.4" opacity="0.85" marker-end="url(#mm-arrow)" />;
+        })}
+
+        {topics.map((t) => (
+          <g>
+            <path d={`M${t.x} ${t.y - 9}L${t.x + 9} ${t.y}L${t.x} ${t.y + 9}L${t.x - 9} ${t.y}z`} fill={color.topic} />
+            <text x={t.x} y={t.y + 21} text-anchor="middle" font-size="9" fill="#cbd0dd">{t.label}</text>
+          </g>
+        ))}
+        {conversations.map((c) => (
+          <rect x={c.x - 5} y={c.y - 5} width="10" height="10" rx="2" fill={color.conversation} opacity="0.85" />
+        ))}
+        {entities.map((e) => (
+          <g>
+            <circle cx={e.x} cy={e.y} r={e.r} fill={color[e.kind]} />
+            <text x={e.x} y={e.y + e.r + 12} text-anchor="middle" font-size="10" fill="#f5f6fa">{e.label}</text>
+          </g>
+        ))}
+      </svg>
+      <figcaption class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fog-700">
+        <span><span class="text-ember-400">●</span> entity, colored by kind</span>
+        <span><span class="text-ember-400">■</span> conversation</span>
+        <span><span style={`color:${color.topic}`}>◆</span> topic (opt-in)</span>
+        <span><span class="text-ember-400">→</span> relationship</span>
+      </figcaption>
+    </figure>
+  </div>
+
+  <div class="mx-auto max-w-6xl px-6 pb-20 sm:pb-28">
+    <div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+      {
+        features.map((f) => (
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-6">
+            <h3 class="text-lg font-semibold text-fog-100">{f.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">{f.body}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <div class="mt-10 rounded-xl border border-white/10 bg-navy-900/70 p-6">
+      <p class="font-mono-tight mb-3 text-xs text-fog-700">Run it — same database and key environment as your gateway</p>
+      <pre class="font-mono-tight overflow-x-auto rounded-lg border border-white/10 bg-ink px-4 py-3 text-sm text-fog-300"><code>{`HUPI_DASHBOARD_LISTEN_ADDR=127.0.0.1:8790 ./hupi-dashboard
+
+# optional: real topics + per-conversation excerpts (decrypt-on-view)
+HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS=true`}</code></pre>
+      <p class="mt-4 text-xs leading-relaxed text-fog-700">
+        Open <span class="text-ember-400">http://127.0.0.1:8790</span> and click the
+        <span class="text-ember-400"> Memory Map</span> tab. No login in the free build — it shows your own
+        scope; Tier 3 adds real sign-in and team workspaces.
+      </p>
+    </div>
+  </div>
+</section>
