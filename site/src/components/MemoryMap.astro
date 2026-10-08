@@ -21,10 +21,10 @@ const entities = [
   { id: 'acme', label: 'Acme Corp', kind: 'organization', x: 46, y: 156, r: 13 },
 ];
 const conversations = [
-  { id: 'c1', x: 270, y: 124 },
-  { id: 'c2', x: 160, y: 108 },
-  { id: 'c3', x: 84, y: 196 },
-  { id: 'c4', x: 176, y: 200 },
+  { id: 'c1', x: 282, y: 160 },
+  { id: 'c2', x: 176, y: 92 },
+  { id: 'c3', x: 62, y: 216 },
+  { id: 'c4', x: 196, y: 222 },
 ];
 const topics = [
   { id: 'launch', label: 'launch', x: 372, y: 176 },
@@ -199,8 +199,9 @@ const features = [
       <p class="font-mono-tight mb-3 text-xs text-fog-700">Run it — same database and key environment as your gateway</p>
       <pre class="font-mono-tight overflow-x-auto rounded-lg border border-white/10 bg-ink px-4 py-3 text-sm text-fog-300"><code>{`HUPI_DASHBOARD_LISTEN_ADDR=127.0.0.1:8790 ./hupi-dashboard
 
-# optional: real topics + per-conversation excerpts (decrypt-on-view)
-HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS=true`}</code></pre>
+# with real topics + per-conversation excerpts (decrypt-on-view)
+HUPI_ENABLE_DASHBOARD_CONTENT_ANALYSIS=true \\
+  HUPI_DASHBOARD_LISTEN_ADDR=127.0.0.1:8790 ./hupi-dashboard`}</code></pre>
       <p class="mt-4 text-xs leading-relaxed text-fog-700">
         Open <span class="text-ember-400">http://127.0.0.1:8790</span> and click the
         <span class="text-ember-400"> Memory Map</span> tab. No login in the free build — it shows your own
