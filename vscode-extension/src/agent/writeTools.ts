@@ -192,7 +192,11 @@ const runCommand: HupiTool = {
     }
     const timeout = num(args, 'timeout_seconds', DEFAULT_TIMEOUT_S, MAX_TIMEOUT_S);
     const res = await runInTerminal(command, dir.uri, timeout * 1000, MAX_OUTPUT_CHARS, signal);
-    const status = res.timedOut ? `timed out after ${timeout}s and was stopped` : `exit code ${res.exitCode ?? 'unknown'}`;
+    let status = res.timedOut ? `timed out after ${timeout}s and was stopped` : `exit code ${res.exitCode ?? 'unknown'}`;
+    if (res.exitCode === 1 && process.platform === 'win32') {
+      // VS Code's PowerShell shell integration reports only success (0) or failure (1).
+      status += " (PowerShell reports any failure as 1; the program's own exit code may differ)";
+    }
     return `${status}\n${res.output.trim() || '(no output)'}`;
   },
 };

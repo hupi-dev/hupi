@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import * as vscode from 'vscode';
 import { __resetVscodeMock, __setActiveTextEditor, __setFileContents, __setWorkspaceFolders, findFiles, getDiagnostics, Position, Range, Uri } from '../test/vscode-mock';
 import { buildRegistry } from './toolRegistry';
-import { ensureNoSymlinkEscape, looksSecret, resolveInWorkspace, WORKSPACE_TOOLS, type FolderLike } from './workspaceTools';
+import { ensureNoSymlinkEscape, isInsideFolder, looksSecret, resolveInWorkspace, WORKSPACE_TOOLS, type FolderLike } from './workspaceTools';
 
 const root = Uri.file('/work/app');
 const lib = Uri.file('/work/lib');
@@ -36,6 +36,39 @@ describe('resolveInWorkspace', () => {
       expect(() => resolveInWorkspace(folders, p), p).toThrow(/outside the open workspace/);
     }
     expect(() => resolveInWorkspace([], 'a')).toThrow(/no workspace folder/);
+  });
+});
+
+describe('resolveInWorkspace on Windows', () => {
+  // vscode.Uri's path for C:\Users\Public\hupi proj's (fsPath gives "c:\…").
+  const win = [{ name: "hupi proj's", uri: Uri.file("/C:/Users/Public/hupi proj's") }] as unknown as FolderLike[];
+  it('accepts absolute drive paths inside the folder, in any case and with either separator', () => {
+    for (const p of ["c:\\Users\\Public\\hupi proj's\\src\\config.ts", "C:/Users/Public/hupi proj's/src/config.ts", "/c:/users/public/HUPI PROJ'S/src/config.ts"]) {
+      expect(resolveInWorkspace(win, p).relative, p).toBe('src/config.ts');
+    }
+    expect(resolveInWorkspace(win, "c:\\Users\\Public\\hupi proj's").relative).toBe('');
+  });
+  it('refuses drive paths outside the folder', () => {
+    for (const p of ['C:\\Windows\\win.ini', "c:\\Users\\Public\\hupi proj's2\\x", 'D:/Users/Public/x', "c:\\Users\\Public\\hupi proj's\\..\\..\\x"]) {
+      expect(() => resolveInWorkspace(win, p), p).toThrow(/outside the open workspace/);
+    }
+  });
+});
+
+describe('isInsideFolder', () => {
+  it('follows Windows rules: either case, either separator, other drives outside', () => {
+    const root = "C:\\Users\\Public\\hupi proj's";
+    expect(isInsideFolder(root, "C:\\Users\\Public\\hupi proj's\\src\\config.ts", path.win32)).toBe(true);
+    expect(isInsideFolder(root, "c:\\users\\public\\HUPI PROJ'S\\src", path.win32)).toBe(true);
+    expect(isInsideFolder(root, root, path.win32)).toBe(true);
+    expect(isInsideFolder(root, "C:\\Users\\Public\\hupi proj's2\\x", path.win32)).toBe(false);
+    expect(isInsideFolder(root, 'C:\\Users\\secret.txt', path.win32)).toBe(false);
+    expect(isInsideFolder(root, 'D:\\x', path.win32)).toBe(false);
+  });
+  it('follows POSIX rules', () => {
+    expect(isInsideFolder('/work/app', '/work/app/..config/x', path.posix)).toBe(true);
+    expect(isInsideFolder('/work/app', '/work/application', path.posix)).toBe(false);
+    expect(isInsideFolder('/work/app', '/work/App/x', path.posix)).toBe(false);
   });
 });
 

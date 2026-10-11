@@ -117,6 +117,18 @@ describe('run_command', () => {
     expect(await run('run_command', { command: 'rm -rf build' }, ctx(false).ctx)).toBe(DECLINED_BY_USER);
     expect(executedCommands).toEqual([inDirectory('/work/app', 'make', process.platform)]);
   });
+  it("notes that PowerShell's exit code 1 means any failure", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      __setShellBehavior(() => ({ chunks: [], exitCode: 1 }));
+      expect(await run('run_command', { command: 'cmd /c exit 3' })).toMatch(/^exit code 1 \(PowerShell reports any failure as 1;.*\n\(no output\)$/);
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+    __setShellBehavior(() => ({ chunks: [], exitCode: 1 }));
+    expect(await run('run_command', { command: 'false' })).toBe('exit code 1\n(no output)');
+  });
   it('stops a command that runs past its timeout', async () => {
     __setShellBehavior(() => 'hang');
     vi.useFakeTimers({ shouldAdvanceTime: true });
