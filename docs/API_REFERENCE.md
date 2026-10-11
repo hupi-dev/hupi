@@ -1,8 +1,9 @@
 # API Reference — Routes, Triggers, and Call Chains
 
 The gateway (`cmd/hupi`) exposes exactly two memory/chat routes in this
-OSS build, plus two Kubernetes probe endpoints that carry no application
-logic. This document covers each of the two in full: when it's
+OSS build, plus the read-only MCP endpoint `/mcp` (covered in its own
+document, [MCP.md](MCP.md)) and two Kubernetes probe endpoints that carry
+no application logic. This document covers each of the two in full: when it's
 triggered, what it expects and returns, every status code it can
 produce, and the complete function-by-function call chain from the HTTP
 layer down to Postgres and back — including every external network call
@@ -16,8 +17,11 @@ mux.HandleFunc("POST /v1/feedback",         handler.HandleFeedback)
 ```
 
 No other methods are accepted on either path (`405 Method Not Allowed`
-otherwise), and there is no other *memory-bearing* route in this OSS
-build — the gateway is deliberately a narrow surface.
+otherwise). The one other *memory-bearing* route in this OSS build is
+`/mcp`, mounted by `mountMCP` unless `HUPI_ENABLE_MCP=false`. It reads
+memory for AI IDEs over the Model Context Protocol and writes nothing;
+see [MCP.md](MCP.md) for its tools, auth and Origin/Host guard. The
+gateway is deliberately a narrow surface.
 
 **Team-scoped routes aren't part of this OSS build.** `cmd/hupi` also
 calls `gateway.MountTeamRoutes(mux, handler)` unconditionally right
@@ -257,6 +261,7 @@ user from losing, unlike a chat turn.
 |---|---|---|---|---|
 | `POST /v1/chat/completions` | optional | 200 | 400, 401, 413 | 500, 502 |
 | `POST /v1/feedback` | optional | 201 | 400, 401 | 500 |
+| `POST /mcp` ([MCP.md](MCP.md)) | optional | 200 (tool errors are JSON-RPC results) | 400, 401, 403 (Origin/Host guard) | — |
 
 (Team-scoped routes aren't part of this OSS build — see the note at the
 top of this document.)

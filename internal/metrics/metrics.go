@@ -212,6 +212,16 @@ var (
 		Name: "hupi_consolidation_cluster_merges_total",
 		Help: "Times a busy day's topic clusters exceeded HUPI_MAX_CLUSTERS_PER_DAY and the two most-similar clusters were forcibly merged, each increment risking the same dilution clustering itself exists to prevent.",
 	})
+
+	MCPToolCallsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hupi_mcp_tool_calls_total",
+		Help: `MCP tool calls served at /mcp, by tool and outcome ("ok" or "error").`,
+	}, []string{"tool", "outcome"})
+
+	MCPToolCallDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "hupi_mcp_tool_call_duration_seconds",
+		Help: "MCP tool call duration in seconds, by tool.",
+	}, []string{"tool"})
 )
 
 // InstrumentHandler wraps h to record HTTPRequestsTotal/HTTPRequestDuration

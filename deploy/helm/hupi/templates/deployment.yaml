@@ -32,6 +32,12 @@ spec:
               value: "/app/config/providers.yaml"
             - name: HUPI_ENABLE_KEYWORD_SEARCH
               value: {{ .Values.retrieval.enableKeywordSearch | quote }}
+            - name: HUPI_ENABLE_MCP
+              value: {{ .Values.mcp.enabled | quote }}
+            {{- with .Values.mcp.allowedHosts }}
+            - name: HUPI_MCP_ALLOWED_HOSTS
+              value: {{ . | quote }}
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "hupi.appSecretName" . }}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The single Go-side build-verification gate: schema migrations, gofmt,
-# go build, go vet, and the full go test suite against a real Postgres
-# instance — exactly what .github/workflows/ci.yml's own `go` job runs,
+# go build, go vet, the full go test suite against a real Postgres
+# instance, and the MCP server's no-skip check — exactly what .github/workflows/ci.yml's own `go` job runs,
 # refactored into one script so it's runnable identically in CI and on
 # a developer's own machine, not two copies of the same steps that can
 # silently drift apart.
@@ -86,5 +86,22 @@ go vet ./... || fail "go vet"
 
 step "go test ./... (real Postgres, -count=1)"
 go test -count=1 ./... || fail "go test"
+
+# /mcp hands user memory to third-party AI clients, so its auth, Origin
+# guard and per-caller scope isolation (docs/MCP.md) must actually run on
+# every gate pass. Its real-Postgres tests skip when HUPI_TEST_DATABASE_URL
+# isn't reachable, and go test counts a skip as a pass — so this step
+# re-runs those packages verbosely and fails on any skip at all.
+step "MCP server: /mcp tests, none skipped"
+MCP_OUT="$(go test -count=1 -v ./internal/mcpserver/ ./cmd/hupi/ 2>&1)" \
+  || { echo "$MCP_OUT"; fail "MCP server tests"; }
+if grep -q -- '--- SKIP' <<<"$MCP_OUT"; then
+  grep -A2 -- '--- SKIP' <<<"$MCP_OUT" || true
+  fail "MCP server tests skipped (is HUPI_TEST_DATABASE_URL reachable?)"
+fi
+if ! grep -q -- '--- PASS: TestIntegration_SearchMemoryIsScopedPerCaller' <<<"$MCP_OUT"; then
+  echo "$MCP_OUT"
+  fail "MCP scope-isolation integration test did not run"
+fi
 
 printf '\n=== MASTER TEST GATE: PASS ===\n'

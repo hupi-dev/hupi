@@ -700,6 +700,7 @@ Two things made this possible without forking the codebase:
    model."
 2. **A small set of nil-by-default hook variables** mark the actual
    Tier-3-only extension points: `gateway.MountTeamRoutes`,
+   `gateway.ResolveTeamScope` (the team `/mcp` route),
    `auth.NewTeamAuthenticator`, and a couple of same-package CLI/route
    hooks in `cmd/hupi-admin`/`cmd/hupi-admin-ui`. A plain build of this
    repo alone leaves every one of them nil — team routes never mount,

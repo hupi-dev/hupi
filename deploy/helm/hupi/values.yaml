@@ -22,6 +22,16 @@ gateway:
 retrieval:
   enableKeywordSearch: true
 
+# The gateway's /mcp endpoint, which serves memory to AI IDEs (Claude
+# Code, Cursor) over the Model Context Protocol. It uses the same API
+# keys as the chat route; see docs/MCP.md. allowedHosts is a
+# comma-separated Host allowlist (port ignored): set it to the hostname(s)
+# clients reach the gateway by, so a DNS-rebinding page can't. Empty
+# means no Host check.
+mcp:
+  enabled: true
+  allowedHosts: ""
+
 # Every entry becomes an env var on the gateway, cronjobs, and admin UI
 # via envFrom — the app-role DB DSN, the field-encryption key, and each
 # provider's API key all live here. Two ways to supply it:
