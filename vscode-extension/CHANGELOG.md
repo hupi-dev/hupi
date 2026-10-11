@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.15
+
+- Registers your HUPI gateway's MCP server with VS Code
+  (`vscode.lm.registerMcpServerDefinitionProvider`). VS Code's agent mode
+  (GitHub Copilot) and any other MCP-aware chat can then use HUPI memory
+  directly, without a hand-written `mcp.json`. That covers
+  `search_memory`, `get_entity`, `list_entities`, `recent_memory`,
+  `remember` and `log_exchange` (see the repo's `docs/MCP.md`).
+  - It uses the same `hupi.baseUrl`, `hupi.teamId` and credentials as
+    HUPI chat: your API key, or your OIDC session, refreshed when the
+    server starts.
+  - The server is re-announced whenever any of those change.
+  - Turn it off with the new `hupi.mcp.enabled` setting (on by default).
+- **Requires VS Code 1.101 or later**, the first release with the stable
+  MCP extension API. The previous minimum was 1.90.
+
 ## 0.1.14
 
 - Added file/image attachments to the dedicated HUPI sidebar — a 📎

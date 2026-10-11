@@ -11,6 +11,7 @@ function fakeContext(): vscode.ExtensionContext {
       get: async () => undefined,
       store: async () => {},
       delete: async () => {},
+      onDidChange: () => new vscode.Disposable(() => {}),
     },
     extensionUri: vscode.Uri.file('/fake/extension'),
   } as unknown as vscode.ExtensionContext;
@@ -29,11 +30,13 @@ describe('activate', () => {
     // hupi.setApiKey (1) + hupi.signIn/hupi.signOut (2) + inlineEdit's
     // [contentProvider, command] (2) + multiFileEdit's
     // [contentProvider, command] (2) + the inline completion provider (1)
-    // + the chat webview view provider (1) + the hupi.chat participant (1).
+    // + the chat webview view provider (1) + the hupi.chat participant (1)
+    // + the MCP provider's [change emitter, settings listener, secrets
+    // listener, provider registration] (4).
     // A future registration that forgets to push its disposable would
     // shrink this count — that's the point of asserting the exact number,
     // not just "at least one."
-    expect(context.subscriptions.length).toBe(10);
+    expect(context.subscriptions.length).toBe(14);
     for (const sub of context.subscriptions) {
       expect(typeof (sub as { dispose?: unknown }).dispose).toBe('function');
     }
