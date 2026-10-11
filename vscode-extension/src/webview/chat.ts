@@ -32,13 +32,17 @@ interface ChatAttachment {
   data: string;
 }
 
+// Mirrors chatViewProvider.ts's ToWebview — keep the two in sync.
 type ToWebview =
-  | { type: 'userEcho'; text: string }
   | { type: 'fileContext'; relativePath: string }
   | { type: 'delta'; text: string }
   | { type: 'citations'; items: Citation[] }
   | { type: 'attachmentWarnings'; warnings: string[] }
+  | { type: 'toolCall'; id: string; name: string; argsPreview: string }
+  | { type: 'approvalRequest'; id: string; name: string; argsPreview: string }
+  | { type: 'toolResult'; id: string; ok: boolean; summary: string }
   | { type: 'done' }
+  | { type: 'stopped' }
   | { type: 'error'; message: string };
 
 // Mirrors chatParticipant.ts's own MAX_ATTACHMENT_BYTES/IMAGE_MIME_BY_EXTENSION
@@ -78,14 +82,22 @@ const log = document.getElementById('log') as HTMLDivElement;
 const empty = document.getElementById('empty') as HTMLDivElement;
 const input = document.getElementById('input') as HTMLTextAreaElement;
 const sendButton = document.getElementById('send') as HTMLButtonElement;
+const stopButton = document.getElementById('stop') as HTMLButtonElement;
 const newChatButton = document.getElementById('newChat') as HTMLButtonElement;
 const attachButton = document.getElementById('attachBtn') as HTMLButtonElement;
 const fileInput = document.getElementById('fileInput') as HTMLInputElement;
 const attachmentChips = document.getElementById('attachmentChips') as HTMLDivElement;
 const inputRow = document.getElementById('inputRow') as HTMLDivElement;
 
+// The reply being streamed: currentAssistantContent is its bubble, which
+// holds a sequence of text segments and (in an agent turn) tool cards, in
+// the order they happened. Only the current text segment is ever
+// re-rendered from markdown, so cards and earlier segments are never
+// wiped by a later render.
 let currentAssistantContent: HTMLDivElement | null = null;
+let currentSegment: HTMLDivElement | null = null;
 let currentAssistantRaw = '';
+const toolCards = new Map<string, HTMLDivElement>();
 // Held separately from currentAssistantRaw rather than folded into the
 // streamed markdown text: the 'done' handler's final render replaces
 // currentAssistantContent's whole innerHTML from currentAssistantRaw, so
@@ -202,17 +214,93 @@ async function addFiles(files: FileList | File[]): Promise<void> {
 // pick up the latest text.
 let renderScheduled = false;
 function scheduleRender(): void {
-  if (renderScheduled || !currentAssistantContent) {
+  if (renderScheduled || !currentSegment) {
     return;
   }
   renderScheduled = true;
   requestAnimationFrame(() => {
     renderScheduled = false;
-    if (currentAssistantContent) {
-      currentAssistantContent.innerHTML = marked.parse(currentAssistantRaw) as string;
-      log.scrollTop = log.scrollHeight;
-    }
+    renderSegment();
   });
+}
+
+function renderSegment(): void {
+  if (currentSegment) {
+    currentSegment.innerHTML = marked.parse(currentAssistantRaw) as string;
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+/** Ends the current text segment so whatever comes next (a tool card, or
+ *  more text after it) starts below it. */
+function closeSegment(): void {
+  renderSegment();
+  currentSegment = null;
+  currentAssistantRaw = '';
+}
+
+function appendText(text: string): void {
+  if (!currentAssistantContent) {
+    return;
+  }
+  if (!currentSegment) {
+    currentSegment = document.createElement('div');
+    currentSegment.className = 'segment';
+    currentAssistantContent.appendChild(currentSegment);
+  }
+  currentAssistantRaw += text;
+  scheduleRender();
+}
+
+/** Clears all per-reply state once a reply has ended. */
+function endReply(): void {
+  currentAssistantContent = null;
+  currentSegment = null;
+  currentAssistantRaw = '';
+  currentCitations = [];
+  currentAttachmentWarnings = [];
+  toolCards.clear();
+  setStreaming(false);
+}
+
+// A tool card: name, arguments preview, status, and (once it ran) a
+// collapsible result. Everything from the tool goes in via textContent,
+// never as HTML or markdown — tool output is untrusted.
+function toolCard(id: string, name: string, argsPreview: string): HTMLDivElement {
+  let card = toolCards.get(id);
+  if (card) {
+    return card;
+  }
+  closeSegment();
+  card = document.createElement('div');
+  card.className = 'toolCard running';
+  const head = document.createElement('div');
+  head.className = 'toolHead';
+  const label = document.createElement('span');
+  label.className = 'toolName';
+  label.textContent = name;
+  const status = document.createElement('span');
+  status.className = 'toolStatus';
+  status.textContent = 'running…';
+  head.append('Tool ', label, ' ', status);
+  const args = document.createElement('div');
+  args.className = 'toolArgs';
+  args.textContent = argsPreview;
+  const actions = document.createElement('div');
+  actions.className = 'toolActions';
+  card.append(head, args, actions);
+  currentAssistantContent?.appendChild(card);
+  toolCards.set(id, card);
+  log.scrollTop = log.scrollHeight;
+  return card;
+}
+
+function setCardStatus(card: HTMLDivElement, state: string, text: string): void {
+  card.className = `toolCard ${state}`;
+  const status = card.querySelector('.toolStatus');
+  if (status) {
+    status.textContent = text;
+  }
 }
 
 const ROLE_LABELS: Record<string, string> = { user: 'You', assistant: 'HUPI', error: 'Error' };
@@ -245,6 +333,10 @@ function appendMessage(text: string, cls: string): HTMLDivElement {
 function setStreaming(streaming: boolean): void {
   input.disabled = streaming;
   sendButton.disabled = streaming;
+  // Stop replaces Send while a reply is streaming.
+  sendButton.style.display = streaming ? 'none' : '';
+  stopButton.style.display = streaming ? '' : 'none';
+  stopButton.disabled = false;
   if (!streaming) {
     input.focus();
   }
@@ -265,7 +357,9 @@ function send(): void {
   pendingAttachments = [];
   renderAttachmentChips();
   currentAssistantContent = appendMessage('', 'assistant');
+  currentSegment = null;
   currentAssistantRaw = '';
+  toolCards.clear();
   setStreaming(true);
   vscode.postMessage(attachments.length > 0 ? { type: 'send', text, attachments } : { type: 'send', text });
 }
@@ -273,17 +367,19 @@ function send(): void {
 function newChat(): void {
   log.querySelectorAll('.msg').forEach((el) => el.remove());
   empty.style.display = '';
-  currentAssistantContent = null;
-  currentAssistantRaw = '';
-  currentCitations = [];
-  currentAttachmentWarnings = [];
   pendingAttachments = [];
   renderAttachmentChips();
-  setStreaming(false);
+  endReply();
   vscode.postMessage({ type: 'clear' });
 }
 
+function stop(): void {
+  stopButton.disabled = true;
+  vscode.postMessage({ type: 'cancel' });
+}
+
 sendButton.addEventListener('click', send);
+stopButton.addEventListener('click', stop);
 newChatButton.addEventListener('click', newChat);
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -335,8 +431,52 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       break;
     }
     case 'delta': {
-      currentAssistantRaw += message.text;
-      scheduleRender();
+      appendText(message.text);
+      break;
+    }
+    case 'toolCall': {
+      toolCard(message.id, message.name, message.argsPreview);
+      break;
+    }
+    case 'approvalRequest': {
+      const card = toolCard(message.id, message.name, message.argsPreview);
+      setCardStatus(card, 'waiting', 'waiting for your approval');
+      const actions = card.querySelector('.toolActions') as HTMLDivElement;
+      actions.replaceChildren();
+      for (const [label, type] of [
+        ['Allow', 'approve'],
+        ['Deny', 'deny'],
+      ] as const) {
+        const button = document.createElement('button');
+        button.className = `toolButton ${type}`;
+        button.textContent = label;
+        button.addEventListener('click', () => {
+          actions.querySelectorAll('button').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+          setCardStatus(card, type === 'approve' ? 'running' : 'denied', type === 'approve' ? 'running…' : 'denied');
+          vscode.postMessage({ type, id: message.id });
+        });
+        actions.appendChild(button);
+      }
+      break;
+    }
+    case 'toolResult': {
+      const card = toolCards.get(message.id);
+      if (!card) {
+        break;
+      }
+      (card.querySelector('.toolActions') as HTMLDivElement).replaceChildren();
+      if (!card.classList.contains('denied')) {
+        setCardStatus(card, message.ok ? 'ok' : 'failed', message.ok ? 'done' : 'failed');
+      }
+      if (message.summary) {
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Result';
+        const pre = document.createElement('pre');
+        pre.textContent = message.summary;
+        details.append(summary, pre);
+        card.appendChild(details);
+      }
       break;
     }
     case 'citations': {
@@ -354,30 +494,41 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
       // last synchronous render to guarantee the final text is shown
       // even if no frame was pending.
       if (currentAssistantContent) {
-        currentAssistantContent.innerHTML = marked.parse(currentAssistantRaw) as string;
+        closeSegment();
         currentAssistantContent.insertAdjacentHTML('beforeend', renderCitationsHtml(currentCitations));
         currentAssistantContent.insertAdjacentHTML('beforeend', renderAttachmentWarningsHtml(currentAttachmentWarnings));
         log.scrollTop = log.scrollHeight;
       }
-      currentAssistantContent = null;
-      currentAssistantRaw = '';
-      currentCitations = [];
-      currentAttachmentWarnings = [];
-      setStreaming(false);
+      endReply();
+      break;
+    }
+    case 'stopped': {
+      if (currentAssistantContent) {
+        closeSegment();
+        for (const card of toolCards.values()) {
+          if (card.classList.contains('running') || card.classList.contains('waiting')) {
+            setCardStatus(card, 'failed', 'stopped');
+            (card.querySelector('.toolActions') as HTMLDivElement).replaceChildren();
+          }
+        }
+        const note = document.createElement('div');
+        note.className = 'stoppedNote';
+        note.textContent = 'Stopped.';
+        currentAssistantContent.appendChild(note);
+      }
+      endReply();
       break;
     }
     case 'error': {
-      if (currentAssistantContent && currentAssistantRaw === '') {
-        // No partial answer arrived — replace the empty placeholder bubble
-        // with the error instead of leaving a blank one behind.
+      if (currentAssistantContent && currentAssistantContent.childElementCount === 0) {
+        // Nothing arrived — replace the empty placeholder bubble with the
+        // error instead of leaving a blank one behind.
         currentAssistantContent.closest('.msg')?.remove();
+      } else {
+        closeSegment();
       }
       appendMessage(message.message, 'error');
-      currentAssistantContent = null;
-      currentAssistantRaw = '';
-      currentCitations = [];
-      currentAttachmentWarnings = [];
-      setStreaming(false);
+      endReply();
       break;
     }
   }

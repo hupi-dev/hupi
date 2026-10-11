@@ -12,7 +12,6 @@ import {
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
 import { runAgentTurn } from './agent/agentLoop';
-import { makeApprover } from './agent/approval';
 import { buildRegistry, selectVscodeTools, startMcpServers } from './agent/toolRegistry';
 import { runVscodeTool } from './agent/vscodeTools';
 
@@ -42,15 +41,34 @@ export function textOnly(history: AgentMessage[]): ChatMessage[] {
 // dependency, so they're imported directly rather than re-duplicated
 // field-by-field here — this file (unlike src/webview/chat.ts) is
 // extension-host code, so importing hupiClient.ts is fine.
-type FromWebview = { type: 'send'; text: string; attachments?: ChatAttachment[] } | { type: 'clear' };
+//
+// The agent messages (toolCall/toolResult/approvalRequest, approve/deny)
+// carry a tool call's id so the webview can update that call's card;
+// "cancel" is the Stop button, answered with "stopped".
+type FromWebview =
+  | { type: 'send'; text: string; attachments?: ChatAttachment[] }
+  | { type: 'clear' }
+  | { type: 'cancel' }
+  | { type: 'approve'; id: string }
+  | { type: 'deny'; id: string };
 type ToWebview =
-  | { type: 'userEcho'; text: string }
   | { type: 'fileContext'; relativePath: string }
   | { type: 'delta'; text: string }
   | { type: 'citations'; items: Citation[] }
   | { type: 'attachmentWarnings'; warnings: string[] }
+  | { type: 'toolCall'; id: string; name: string; argsPreview: string }
+  | { type: 'approvalRequest'; id: string; name: string; argsPreview: string }
+  | { type: 'toolResult'; id: string; ok: boolean; summary: string }
   | { type: 'done' }
+  | { type: 'stopped' }
   | { type: 'error'; message: string };
+
+/** Shortens text for display in a tool card (the full value still goes to
+ *  the model). */
+export function preview(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? flat.slice(0, max) + '…' : flat;
+}
 
 export interface FileContext {
   /** The block prepended to the user's message, sent to the gateway. */
@@ -102,6 +120,12 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
   // against any message that slips through anyway (a stale click, a
   // 'clear' arriving mid-stream).
   private inFlight?: AbortController;
+  // The turn the user pressed Stop on, so its abort is answered with a
+  // "stopped" message rather than silence (a supersede or New Chat needs
+  // no reply: the webview already moved on).
+  private stopRequested?: AbortController;
+  // Approvals waiting on the webview's Allow/Deny, by tool-call id.
+  private pendingApprovals = new Map<string, (approved: boolean) => void>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -119,7 +143,20 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message: FromWebview) => {
       if (message.type === 'clear') {
         this.inFlight?.abort();
+        this.denyPendingApprovals();
         this.history = [];
+        return;
+      }
+      if (message.type === 'cancel') {
+        this.stopRequested = this.inFlight;
+        this.inFlight?.abort();
+        this.denyPendingApprovals();
+        return;
+      }
+      if (message.type === 'approve' || message.type === 'deny') {
+        const resolve = this.pendingApprovals.get(message.id);
+        this.pendingApprovals.delete(message.id);
+        resolve?.(message.type === 'approve');
         return;
       }
       if (message.type === 'send') {
@@ -131,6 +168,26 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
 
   private post(webview: vscode.Webview, message: ToWebview): void {
     void webview.postMessage(message);
+  }
+
+  private denyPendingApprovals(): void {
+    for (const resolve of this.pendingApprovals.values()) {
+      resolve(false);
+    }
+    this.pendingApprovals.clear();
+  }
+
+  /** Asks the user in the sidebar (hupi.agent.approval: "all"): the call's
+   *  card shows Allow/Deny, and the turn waits for the answer. Stop and
+   *  New Chat count as Deny. */
+  private askInSidebar(webview: vscode.Webview, id: string, name: string, args: string, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) {
+      return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+      this.pendingApprovals.set(id, resolve);
+      this.post(webview, { type: 'approvalRequest', id, name, argsPreview: preview(args || '{}', 300) });
+    });
   }
 
   private async handleSend(text: string, attachments: ChatAttachment[] | undefined, webview: vscode.Webview): Promise<void> {
@@ -196,8 +253,12 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     } catch (err) {
       rollback();
       // A deliberate abort (superseded by a newer send, or "New Chat") is
-      // not a failure worth surfacing — the webview already moved on.
+      // not a failure worth surfacing — the webview already moved on. Stop
+      // is answered so the webview can close off the reply.
       if (controller.signal.aborted) {
+        if (this.stopRequested === controller) {
+          this.post(webview, { type: 'stopped' });
+        }
         return;
       }
       this.post(webview, {
@@ -209,14 +270,17 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       if (this.inFlight === controller) {
         this.inFlight = undefined;
       }
+      if (this.stopRequested === controller) {
+        this.stopRequested = undefined;
+      }
     }
   }
 
   /**
    * One agent turn (hupi.agent.enabled): offers the user's MCP tools to
    * the model and runs what it asks for until it answers. Returns the
-   * messages to append to history. Tool activity shows as short notes in
-   * the reply for now.
+   * messages to append to history. Each tool call shows as a card in the
+   * reply (toolCall, then toolResult).
    */
   private async runAgent(
     cfg: HupiConfig,
@@ -257,13 +321,15 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
           }
           return tool.run(call.function.arguments, toolSignal);
         },
-        approve: makeApprover(settings.get<string>('agent.approval', 'changes')),
-        onToolCall: (call) => note(`\n\n> Running tool \`${call.function.name}\`…\n\n`),
-        onToolResult: (call, ok, text) => {
-          if (!ok) {
-            note(`> \`${call.function.name}\`: ${text.split('\n')[0].slice(0, 200)}\n\n`);
-          }
-        },
+        // "changes" (default) leaves approval to VS Code, which asks before
+        // any tool that isn't read-only; "all" also asks here first.
+        approve: (call) =>
+          settings.get<string>('agent.approval', 'changes') === 'all'
+            ? this.askInSidebar(webview, call.id, call.function.name, call.function.arguments, signal)
+            : Promise.resolve(true),
+        onToolCall: (call) =>
+          this.post(webview, { type: 'toolCall', id: call.id, name: call.function.name, argsPreview: preview(call.function.arguments || '{}', 300) }),
+        onToolResult: (call, ok, text) => this.post(webview, { type: 'toolResult', id: call.id, ok, summary: preview(text, 300) }),
       },
       {
         tools,
@@ -421,6 +487,40 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
       border: none; border-radius: 4px; padding: 0 14px; cursor: pointer; font-size: inherit;
     }
     #send:hover { background: var(--vscode-button-hoverBackground); }
+    #stop {
+      background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+      border: 1px solid var(--hupi-border); border-radius: 4px; padding: 0 12px; cursor: pointer; font-size: inherit;
+    }
+    #stop:hover { background: var(--vscode-button-secondaryHoverBackground, var(--hupi-card-bg)); }
+    .segment + .segment, .toolCard + .segment { margin-top: 6px; }
+    .toolCard {
+      margin: 6px 0; padding: 5px 8px;
+      border: 1px solid var(--hupi-border); border-radius: 4px;
+      font-size: 11.5px; white-space: normal;
+      background: var(--vscode-editor-background);
+    }
+    .toolHead { color: var(--vscode-descriptionForeground); }
+    .toolName { font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-foreground); }
+    .toolStatus { margin-left: 4px; font-style: italic; }
+    .toolCard.ok .toolStatus { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); font-style: normal; }
+    .toolCard.failed .toolStatus, .toolCard.denied .toolStatus { color: var(--vscode-errorForeground); font-style: normal; }
+    .toolCard.waiting { border-color: var(--vscode-focusBorder); }
+    .toolArgs {
+      margin-top: 2px; font-family: var(--vscode-editor-font-family, monospace);
+      color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .toolActions { display: flex; gap: 6px; margin-top: 4px; }
+    .toolActions:empty { display: none; }
+    .toolButton {
+      border: none; border-radius: 3px; padding: 2px 10px; cursor: pointer; font-size: 11.5px;
+      background: var(--vscode-button-secondaryBackground, var(--hupi-card-bg)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    }
+    .toolButton.approve { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+    .toolButton:disabled { opacity: 0.5; cursor: default; }
+    .toolCard details { margin-top: 3px; }
+    .toolCard summary { cursor: pointer; color: var(--vscode-descriptionForeground); }
+    .toolCard details pre { margin: 3px 0 0; white-space: pre-wrap; max-height: 160px; overflow-y: auto; }
+    .stoppedNote { margin-top: 6px; font-size: 11px; font-style: italic; color: var(--vscode-descriptionForeground); }
   </style>
 </head>
 <body>
@@ -442,6 +542,7 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     <input id="fileInput" type="file" multiple style="display:none" />
     <textarea id="input" rows="2" placeholder="Ask HUPI... (Enter to send, Shift+Enter for newline)"></textarea>
     <button id="send">Send</button>
+    <button id="stop" style="display:none" title="Stop this reply">Stop</button>
   </div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>

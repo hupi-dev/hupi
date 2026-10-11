@@ -87,14 +87,27 @@ answer. Each turn:
      answer with tools off.
    - The whole turn is capped at 10 minutes, and New Chat or a new message
      cancels it.
-4. Tool activity shows as short notes in the reply for now.
-5. A failed or cancelled turn is rolled back out of the conversation
-   history in full.
+4. Each tool call shows as a card in the reply:
+   - the tool name, an argument preview and its status (running, done,
+     failed, denied or stopped);
+   - a collapsible result preview.
+   The extension sends `toolCall`, `toolResult` and `approvalRequest`
+   messages to the webview, and the webview answers with `approve`,
+   `deny` or `cancel`. A reply bubble is a sequence of text segments and
+   cards, so markdown re-renders never wipe a card. Everything from a tool
+   is set as plain text, never rendered as HTML or markdown.
+5. The **Stop** button replaces Send while any reply streams. It aborts
+   the turn (including a running tool) and is answered with `stopped`.
+6. A failed, stopped or cancelled turn is rolled back out of the
+   conversation history in full.
 
 Approval:
 - **VS Code asks first** before running any tool that isn't marked
   read-only.
 - `hupi.agent.approval: "all"` makes HUPI also ask before read-only tools.
+  The call's card shows Allow/Deny in the sidebar, and Stop or New Chat
+  count as Deny. A tool that changes something can then be confirmed
+  twice: once in the card, then in VS Code's own dialog.
 
 The gateway treats all of a turn's requests as one turn
 ([API_REFERENCE.md](API_REFERENCE.md#post-v1chatcompletions)): memory is
