@@ -104,6 +104,11 @@
           "default": true,
           "description": "Give HUPI's agent its own read-only workspace tools: read_file, list_files, search_text, get_diagnostics and get_selection. They stay inside the open workspace folders and refuse files that commonly hold secrets (.env, private keys, credentials)."
         },
+        "hupi.agent.writeTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "Give HUPI's agent tools that change things: edit_file, create_file and run_command. Each call asks you first, every time (an edit shows its diff; a command shows the exact command line). Never offered in an untrusted workspace (Restricted Mode)."
+        },
         "hupi.agent.vscodeTools": {
           "type": "boolean",
           "default": true,

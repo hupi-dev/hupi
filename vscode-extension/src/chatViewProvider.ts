@@ -15,6 +15,7 @@ import { runAgentTurn } from './agent/agentLoop';
 import { buildRegistry, selectVscodeTools, startMcpServers } from './agent/toolRegistry';
 import { runVscodeTool } from './agent/vscodeTools';
 import { WORKSPACE_TOOLS } from './agent/workspaceTools';
+import { writeToolsFor } from './agent/writeTools';
 
 /** Overall cap on one agent turn, on top of each request's own timeout. */
 export const AGENT_TURN_TIMEOUT_MS = 10 * 60_000;
@@ -58,7 +59,7 @@ type ToWebview =
   | { type: 'citations'; items: Citation[] }
   | { type: 'attachmentWarnings'; warnings: string[] }
   | { type: 'toolCall'; id: string; name: string; argsPreview: string }
-  | { type: 'approvalRequest'; id: string; name: string; argsPreview: string }
+  | { type: 'approvalRequest'; id: string; name: string; argsPreview: string; detail?: string }
   | { type: 'toolResult'; id: string; ok: boolean; summary: string }
   | { type: 'done' }
   | { type: 'stopped' }
@@ -181,13 +182,13 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
   /** Asks the user in the sidebar (hupi.agent.approval: "all"): the call's
    *  card shows Allow/Deny, and the turn waits for the answer. Stop and
    *  New Chat count as Deny. */
-  private askInSidebar(webview: vscode.Webview, id: string, name: string, args: string, signal: AbortSignal): Promise<boolean> {
+  private askInSidebar(webview: vscode.Webview, id: string, name: string, args: string, signal: AbortSignal, detail?: string): Promise<boolean> {
     if (signal.aborted) {
       return Promise.resolve(false);
     }
     return new Promise((resolve) => {
       this.pendingApprovals.set(id, resolve);
-      this.post(webview, { type: 'approvalRequest', id, name, argsPreview: preview(args || '{}', 300) });
+      this.post(webview, { type: 'approvalRequest', id, name, argsPreview: preview(args || '{}', 300), detail: detail?.slice(0, 2000) });
     });
   }
 
@@ -299,7 +300,10 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     const registry = buildRegistry(
       useVscodeTools ? selectVscodeTools(vscode.lm.tools) : [],
       runVscodeTool,
-      settings.get<boolean>('agent.workspaceTools', true) ? WORKSPACE_TOOLS : [],
+      [
+        ...(settings.get<boolean>('agent.workspaceTools', true) ? WORKSPACE_TOOLS : []),
+        ...writeToolsFor(settings.get<boolean>('agent.writeTools', true)),
+      ],
     );
     const tools = [...registry.values()].map((t) => t.def);
     const signal = AbortSignal.any([cancel, AbortSignal.timeout(AGENT_TURN_TIMEOUT_MS)]);
@@ -325,12 +329,17 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
           if (!tool) {
             return Promise.reject(new Error(`unknown tool "${call.function.name}"`));
           }
-          return tool.run(call.function.arguments, toolSignal);
+          // HUPI's write/run tools ask on the call's card themselves, with
+          // their own description of the change.
+          return tool.run(call.function.arguments, toolSignal, {
+            ask: (detail) => this.askInSidebar(webview, call.id, call.function.name, call.function.arguments, signal, detail),
+          });
         },
         // "changes" (default) leaves approval to VS Code, which asks before
-        // any tool that isn't read-only; "all" also asks here first.
+        // any tool that isn't read-only; "all" also asks here first. Tools
+        // that always ask for themselves aren't asked about twice.
         approve: (call) =>
-          settings.get<string>('agent.approval', 'changes') === 'all'
+          settings.get<string>('agent.approval', 'changes') === 'all' && !registry.get(call.function.name)?.selfApproving
             ? this.askInSidebar(webview, call.id, call.function.name, call.function.arguments, signal)
             : Promise.resolve(true),
         onToolCall: (call) =>
@@ -514,6 +523,11 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     .toolArgs {
       margin-top: 2px; font-family: var(--vscode-editor-font-family, monospace);
       color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .toolDetail {
+      margin-top: 4px; padding: 4px 6px; white-space: pre-wrap; word-break: break-word;
+      font-family: var(--vscode-editor-font-family, monospace);
+      background: var(--vscode-textCodeBlock-background); border-radius: 3px;
     }
     .toolActions { display: flex; gap: 6px; margin-top: 4px; }
     .toolActions:empty { display: none; }

@@ -28,3 +28,19 @@ export function createVirtualDiffProvider(scheme: string): VirtualDiffProvider {
     delete: (uri) => docs.delete(uri.path),
   };
 }
+
+/** Closes the diff tab showing beforeUri/afterUri, if it is still open. */
+export async function closeDiffTab(beforeUri: vscode.Uri, afterUri: vscode.Uri): Promise<void> {
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const input = tab.input;
+      if (
+        input instanceof vscode.TabInputTextDiff &&
+        (input.original.toString() === beforeUri.toString() ||
+          input.modified.toString() === afterUri.toString())
+      ) {
+        await vscode.window.tabGroups.close(tab);
+      }
+    }
+  }
+}
