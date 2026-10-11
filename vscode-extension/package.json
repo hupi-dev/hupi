@@ -2,7 +2,7 @@
   "name": "hupi-vscode",
   "displayName": "HUPI",
   "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "publisher": "hupi",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
@@ -15,7 +15,7 @@
     "url": "https://github.com/hupi-dev/hupi/issues"
   },
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.101.0"
   },
   "extensionKind": ["ui"],
   "categories": ["AI", "Programming Languages"],
@@ -81,6 +81,11 @@
           "default": false,
           "description": "Also verify which cited sources the answer actually relied on (vs. merely had available), marking each Source as used or not. Off by default: this costs one extra real LLM call per answer. No effect unless hupi.citations.enabled is also on."
         },
+        "hupi.mcp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer your HUPI gateway's MCP server (search_memory, get_entity, list_entities, recent_memory, remember, log_exchange) to VS Code's agent mode and other MCP-aware chat, using the same base URL, team and credentials as HUPI chat. Turn off to hide it. See docs/MCP.md."
+        },
         "hupi.fileContext.enabled": {
           "type": "boolean",
           "default": true,
@@ -121,6 +126,12 @@
         "command": "hupi.multiFileEdit",
         "key": "ctrl+alt+m",
         "mac": "cmd+alt+m"
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "hupi.memory",
+        "label": "HUPI memory"
       }
     ],
     "chatParticipants": [
@@ -167,7 +178,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "^1.101.0",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
     "@typescript-eslint/parser": "^8.18.0",
     "esbuild": "^0.28.2",

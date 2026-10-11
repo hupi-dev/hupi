@@ -52,6 +52,15 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
   before applying any of it. Scoped to open editors, not the whole
   workspace — no background scan, predictable cost.
 
+- **HUPI memory as MCP tools** — the extension registers your gateway's
+  MCP server (`/mcp`, or `/v1/team/{id}/mcp` with `hupi.teamId`) with VS
+  Code. VS Code's agent mode (GitHub Copilot) and other MCP-aware chat can
+  then search and add to your HUPI memory as tools (`search_memory`,
+  `remember`, ...), with no `mcp.json` to write. It uses the same base
+  URL, team and credentials as HUPI chat. Turn it off with
+  `hupi.mcp.enabled`. It shows up as **HUPI memory** in **MCP: List
+  Servers**. See `../docs/MCP.md` for the tools.
+
 Not included in v1: fully agentic multi-file edits that plan and apply
 across files with no review step (the multi-file edit above always shows
 a diff first).
@@ -72,6 +81,10 @@ a diff first).
    - `hupi.teamId` — only if you're using a Tier 3 shared-team HUPI
      deployment and want requests routed through the team endpoint instead
      of your private one.
+   - `hupi.mcp.enabled` — on by default. Offers HUPI memory to VS Code's
+     agent mode as MCP tools; turn off to hide it.
+
+Requires VS Code 1.101 or later.
 
 ### Signing in with OIDC/SSO instead of an API key
 

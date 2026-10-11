@@ -166,8 +166,25 @@ async function readFile(uri: UriLike): Promise<Uint8Array> {
   return bytes;
 }
 
+// onDidChangeConfiguration listeners; __fireConfigChange(['hupi.baseUrl'])
+// simulates a settings edit affecting those sections.
+let configListeners: ((e: { affectsConfiguration(section: string): boolean }) => void)[] = [];
+export function __fireConfigChange(sections: string[]): void {
+  const e = { affectsConfiguration: (s: string) => sections.some((x) => x === s || x.startsWith(s + '.')) };
+  for (const l of [...configListeners]) {
+    l(e);
+  }
+}
+function onDidChangeConfiguration(listener: (typeof configListeners)[number]) {
+  configListeners.push(listener);
+  return new Disposable(() => {
+    configListeners = configListeners.filter((l) => l !== listener);
+  });
+}
+
 export const workspace = {
   getConfiguration,
+  onDidChangeConfiguration,
   asRelativePath,
   registerTextDocumentContentProvider,
   applyEdit,
@@ -325,6 +342,40 @@ export const createChatParticipant = vi.fn((id: string, handler: (...args: any[]
 
 export const chat = { createChatParticipant };
 
+// ---- EventEmitter -----------------------------------------------------
+
+export class EventEmitter<T> {
+  private listeners: ((e: T) => void)[] = [];
+  readonly event = (listener: (e: T) => void) => {
+    this.listeners.push(listener);
+    return new Disposable(() => {
+      this.listeners = this.listeners.filter((l) => l !== listener);
+    });
+  };
+  fire(e: T): void {
+    for (const l of [...this.listeners]) {
+      l(e);
+    }
+  }
+  dispose(): void {
+    this.listeners = [];
+  }
+}
+
+// ---- lm (MCP server definitions) ---------------------------------------
+
+export class McpHttpServerDefinition {
+  constructor(
+    public readonly label: string,
+    public uri: Uri,
+    public headers: Record<string, string> = {},
+    public version?: string,
+  ) {}
+}
+
+export const registerMcpServerDefinitionProvider = vi.fn<(id: string, provider: unknown) => Disposable>(() => new Disposable());
+export const lm = { registerMcpServerDefinitionProvider };
+
 // ---- reset ----------------------------------------------------------------
 
 /** Call from beforeEach — resets every spy and every piece of mutable mock
@@ -352,6 +403,8 @@ export function __resetVscodeMock(): void {
   registerCommand.mockClear();
   executeCommand.mockClear();
   createChatParticipant.mockClear();
+  registerMcpServerDefinitionProvider.mockClear();
+  configListeners = [];
 
   progressCancellationListener = undefined;
   withProgress.mockReset().mockImplementation(async (_options: unknown, task: (...args: any[]) => unknown) => {

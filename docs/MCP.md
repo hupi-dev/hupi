@@ -132,6 +132,31 @@ The Enterprise build also mounts `/v1/team/{team_id}/mcp`. It works like
 membership check the team chat route does. In the OSS build that route
 doesn't exist (404).
 
+### VS Code
+
+The HUPI VS Code extension (0.1.15+, VS Code 1.101+) registers this
+server automatically. It shows up as **HUPI memory** in **MCP: List
+Servers**, and VS Code's agent mode can use its tools straight away.
+- It uses the extension's own `hupi.baseUrl`, `hupi.teamId` and
+  credentials (API key or OIDC session).
+- `hupi.mcp.enabled` turns it off.
+- See [VSCODE_EXTENSION.md](VSCODE_EXTENSION.md).
+
+Without the extension, add it to `.vscode/mcp.json` by hand:
+
+```json
+{
+  "servers": {
+    "hupi": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": { "Authorization": "Bearer ${input:hupi-key}" }
+    }
+  },
+  "inputs": [{ "id": "hupi-key", "type": "promptString", "description": "HUPI API key", "password": true }]
+}
+```
+
 ### Claude Desktop and other stdio-only clients (`hupi-mcp`)
 
 Some MCP clients only launch a local process and talk to it over

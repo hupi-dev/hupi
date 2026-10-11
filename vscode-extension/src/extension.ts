@@ -6,6 +6,7 @@ import { HupiChatViewProvider } from './chatViewProvider';
 import { registerChatParticipant } from './chatParticipant';
 import { registerInlineCompletions } from './inlineCompletionProvider';
 import { registerMultiFileEdit } from './multiFileEdit';
+import { registerMcpProvider } from './mcpProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(registerSetApiKeyCommand(context));
@@ -33,6 +34,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(registerChatParticipant(context));
+  context.subscriptions.push(...registerMcpProvider(context));
 }
 
 export function deactivate(): void {}

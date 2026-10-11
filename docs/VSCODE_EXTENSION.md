@@ -40,6 +40,32 @@ extension computes `baseURL` as `${root}/v1` or `${root}/v1/team/${teamId}`
 depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
 `hupiClient.ts`. Nothing else about routing differs between the two modes.
 
+**MCP.** The extension also registers HUPI's MCP server with VS Code
+(`src/mcpProvider.ts`, via `vscode.lm.registerMcpServerDefinitionProvider`
+and the `mcpServerDefinitionProviders` contribution, id `hupi.memory`).
+That gives VS Code's own agent mode and other MCP-aware chat the
+gateway's memory tools ([MCP.md](MCP.md)) with no hand-written
+`mcp.json`. It follows the chat route's split:
+`${root}/mcp`, or `${root}/v1/team/${teamId}/mcp` when `hupi.teamId` is
+set.
+- `provideMcpServerDefinitions` only reads settings, as VS Code requires.
+- The credential is attached in `resolveMcpServerDefinition`, which VS
+  Code calls when it starts the server. It uses the same `loadConfig` as
+  chat: the stored API key, or the OIDC access token, refreshed if it's
+  near expiry.
+- With OIDC configured but no session, it shows the usual sign-in prompt
+  and doesn't start the server.
+- Changing `hupi.baseUrl`, `hupi.teamId`, `hupi.oidc.*` or
+  `hupi.mcp.enabled`, or storing a new API key or OIDC session, fires
+  `onDidChangeMcpServerDefinitions`.
+- A token is only read at server start. If an OIDC access token expires
+  during a long session, restart the server (**MCP: List Servers** →
+  HUPI memory → Restart), or use an API key.
+- `hupi.mcp.enabled` (default on) hides the server.
+
+This API needs VS Code 1.101+, which is why `engines.vscode` is
+`^1.101.0`.
+
 ## Scope
 
 **In scope (v1)**:
@@ -143,6 +169,8 @@ depending on whether `hupi.teamId` is set — see `resolveBaseUrl` in
    URL, no `/v1` suffix), optionally `hupi.model` (a `providers.yaml`
    profile name — blank uses HUPI's default chat provider) and
    `hupi.teamId` (only for a Tier 3 shared-team deployment).
+   `hupi.mcp.enabled` (default on) controls whether HUPI's memory tools
+   are offered to VS Code's agent mode over MCP.
 
 ### OIDC/SSO sign-in instead of an API key
 
