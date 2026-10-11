@@ -86,12 +86,34 @@ answer. Each turn:
      `.ssh/`, `.aws/credentials`, `.netrc`, `.npmrc`, `.pypirc` and
      `.git-credentials`. Their contents would otherwise go to the model
      provider.
-3. It also offers the model the MCP tools from `vscode.lm.tools`
+3. In a trusted workspace (and with `hupi.agent.writeTools`, default on),
+   it also offers HUPI's tools that change things
+   (`src/agent/writeTools.ts`):
+   - `edit_file` replaces one exact occurrence of `old_text`. It refuses
+     a missing or ambiguous match and asks for more context.
+   - `create_file` never overwrites.
+   - `run_command` runs in a visible "HUPI agent" terminal through VS
+     Code's shell integration (`src/agent/terminalRunner.ts`). It returns
+     the real exit code and the output with escape sequences stripped,
+     and has a timeout and output cap. A timeout or Stop interrupts the
+     command with Ctrl+C.
+
+   These tools ask on the call's card **every time**, whatever
+   `hupi.agent.approval` says, and are never asked about twice. An edit
+   or new file opens VS Code's diff view of the exact change while it
+   asks, then closes it. A command shows its exact command line and
+   directory. An applied edit goes through a `WorkspaceEdit`, so it's in
+   the editor's undo history, and the file is saved. They follow the same
+   workspace, symlink and secret-file rules as the read tools. In Restricted
+   Mode (an untrusted workspace) they aren't offered at all. VS Code's own
+   `run_in_terminal` tool isn't used: it isn't reliably available outside
+   VS Code's own chat (in HUPI Code it reported "not contributed").
+4. It also offers the model the MCP tools from `vscode.lm.tools`
    (`src/agent/toolRegistry.ts`). HUPI memory's own MCP tools are left
    out, because HUPI chat already injects memory. VS Code's core and
    internal agent tools are left out too, until each is checked to work
    without a chat session.
-4. It runs the loop in `src/agent/agentLoop.ts`:
+5. It runs the loop in `src/agent/agentLoop.ts`:
    - Each request goes through `hupiClient.streamChatTurn`.
    - Each tool call runs through `vscode.lm.invokeTool` with no chat
      token (`src/agent/vscodeTools.ts`).
@@ -102,7 +124,7 @@ answer. Each turn:
      answer with tools off.
    - The whole turn is capped at 10 minutes, and New Chat or a new message
      cancels it.
-5. Each tool call shows as a card in the reply:
+6. Each tool call shows as a card in the reply:
    - the tool name, an argument preview and its status (running, done,
      failed, denied or stopped);
    - a collapsible result preview.
@@ -111,9 +133,9 @@ answer. Each turn:
    `deny` or `cancel`. A reply bubble is a sequence of text segments and
    cards, so markdown re-renders never wipe a card. Everything from a tool
    is set as plain text, never rendered as HTML or markdown.
-6. The **Stop** button replaces Send while any reply streams. It aborts
+7. The **Stop** button replaces Send while any reply streams. It aborts
    the turn (including a running tool) and is answered with `stopped`.
-7. A failed, stopped or cancelled turn is rolled back out of the
+8. A failed, stopped or cancelled turn is rolled back out of the
    conversation history in full.
 
 Approval:

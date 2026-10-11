@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { __resetVscodeMock, __setConfig, __setLmTools, invokeTool, LanguageModelTextPart, LanguageModelToolResult } from './test/vscode-mock';
+import { __resetVscodeMock, __setConfig, __setLmTools, __setShellBehavior, __setTrusted, __setWorkspaceFolders, executedCommands, invokeTool, LanguageModelTextPart, LanguageModelToolResult, Uri } from './test/vscode-mock';
+import { __resetTerminal } from './agent/terminalRunner';
+
+const READ_TOOLS = ['read_file', 'list_files', 'search_text', 'get_diagnostics', 'get_selection'];
+const HUPI_TOOLS = [...READ_TOOLS, 'edit_file', 'create_file', 'run_command'];
 
 vi.mock('./hupiClient', () => ({
   createClient: vi.fn(),
@@ -81,7 +85,7 @@ describe('HUPI agent in the sidebar', () => {
     const { posted, send } = makeProvider();
     await send('How many open bugs?');
 
-    expect(sent[0].tools).toEqual(['read_file', 'list_files', 'search_text', 'get_diagnostics', 'get_selection', 'mcp_github_search_issues']);
+    expect(sent[0].tools).toEqual([...HUPI_TOOLS, 'mcp_github_search_issues']);
     expect(invokeTool).toHaveBeenCalledWith('mcp_github_search_issues', { input: { q: 'bug' }, toolInvocationToken: undefined }, expect.anything());
     expect(sent[1].messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
     expect(posted.find((p) => p.type === 'toolCall')).toEqual({ type: 'toolCall', id: 'c1', name: 'mcp_github_search_issues', argsPreview: '{"q":"bug"}' });
@@ -138,12 +142,19 @@ describe('HUPI agent in the sidebar', () => {
     scriptTurns({ text: 'No MCP tools.' });
     const { send } = makeProvider();
     await send('Q');
-    expect(sent[0].tools).toEqual(['read_file', 'list_files', 'search_text', 'get_diagnostics', 'get_selection']);
+    expect(sent[0].tools).toEqual(HUPI_TOOLS);
 
-    __setConfig({ 'agent.enabled': true, 'agent.workspaceTools': false, 'fileContext.enabled': false });
+    __setConfig({ 'agent.enabled': true, 'agent.workspaceTools': false, 'agent.writeTools': false, 'fileContext.enabled': false });
     scriptTurns({ text: 'Only MCP tools.' });
     await send('Q2');
     expect(sent[1].tools).toEqual(['mcp_github_search_issues']);
+
+    // Restricted Mode: never the write/run tools, whatever the setting says.
+    __setTrusted(false);
+    __setConfig({ 'agent.enabled': true, 'fileContext.enabled': false });
+    scriptTurns({ text: 'Untrusted.' });
+    await send('Q3');
+    expect(sent[2].tools).toEqual([...READ_TOOLS, 'mcp_github_search_issues']);
   });
 });
 
@@ -211,6 +222,28 @@ describe('Stop and sidebar approval', () => {
     await turn;
     expect(invokeTool).not.toHaveBeenCalled();
     expect(posted.some((p) => p.type === 'done' || p.type === 'stopped' || p.type === 'error')).toBe(false);
+  });
+});
+
+describe('HUPI write tools in the sidebar', () => {
+  it('asks once, on the card, with the exact command, even in "all" mode', async () => {
+    __resetTerminal();
+    __setWorkspaceFolders([{ name: 'app', uri: Uri.file('/work/app') }]);
+    __setShellBehavior(() => ({ chunks: ['2 passed'], exitCode: 0 }));
+    __setConfig({ 'agent.enabled': true, 'agent.approval': 'all', 'fileContext.enabled': false });
+    scriptTurns({ text: '', calls: [{ id: 'r1', name: 'run_command', args: '{"command":"npm test"}' }] }, { text: 'Tests pass.' });
+    const { posted, send, message } = makeProvider();
+    const turn = send('Run the tests');
+    await vi.waitFor(() => expect(posted.some((p) => p.type === 'approvalRequest')).toBe(true));
+    await new Promise((r) => setTimeout(r, 20));
+    const requests = posted.filter((p) => p.type === 'approvalRequest') as { detail?: string }[];
+    expect(requests).toHaveLength(1);
+    expect(requests[0].detail).toBe('Run in the workspace root:\nnpm test');
+    expect(executedCommands).toEqual([]);
+    await message({ type: 'approve', id: 'r1' });
+    await turn;
+    expect(executedCommands).toHaveLength(1);
+    expect(sent[1].messages[2]).toEqual({ role: 'tool', tool_call_id: 'r1', content: 'exit code 0\n2 passed' });
   });
 });
 

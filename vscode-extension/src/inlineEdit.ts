@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { createClient, streamChat, type ChatMessage } from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
-import { createVirtualDiffProvider } from './diffContentProvider';
+import { closeDiffTab, createVirtualDiffProvider } from './diffContentProvider';
 import { stripCodeFences } from './textUtils';
 
 const DIFF_SCHEME = 'hupi-inline-diff';
@@ -157,17 +157,3 @@ function extFor(languageId: string): string {
   return known[languageId] ?? '.txt';
 }
 
-async function closeDiffTab(beforeUri: vscode.Uri, afterUri: vscode.Uri): Promise<void> {
-  for (const group of vscode.window.tabGroups.all) {
-    for (const tab of group.tabs) {
-      const input = tab.input;
-      if (
-        input instanceof vscode.TabInputTextDiff &&
-        (input.original.toString() === beforeUri.toString() ||
-          input.modified.toString() === afterUri.toString())
-      ) {
-        await vscode.window.tabGroups.close(tab);
-      }
-    }
-  }
-}

@@ -9,6 +9,13 @@
     `hupi.agent.workspaceTools`). They stay inside the open workspace
     (no `..`, no symlinks pointing out) and refuse files that commonly
     hold secrets (`.env`, private keys, credentials).
+  - HUPI's tools that change things (`edit_file`, `create_file`,
+    `run_command`; `hupi.agent.writeTools`).
+    - They ask you on the tool's card every time.
+    - An edit or new file opens VS Code's diff view while it asks.
+    - A command shows its exact command line, then runs in a visible
+      "HUPI agent" terminal and returns its exit code and output.
+    - They're only offered in a trusted workspace.
   - Tools from your MCP servers.
   - HUPI starts the servers configured in VS Code's `mcp.json` and offers
     their tools to the model.

@@ -74,6 +74,9 @@ export function __triggerProgressCancellation(): void {
 }
 
 export const window = {
+  createTerminal: (options?: unknown) => createTerminal(options),
+  onDidEndTerminalShellExecution: (l: (e: { execution: unknown; exitCode: number | undefined }) => void) => onDidEndTerminalShellExecution(l),
+  onDidChangeTerminalShellIntegration: () => onDidChangeTerminalShellIntegration(),
   get activeTextEditor() {
     return activeTextEditorValue;
   },
@@ -215,8 +218,106 @@ export const workspace = {
   get textDocuments() {
     return textDocumentsValue;
   },
-  fs: { readFile },
+  fs: { readFile, stat: (uri: UriLike) => statFile(uri), writeFile: (uri: UriLike, bytes: Uint8Array) => writeFile(uri, bytes) },
+  openTextDocument,
+  get isTrusted() {
+    return isTrustedValue;
+  },
 };
+
+// ---- write side of the fake filesystem, documents, workspace trust ------
+
+async function statFile(uri: UriLike): Promise<{ type: number; size: number }> {
+  const bytes = fakeFiles.get(uri.toString());
+  if (!bytes) {
+    throw new Error(`ENOENT: fake file not found, ${uri.toString()}`);
+  }
+  return { type: 1, size: bytes.byteLength };
+}
+
+export const writeFile = vi.fn(async (uri: UriLike, bytes: Uint8Array) => {
+  fakeFiles.set(uri.toString(), bytes);
+});
+
+/** Documents opened via openTextDocument, by URI string; save() writes the
+ *  current text back to the fake filesystem. */
+export const openedDocuments = new Map<string, { uri: UriLike; text: string; save: ReturnType<typeof vi.fn> }>();
+async function openTextDocument(uri: UriLike) {
+  const key = uri.toString();
+  const bytes = fakeFiles.get(key);
+  if (!bytes) {
+    throw new Error(`ENOENT: fake file not found, ${key}`);
+  }
+  const state = { uri, text: new TextDecoder().decode(bytes), save: vi.fn() };
+  state.save.mockImplementation(async () => {
+    fakeFiles.set(key, new TextEncoder().encode(state.text));
+    return true;
+  });
+  openedDocuments.set(key, state);
+  return {
+    uri,
+    getText: () => state.text,
+    positionAt: (offset: number) => new Position(0, offset),
+    save: state.save,
+  };
+}
+
+let isTrustedValue = true;
+export function __setTrusted(trusted: boolean): void {
+  isTrustedValue = trusted;
+}
+
+// ---- terminals with shell integration -----------------------------------
+
+/** What the fake shell does with a command: output chunks and an exit code
+ *  (or "hang" to never finish). Tests set it with __setShellBehavior. */
+type ShellBehavior = (commandLine: string) => { chunks: string[]; exitCode?: number } | 'hang';
+let shellBehavior: ShellBehavior = () => ({ chunks: [], exitCode: 0 });
+export function __setShellBehavior(b: ShellBehavior): void {
+  shellBehavior = b;
+}
+export const executedCommands: string[] = [];
+export const sentText: string[] = [];
+let shellIntegrationAvailable = true;
+export function __setShellIntegrationAvailable(v: boolean): void {
+  shellIntegrationAvailable = v;
+}
+const endShellListeners = new Set<(e: { execution: unknown; exitCode: number | undefined }) => void>();
+export const createTerminal = vi.fn<(options?: unknown) => unknown>(() => {
+  const terminal = {
+    exitStatus: undefined as unknown,
+    show: vi.fn(),
+    sendText: (text: string) => sentText.push(text),
+    shellIntegration: undefined as unknown,
+  };
+  if (shellIntegrationAvailable) {
+    terminal.shellIntegration = {
+      executeCommand(commandLine: string) {
+        executedCommands.push(commandLine);
+        const behavior = shellBehavior(commandLine);
+        const execution = {
+          async *read() {
+            if (behavior !== 'hang') {
+              yield* behavior.chunks;
+            }
+          },
+        };
+        if (behavior !== 'hang') {
+          setTimeout(() => endShellListeners.forEach((l) => l({ execution, exitCode: behavior.exitCode })), 5);
+        }
+        return execution;
+      },
+    };
+  }
+  return terminal;
+});
+function onDidEndTerminalShellExecution(l: (e: { execution: unknown; exitCode: number | undefined }) => void) {
+  endShellListeners.add(l);
+  return new Disposable(() => endShellListeners.delete(l));
+}
+function onDidChangeTerminalShellIntegration() {
+  return new Disposable();
+}
 
 // ---- env.* ---------------------------------------------------------------
 
@@ -469,6 +570,14 @@ export function __resetVscodeMock(): void {
   tabGroupsAllValue = [];
   textDocumentsValue = [];
   fakeFiles = new Map();
+  openedDocuments.clear();
+  writeFile.mockClear();
+  isTrustedValue = true;
+  shellBehavior = () => ({ chunks: [], exitCode: 0 });
+  shellIntegrationAvailable = true;
+  executedCommands.length = 0;
+  sentText.length = 0;
+  createTerminal.mockClear();
   registeredCommands.clear();
 
   showInputBox.mockReset().mockResolvedValue(undefined);

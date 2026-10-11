@@ -65,6 +65,9 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
   - HUPI's own read-only workspace tools: read, list and search files,
     problems, and your selection. They stay inside the workspace and never
     read `.env` files, keys or credentials.
+  - HUPI's tools that change things: edit a file, create a file, run a
+    command. They ask you every time, showing the diff or the exact
+    command, and are only offered in a trusted workspace.
   - Tools from your MCP servers (configured in VS Code's `mcp.json`).
   - HUPI starts the servers, offers their tools, runs what the model asks
     for and sends the results back.
@@ -75,6 +78,7 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
     tool output.
   - Related settings: `hupi.agent.maxSteps`,
     `hupi.agent.maxToolResultChars`, `hupi.agent.workspaceTools`,
+    `hupi.agent.writeTools`,
     `hupi.agent.vscodeTools`, and
     `hupi.agent.approval` (`all` asks before every tool).
 

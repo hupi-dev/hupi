@@ -12,11 +12,21 @@ import * as vscode from 'vscode';
 // Files that commonly hold secrets are refused too: their contents would
 // be sent to the model provider.
 
+/** Lets a tool ask the user before acting (shown on the call's card in
+ *  the sidebar). Resolves false if the user denies, stops or starts a new
+ *  chat. */
+export interface ToolContext {
+  ask(detail: string): Promise<boolean>;
+}
+
 export interface HupiTool {
   name: string;
   description: string;
   parameters: object;
-  run(args: Record<string, unknown>, signal: AbortSignal): Promise<string>;
+  /** True for a tool that changes something and asks the user itself
+   *  (via ToolContext.ask), every time, whatever hupi.agent.approval says. */
+  selfApproving?: boolean;
+  run(args: Record<string, unknown>, signal: AbortSignal, ctx?: ToolContext): Promise<string>;
 }
 
 const EXCLUDE = '**/{node_modules,.git,dist,out,build,.venv,__pycache__}/**';
@@ -110,15 +120,15 @@ export function looksSecret(relative: string): boolean {
   return parts.includes('.ssh') || (name === 'credentials' && parts.includes('.aws'));
 }
 
-function folders(): FolderLike[] {
+export function folders(): FolderLike[] {
   return (vscode.workspace.workspaceFolders ?? []).map((f) => ({ name: f.name, uri: f.uri }));
 }
 
-function relativePath(uri: vscode.Uri): string {
+export function relativePath(uri: vscode.Uri): string {
   return vscode.workspace.asRelativePath(uri, (vscode.workspace.workspaceFolders?.length ?? 0) > 1);
 }
 
-async function readText(r: ResolvedPath): Promise<string> {
+export async function readText(r: ResolvedPath): Promise<string> {
   if (looksSecret(r.relative)) {
     throw new Error(`HUPI's agent doesn't read files that commonly hold secrets (${r.relative})`);
   }
@@ -135,12 +145,12 @@ async function readText(r: ResolvedPath): Promise<string> {
   return new TextDecoder().decode(bytes);
 }
 
-function str(args: Record<string, unknown>, key: string): string | undefined {
+export function str(args: Record<string, unknown>, key: string): string | undefined {
   const v = args[key];
   return typeof v === 'string' && v.trim() !== '' ? v : undefined;
 }
 
-function num(args: Record<string, unknown>, key: string, def: number, max: number): number {
+export function num(args: Record<string, unknown>, key: string, def: number, max: number): number {
   const v = args[key];
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), max) : def;
 }

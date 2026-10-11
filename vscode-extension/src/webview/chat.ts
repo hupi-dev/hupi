@@ -39,7 +39,7 @@ type ToWebview =
   | { type: 'citations'; items: Citation[] }
   | { type: 'attachmentWarnings'; warnings: string[] }
   | { type: 'toolCall'; id: string; name: string; argsPreview: string }
-  | { type: 'approvalRequest'; id: string; name: string; argsPreview: string }
+  | { type: 'approvalRequest'; id: string; name: string; argsPreview: string; detail?: string }
   | { type: 'toolResult'; id: string; ok: boolean; summary: string }
   | { type: 'done' }
   | { type: 'stopped' }
@@ -441,6 +441,14 @@ window.addEventListener('message', (event: MessageEvent<ToWebview>) => {
     case 'approvalRequest': {
       const card = toolCard(message.id, message.name, message.argsPreview);
       setCardStatus(card, 'waiting', 'waiting for your approval');
+      // What exactly will happen (the edit, or the exact command line), as plain text.
+      card.querySelector('.toolDetail')?.remove();
+      if (message.detail) {
+        const detail = document.createElement('div');
+        detail.className = 'toolDetail';
+        detail.textContent = message.detail;
+        card.querySelector('.toolActions')?.before(detail);
+      }
       const actions = card.querySelector('.toolActions') as HTMLDivElement;
       actions.replaceChildren();
       for (const [label, type] of [

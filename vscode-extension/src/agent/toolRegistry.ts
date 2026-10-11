@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { AgentToolDef } from '../hupiClient';
-import type { HupiTool } from './workspaceTools';
+import type { HupiTool, ToolContext } from './workspaceTools';
 
 // Which of VS Code's registered tools (vscode.lm.tools) the HUPI agent
 // offers the model. Verified in a HUPI Code build (Phase 0 of the agent
@@ -38,9 +38,12 @@ export interface RegisteredTool {
   /** The name sent to the model (OpenAI's pattern, unique). */
   wireName: string;
   def: AgentToolDef;
+  /** The tool asks the user itself (HupiTool.selfApproving), so the
+   *  loop's general approval step is skipped for it. */
+  selfApproving?: boolean;
   /** Runs the tool with the model's JSON arguments, returning its result
    *  as text. Throws on failure; the loop reports errors to the model. */
-  run: (args: string, signal: AbortSignal) => Promise<string>;
+  run: (args: string, signal: AbortSignal, ctx?: ToolContext) => Promise<string>;
 }
 
 /** Sanitizes a tool name to OpenAI's pattern and makes it unique among
@@ -86,7 +89,8 @@ export function buildRegistry(
     out.set(name, {
       wireName: name,
       def: { type: 'function', function: { name, description: tool.description, parameters: tool.parameters } },
-      run: async (args, signal) => {
+      selfApproving: tool.selfApproving,
+      run: async (args, signal, ctx) => {
         let parsed: unknown;
         try {
           parsed = args.trim() === '' ? {} : JSON.parse(args);
@@ -96,7 +100,7 @@ export function buildRegistry(
         if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
           throw new Error('the tool arguments must be a JSON object');
         }
-        return tool.run(parsed as Record<string, unknown>, signal);
+        return tool.run(parsed as Record<string, unknown>, signal, ctx);
       },
     });
   }
