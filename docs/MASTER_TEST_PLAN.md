@@ -136,6 +136,26 @@ errors as JSON-RPC errors, cancel while stdin is open) and
 their tests skipped** — `go test` counts a skip as a pass, and the scope-
 isolation test is the one that matters most here.
 
+### "The HUPI agent edits code and runs commands" ([AGENT.md](AGENT.md))
+`internal/gateway`: `TestAgentTurn_NonStream_RetrievesOnceCapturesOnce`
+and `TestAgentTurn_Stream_RelaysToolCallDeltasAndCapturesFinal` (a tool
+loop runs retrieval once and stores exactly one episode tagged
+`agent`/`tool:<name>`, never the tool arguments or output),
+`TestAgentTurn_CancelledContinuationStoresNothing`,
+`TestAgentTurn_TruncatedPlainReplyStillStored`,
+`TestAgentTurn_PlainChatUnchanged`, `TestAgentTurn_Validation`;
+`internal/provider`: `TestOpenAICompat_ToolCalls_NonStream`/`_Stream`,
+`TestAnthropic_ToolRequestTranslation`, `TestAnthropic_ToolUseStream` and
+`TestSupportsTools` (the `TestLiveToolLoop*` tests need real providers and
+skip here). The extension's side — the loop, the tools' path and
+secret-file rules, approvals — is `vscode-extension`'s vitest suite. Neither
+runs a real editor, so the agent also has a **manual, not CI-gated**
+end-to-end suite on a real Windows 11 desktop, in stock VS Code and in HUPI
+Code: [vscode-extension/e2e/windows/](../vscode-extension/e2e/windows/README.md)
+(edit approved and denied, PowerShell commands and Stop, `.env` refused,
+MCP tools with and without VS Code's confirmation, and the episode count in
+Postgres). Run it before an extension release that touches the agent.
+
 ### Tier 3 / shared-team specifics
 `TestEntityRelationships_AllowsValidDateOrderingsAndUnknownEnds`,
 `TestEntityRelationships_RejectsValidUntilBeforeValidFrom`, the demo

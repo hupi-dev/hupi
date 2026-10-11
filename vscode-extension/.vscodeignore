@@ -10,3 +10,4 @@ tsconfig.json
 vitest.config.ts
 .gitignore
 .vscodeignore
+e2e/**
