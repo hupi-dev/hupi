@@ -15,6 +15,7 @@ body:
       label: Component
       options:
         - Gateway (cmd/hupi, /v1/chat/completions)
+        - MCP server (/mcp, hupi-mcp)
         - Consolidation (cmd/hupi-consolidate)
         - Admin CLI/UI (hupi-admin, hupi-admin-ui)
         - Other CLI tool (hupi-trace, hupi-audit, hupi-export/import, hupi-rotate-key, hupi-reembed, hupi-selfcheck, hupi-correct)

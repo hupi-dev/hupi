@@ -64,6 +64,7 @@ cmd/                  Go binaries — the gateway, cron jobs, and CLIs
   hupi-import/           CLI: load a snapshot back in
   hupi-rotate-key/       CLI: online, resumable per-scope key rotation
   hupi-reembed/          CLI: online, resumable per-scope re-embedding after an embedding model change
+  hupi-mcp/              MCP stdio bridge: lets Claude Desktop and other stdio MCP clients use a gateway's /mcp (holds only your API key)
   hupi-trace/            CLI: inspect one episode's retrieval trace
   hupi-correct/          CLI: write a corrected, superseding summary
   hupi-bench/            CLI: LoCoMo/LongMemEval benchmark harness — see bench/ and docs/BENCHMARKS.md

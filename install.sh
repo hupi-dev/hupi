@@ -567,7 +567,7 @@ build_admin_ui_frontend() {
 build_binaries() {
   log "building binaries into ./bin"
   mkdir -p bin
-  local targets=(hupi hupi-consolidate hupi-selfcheck hupi-trace hupi-correct hupi-audit hupi-export hupi-import hupi-rotate-key)
+  local targets=(hupi hupi-consolidate hupi-selfcheck hupi-trace hupi-correct hupi-audit hupi-export hupi-import hupi-rotate-key hupi-mcp)
   # hupi-admin is needed by ADMIN_UI too, not just tier 3 directly —
   # setup_admin_ui_operator provisions the first operator credential
   # through it (docs/GAP_CLOSURE_PLAN.md §4.3).

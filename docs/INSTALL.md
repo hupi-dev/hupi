@@ -147,6 +147,7 @@ go build -o bin/hupi-rotate-key  ./cmd/hupi-rotate-key
 go build -o bin/hupi-admin       ./cmd/hupi-admin
 go build -o bin/hupi-admin-ui    ./cmd/hupi-admin-ui  # optional — browser alternative to hupi-admin, see ADMIN_UI.md
 go build -o bin/hupi-dashboard   ./cmd/hupi-dashboard # optional — read-only analytics over your own memory, see DASHBOARD.md
+go build -o bin/hupi-mcp         ./cmd/hupi-mcp       # optional — stdio bridge for MCP clients like Claude Desktop, see MCP.md
 ```
 
 All seven share one `go.mod` — a single `go build ./...` from the repo

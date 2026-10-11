@@ -132,6 +132,57 @@ The Enterprise build also mounts `/v1/team/{team_id}/mcp`. It works like
 membership check the team chat route does. In the OSS build that route
 doesn't exist (404).
 
+### Claude Desktop and other stdio-only clients (`hupi-mcp`)
+
+Some MCP clients only launch a local process and talk to it over
+stdin/stdout. `hupi-mcp` is a small bridge for them. It forwards each
+message to the gateway's `/mcp` over HTTP and writes the replies back.
+It holds nothing but the gateway URL and your API key: no database
+access, no encryption keys, no LLM keys.
+
+Build it for the machine the client runs on, e.g. for an Apple Silicon
+Mac:
+
+```bash
+GOOS=darwin GOARCH=arm64 go build -o hupi-mcp ./cmd/hupi-mcp
+```
+
+Then add it to Claude Desktop's `claude_desktop_config.json`
+(Settings → Developer → Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "hupi": {
+      "command": "/usr/local/bin/hupi-mcp",
+      "env": {
+        "HUPI_BASE_URL": "https://hupi.example.com",
+        "HUPI_API_KEY": "hupi_sk_..."
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop afterwards. Notes:
+- The config file stores the key in plain text, so keep it readable
+  only by you.
+- Leave `HUPI_API_KEY` out on a Tier 1/2 gateway.
+- Set `HUPI_TEAM_ID` to use a team workspace instead of your private
+  memory.
+- `HUPI_MCP_TIMEOUT` (default `2m`) bounds each request.
+
+Gateway failures come back to the client as JSON-RPC errors that say
+what to check: 401 (the API key), 403 (team membership, or the
+Origin/Host guard), 404 (the base URL, the team id, or
+`HUPI_ENABLE_MCP`), or an unreachable gateway. The bridge logs to
+stderr, which Claude Desktop keeps in its MCP log files. It warns if
+it's about to send an API key over plain `http` to a host that isn't
+localhost.
+
+Any other stdio client is configured the same way: command
+`hupi-mcp`, with the same environment variables.
+
 ### Checking it works
 
 In Claude Code, `/mcp` should list `hupi` as connected with six tools
@@ -141,7 +192,8 @@ the database migration?"). The model should call `search_memory` first.
 
 Verified with Claude Code 2.1.161 against a Tier 1/2 gateway
 (2026-10-11): `search_memory` answering from memory, and a `remember`
-followed by a `search_memory` that found it. Cursor uses the same streamable-HTTP transport but hasn't
+followed by a `search_memory` that found it, over HTTP and through
+`hupi-mcp` (stdio). Cursor uses the same streamable-HTTP transport but hasn't
 been verified yet.
 
 ## Configuration
@@ -202,3 +254,9 @@ The code is in `internal/mcpserver`, built on the official Go SDK
 
 The tools call `store.Store`'s `Search`, `LookupEntity`, `ListEntities`,
 `RecentSummaries` and `Capture`. `cmd/hupi/main.go`'s `mountMCP` mounts the routes.
+
+`cmd/hupi-mcp` is the stdio bridge. It's a byte-level relay that
+compacts each message onto one line, unpacks SSE responses, and
+forwards the `MCP-Protocol-Version` that `initialize` negotiated. It
+uses only the standard library, which its `TestDependencyGuard`
+enforces.
