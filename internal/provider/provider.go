@@ -8,6 +8,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 )
 
@@ -17,6 +18,12 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	// RoleTool carries a tool's result back to the model, answering one
+	// of the previous assistant message's ToolCalls (see tools.go). Not
+	// accepted by Valid yet: the gateway can't relay tool_call_id until
+	// its own wire types carry it, so a client's tool message still gets
+	// a clear 400 there rather than a confusing upstream error.
+	RoleTool Role = "tool"
 )
 
 // Valid reports whether r is one of the roles above — used by
@@ -37,6 +44,28 @@ func (r Role) Valid() bool {
 type Message struct {
 	Role    Role   `json:"role"`
 	Content string `json:"content"`
+	// ToolCalls is set on an assistant message that asks for tool calls;
+	// ToolCallID on a RoleTool message answering one of them.
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// MarshalJSON writes `"content": null` for an assistant message that only
+// carries tool calls, as OpenAI's API expects; otherwise it's the plain
+// struct encoding. (Decoding needs nothing special: a null content
+// decodes as "".)
+func (m Message) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		Role       Role       `json:"role"`
+		Content    *string    `json:"content"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+	}
+	w := wire{Role: m.Role, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
+	if m.Content != "" || len(m.ToolCalls) == 0 {
+		w.Content = &m.Content
+	}
+	return json.Marshal(w)
 }
 
 type ChatRequest struct {
@@ -44,6 +73,12 @@ type ChatRequest struct {
 	Messages    []Message `json:"messages"`
 	Temperature *float64  `json:"temperature,omitempty"`
 	MaxTokens   *int      `json:"max_tokens,omitempty"`
+	// Tools, ToolChoice and ParallelToolCalls pass tool calling through in
+	// OpenAI's shape (tools.go). ToolChoice is "auto", "none", "required"
+	// or {"type":"function","function":{"name":...}}, left unparsed here.
+	Tools             []ToolDef       `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
 }
 
 type Usage struct {
@@ -56,6 +91,10 @@ type ChatResponse struct {
 	Model   string  `json:"model"`
 	Message Message `json:"message"`
 	Usage   Usage   `json:"usage"`
+	// FinishReason is FinishStop, FinishToolCalls (Message.ToolCalls is
+	// set), FinishLength, or whatever else the vendor reported; "" if it
+	// reported nothing.
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // StreamChunk is one delta of a streamed chat completion. The gateway both
@@ -65,9 +104,13 @@ type ChatResponse struct {
 // with the episode's `truncated` field set, not discarded.
 type StreamChunk struct {
 	Delta string
-	Done  bool
-	Usage *Usage // populated on the final chunk, if the provider reports it
-	Err   error
+	// ToolCalls carries streamed tool-call fragments (see ToolCallDelta).
+	ToolCalls []ToolCallDelta
+	// FinishReason is set on the chunk where the vendor reported it.
+	FinishReason string
+	Done         bool
+	Usage        *Usage // populated on the final chunk, if the provider reports it
+	Err          error
 }
 
 type EmbedRequest struct {

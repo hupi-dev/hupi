@@ -27,6 +27,7 @@ type Anthropic struct {
 	apiKey      string
 	apiVersion  string
 	client      *http.Client
+	noTools     bool
 }
 
 type AnthropicConfig struct {
@@ -43,6 +44,9 @@ type AnthropicConfig struct {
 	// vision-capable, so this exists mainly for profiles pointed at a
 	// future non-vision model.
 	VisionModel string
+	// NoTools marks a profile that shouldn't be offered tools
+	// (providers.yaml `supports_tools: false`), see SupportsTools.
+	NoTools bool
 }
 
 func NewAnthropic(cfg AnthropicConfig) *Anthropic {
@@ -59,8 +63,12 @@ func NewAnthropic(cfg AnthropicConfig) *Anthropic {
 		apiKey:      cfg.APIKey,
 		apiVersion:  cfg.APIVersion,
 		client:      client,
+		noTools:     cfg.NoTools,
 	}
 }
+
+// SupportsTools implements ToolCapable.
+func (p *Anthropic) SupportsTools() bool { return !p.noTools }
 
 func (p *Anthropic) Name() string   { return p.name }
 func (p *Anthropic) Vendor() string { return p.vendor }
@@ -101,20 +109,52 @@ type anthropicRequest struct {
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature *float64           `json:"temperature,omitempty"`
 	Stream      bool               `json:"stream"`
+	Tools       []anthropicTool    `json:"tools,omitempty"`
+	ToolChoice  *anthropicToolPick `json:"tool_choice,omitempty"`
 }
 
+// anthropicMessage's Content is a plain string for ordinary text turns,
+// or a []anthropicBlock once tool calls or tool results are involved.
 type anthropicMessage struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	Role    Role `json:"role"`
+	Content any  `json:"content"`
+}
+
+// anthropicBlock is one request content block: text, tool_use (the
+// assistant's call) or tool_result (the tool's answer, in a user turn).
+type anthropicBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+}
+
+type anthropicTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+type anthropicToolPick struct {
+	Type                   string `json:"type"` // auto | any | tool | none
+	Name                   string `json:"name,omitempty"`
+	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type anthropicResponse struct {
 	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type  string          `json:"type"`
+		Text  string          `json:"text"`
+		ID    string          `json:"id"`
+		Name  string          `json:"name"`
+		Input json.RawMessage `json:"input"`
 	} `json:"content"`
-	Model string `json:"model"`
-	Usage struct {
+	Model      string `json:"model"`
+	StopReason string `json:"stop_reason"`
+	Usage      struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`
@@ -122,21 +162,122 @@ type anthropicResponse struct {
 
 func (p *Anthropic) toAnthropicRequest(req ChatRequest, stream bool) anthropicRequest {
 	system, rest := splitSystem(req.Messages)
-	msgs := make([]anthropicMessage, len(rest))
-	for i, m := range rest {
-		msgs[i] = anthropicMessage{Role: m.Role, Content: m.Content}
-	}
 	maxTokens := 4096
 	if req.MaxTokens != nil {
 		maxTokens = *req.MaxTokens
 	}
-	return anthropicRequest{
+	out := anthropicRequest{
 		Model:       p.resolveModel(req.Model),
 		System:      system,
-		Messages:    msgs,
+		Messages:    toAnthropicMessages(rest),
 		MaxTokens:   maxTokens,
 		Temperature: req.Temperature,
 		Stream:      stream,
+	}
+	for _, t := range req.Tools {
+		schema := t.Function.Parameters
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object"}`)
+		}
+		out.Tools = append(out.Tools, anthropicTool{Name: t.Function.Name, Description: t.Function.Description, InputSchema: schema})
+	}
+	if len(out.Tools) > 0 {
+		out.ToolChoice = anthropicToolChoice(req.ToolChoice, req.ParallelToolCalls)
+	}
+	return out
+}
+
+// toAnthropicMessages maps OpenAI-shaped messages to Anthropic's: an
+// assistant message with tool calls becomes text + tool_use blocks, and
+// each RoleTool message becomes a tool_result block in a user turn, with
+// consecutive results merged into one turn (Anthropic requires roles to
+// alternate).
+func toAnthropicMessages(msgs []Message) []anthropicMessage {
+	var out []anthropicMessage
+	for _, m := range msgs {
+		switch {
+		case m.Role == RoleTool:
+			block := anthropicBlock{Type: "tool_result", ToolUseID: m.ToolCallID, Content: m.Content}
+			if n := len(out); n > 0 && out[n-1].Role == RoleUser {
+				if blocks, ok := out[n-1].Content.([]anthropicBlock); ok && len(blocks) > 0 && blocks[0].Type == "tool_result" {
+					out[n-1].Content = append(blocks, block)
+					continue
+				}
+			}
+			out = append(out, anthropicMessage{Role: RoleUser, Content: []anthropicBlock{block}})
+		case m.Role == RoleAssistant && len(m.ToolCalls) > 0:
+			var blocks []anthropicBlock
+			if m.Content != "" {
+				blocks = append(blocks, anthropicBlock{Type: "text", Text: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				blocks = append(blocks, anthropicBlock{Type: "tool_use", ID: tc.ID, Name: tc.Function.Name, Input: toolInput(tc.Function.Arguments)})
+			}
+			out = append(out, anthropicMessage{Role: RoleAssistant, Content: blocks})
+		default:
+			out = append(out, anthropicMessage{Role: m.Role, Content: m.Content})
+		}
+	}
+	return out
+}
+
+// toolInput turns OpenAI's JSON-string arguments into Anthropic's input
+// object. Arguments that aren't a JSON object (empty, or malformed by the
+// model) are passed as {} or wrapped, so one bad call can't make the
+// whole request invalid.
+func toolInput(args string) json.RawMessage {
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" {
+		return json.RawMessage(`{}`)
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(trimmed), &obj) == nil {
+		return json.RawMessage(trimmed)
+	}
+	wrapped, _ := json.Marshal(map[string]string{"raw_arguments": args})
+	return wrapped
+}
+
+// anthropicToolChoice maps OpenAI's tool_choice ("auto" | "none" |
+// "required" | {"type":"function","function":{"name":...}}) and
+// parallel_tool_calls to Anthropic's tool_choice.
+func anthropicToolChoice(choice json.RawMessage, parallel *bool) *anthropicToolPick {
+	pick := &anthropicToolPick{Type: "auto"}
+	var s string
+	var named struct {
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	switch {
+	case len(choice) == 0:
+	case json.Unmarshal(choice, &s) == nil:
+		switch s {
+		case "none":
+			pick.Type = "none"
+		case "required":
+			pick.Type = "any"
+		}
+	case json.Unmarshal(choice, &named) == nil && named.Function.Name != "":
+		pick.Type, pick.Name = "tool", named.Function.Name
+	}
+	if parallel != nil && !*parallel && pick.Type != "none" {
+		pick.DisableParallelToolUse = true
+	}
+	return pick
+}
+
+// openAIFinishReason maps Anthropic's stop_reason to OpenAI's vocabulary.
+func openAIFinishReason(stop string) string {
+	switch stop {
+	case "tool_use":
+		return FinishToolCalls
+	case "max_tokens":
+		return FinishLength
+	case "end_turn", "stop_sequence":
+		return FinishStop
+	default:
+		return stop
 	}
 }
 
@@ -253,19 +394,28 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 		return ChatResponse{}, fmt.Errorf("provider %s: decode response: %w", p.name, err)
 	}
 	var text strings.Builder
+	var calls []ToolCall
 	for _, block := range raw.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			text.WriteString(block.Text)
+		case "tool_use":
+			args := string(block.Input)
+			if args == "" {
+				args = "{}"
+			}
+			calls = append(calls, ToolCall{ID: block.ID, Type: "function", Function: ToolCallFunction{Name: block.Name, Arguments: args}})
 		}
 	}
 	return ChatResponse{
 		Model:   raw.Model,
-		Message: Message{Role: RoleAssistant, Content: text.String()},
+		Message: Message{Role: RoleAssistant, Content: text.String(), ToolCalls: calls},
 		Usage: Usage{
 			PromptTokens:     raw.Usage.InputTokens,
 			CompletionTokens: raw.Usage.OutputTokens,
 			TotalTokens:      raw.Usage.InputTokens + raw.Usage.OutputTokens,
 		},
+		FinishReason: openAIFinishReason(raw.StopReason),
 	}, nil
 }
 
@@ -306,6 +456,9 @@ func (p *Anthropic) StreamChatCompletion(ctx context.Context, req ChatRequest) (
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		var event string
+		// Anthropic numbers content blocks (text and tool_use mixed);
+		// OpenAI numbers tool calls only. toolIndex maps one to the other.
+		toolIndex := map[int]int{}
 		for scanner.Scan() {
 			line := scanner.Text()
 			switch {
@@ -314,26 +467,73 @@ func (p *Anthropic) StreamChatCompletion(ctx context.Context, req ChatRequest) (
 			case strings.HasPrefix(line, "data:"):
 				payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 				switch event {
+				case "content_block_start":
+					var start struct {
+						Index        int `json:"index"`
+						ContentBlock struct {
+							Type string `json:"type"`
+							ID   string `json:"id"`
+							Name string `json:"name"`
+						} `json:"content_block"`
+					}
+					if err := json.Unmarshal([]byte(payload), &start); err != nil {
+						send(StreamChunk{Err: fmt.Errorf("provider %s: decode block start: %w", p.name, err)})
+						return
+					}
+					if start.ContentBlock.Type == "tool_use" {
+						i := len(toolIndex)
+						toolIndex[start.Index] = i
+						if !send(StreamChunk{ToolCalls: []ToolCallDelta{{Index: i, ID: start.ContentBlock.ID, Name: start.ContentBlock.Name}}}) {
+							return
+						}
+					}
 				case "content_block_delta":
 					var delta struct {
+						Index int `json:"index"`
 						Delta struct {
-							Text string `json:"text"`
+							Type        string `json:"type"`
+							Text        string `json:"text"`
+							PartialJSON string `json:"partial_json"`
 						} `json:"delta"`
 					}
 					if err := json.Unmarshal([]byte(payload), &delta); err != nil {
 						send(StreamChunk{Err: fmt.Errorf("provider %s: decode delta: %w", p.name, err)})
 						return
 					}
-					if !send(StreamChunk{Delta: delta.Delta.Text}) {
+					var sc StreamChunk
+					switch delta.Delta.Type {
+					case "input_json_delta":
+						i, ok := toolIndex[delta.Index]
+						if !ok || delta.Delta.PartialJSON == "" {
+							continue
+						}
+						sc.ToolCalls = []ToolCallDelta{{Index: i, Arguments: delta.Delta.PartialJSON}}
+					case "text_delta", "":
+						if delta.Delta.Text == "" {
+							continue
+						}
+						sc.Delta = delta.Delta.Text
+					default:
+						continue // thinking/signature deltas etc. carry no answer text
+					}
+					if !send(sc) {
 						return
 					}
 				case "message_delta":
 					var md struct {
+						Delta struct {
+							StopReason string `json:"stop_reason"`
+						} `json:"delta"`
 						Usage struct {
 							OutputTokens int `json:"output_tokens"`
 						} `json:"usage"`
 					}
 					_ = json.Unmarshal([]byte(payload), &md)
+					if md.Delta.StopReason != "" {
+						if !send(StreamChunk{FinishReason: openAIFinishReason(md.Delta.StopReason)}) {
+							return
+						}
+					}
 				case "message_stop":
 					send(StreamChunk{Done: true})
 					return

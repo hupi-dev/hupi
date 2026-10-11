@@ -126,6 +126,9 @@ type rawProviderProfile struct {
 	Model       string `yaml:"model"`
 	APIVersion  string `yaml:"api_version"`
 	VisionModel string `yaml:"vision_model"` // optional, defaults to this profile's own model
+	// SupportsTools is optional and defaults to true; set false for a
+	// model without tool calling so tool requests get a clear error.
+	SupportsTools *bool `yaml:"supports_tools"`
 }
 
 type rawConfig struct {
@@ -168,6 +171,7 @@ func loadRegistry(path string) (*provider.Registry, error) {
 			Model:       p.Model,
 			APIVersion:  p.APIVersion,
 			VisionModel: p.VisionModel,
+			NoTools:     p.SupportsTools != nil && !*p.SupportsTools,
 		}
 	}
 	return provider.NewRegistry(cfg)
