@@ -233,3 +233,108 @@ export async function chat(client: OpenAI, opts: ChatOptions): Promise<string> {
   });
   return res.choices[0]?.message?.content ?? '';
 }
+
+// ---- Tool calling (the HUPI agent) ---------------------------------------
+//
+// The gateway relays OpenAI-style tool calling (internal/gateway/agentturn.go):
+// the extension offers tools, the model asks for some, the extension runs
+// them and sends the results back. These types are a superset of
+// ChatMessage, kept separate so the existing callers above stay
+// string-only.
+
+export interface AgentToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
+export type AgentMessage =
+  | ChatMessage
+  | { role: 'assistant'; content: string | null; tool_calls: AgentToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string };
+
+export interface AgentToolDef {
+  type: 'function';
+  function: { name: string; description?: string; parameters: object };
+}
+
+export interface StreamChatTurnOptions {
+  model: string;
+  messages: AgentMessage[];
+  tools: AgentToolDef[];
+  /** "none" forces a text answer (used once the step limit is reached). */
+  toolChoice?: 'auto' | 'none';
+  onDelta: (text: string) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  explain?: 'on' | 'deep';
+  attachments?: ChatAttachment[];
+}
+
+export interface ChatTurnResult {
+  text: string;
+  toolCalls: AgentToolCall[];
+  finishReason: string;
+  /** Only on the final answer of an agent turn, when explain was set. */
+  citations: Citation[];
+  attachmentWarnings: string[];
+}
+
+/**
+ * One request of an agent turn: streams the reply, calling onDelta for
+ * text, and assembles any streamed tool-call fragments (grouped by index;
+ * id and name arrive once, arguments in pieces).
+ */
+export async function streamChatTurn(client: OpenAI, opts: StreamChatTurnOptions): Promise<ChatTurnResult> {
+  const body: OpenAI.ChatCompletionCreateParamsStreaming & HupiAttachmentsExtension = {
+    model: opts.model,
+    messages: opts.messages as OpenAI.ChatCompletionMessageParam[],
+    stream: true,
+    attachments: opts.attachments,
+  };
+  if (opts.tools.length > 0) {
+    body.tools = opts.tools as OpenAI.ChatCompletionTool[];
+    if (opts.toolChoice) {
+      body.tool_choice = opts.toolChoice;
+    }
+  }
+  const stream = await client.chat.completions.create(body, {
+    signal: opts.signal,
+    timeout: opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    headers: opts.explain ? { 'X-Hupi-Explain': opts.explain } : undefined,
+  });
+
+  const result: ChatTurnResult = { text: '', toolCalls: [], finishReason: '', citations: [], attachmentWarnings: [] };
+  for await (const chunk of stream) {
+    const choice = chunk.choices[0];
+    const delta = choice?.delta?.content ?? '';
+    if (delta) {
+      result.text += delta;
+      opts.onDelta(delta);
+    }
+    for (const part of choice?.delta?.tool_calls ?? []) {
+      const call = (result.toolCalls[part.index] ??= { id: '', type: 'function', function: { name: '', arguments: '' } });
+      if (part.id) {
+        call.id = part.id;
+      }
+      if (part.function?.name) {
+        call.function.name = part.function.name;
+      }
+      call.function.arguments += part.function?.arguments ?? '';
+    }
+    if (choice?.finish_reason) {
+      result.finishReason = choice.finish_reason;
+    }
+    const citations = (chunk as unknown as HupiCitationsExtension).hupi_citations;
+    if (citations && citations.length > 0) {
+      result.citations = citations;
+    }
+    const warnings = (chunk as unknown as HupiAttachmentWarningsExtension).hupi_attachment_warnings;
+    if (warnings && warnings.length > 0) {
+      result.attachmentWarnings = warnings;
+    }
+  }
+  // Index gaps (shouldn't happen) would leave holes in the array.
+  result.toolCalls = result.toolCalls.filter(Boolean);
+  return result;
+}

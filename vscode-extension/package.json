@@ -2,7 +2,7 @@
   "name": "hupi-vscode",
   "displayName": "HUPI",
   "description": "Chat and inline edit inside VS Code, backed by your own HUPI memory gateway instead of a vendor directly.",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "publisher": "hupi",
   "license": "MIT",
   "icon": "resources/marketplace-icon.png",
@@ -80,6 +80,39 @@
           "type": "boolean",
           "default": false,
           "description": "Also verify which cited sources the answer actually relied on (vs. merely had available), marking each Source as used or not. Off by default: this costs one extra real LLM call per answer. No effect unless hupi.citations.enabled is also on."
+        },
+        "hupi.agent.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Preview: let HUPI's sidebar chat use tools from your MCP servers (configured in VS Code's mcp.json) to answer — HUPI starts the servers, offers their tools, runs what the model asks for and sends the results back. VS Code asks before any tool that changes something. Tool output is never stored in HUPI memory; only your question and the final answer are."
+        },
+        "hupi.agent.maxSteps": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum rounds of tool calls in one agent turn; after that HUPI asks the model for a final answer without tools."
+        },
+        "hupi.agent.maxToolResultChars": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 1000,
+          "description": "Longest tool result (in characters) sent back to the model; longer results are cut off."
+        },
+        "hupi.agent.vscodeTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer the tools from your MCP servers to HUPI's agent. HUPI memory's own MCP tools are never offered (HUPI chat already uses your memory)."
+        },
+        "hupi.agent.approval": {
+          "type": "string",
+          "enum": ["changes", "all"],
+          "default": "changes",
+          "enumDescriptions": [
+            "Ask before tools that change something (VS Code's own confirmation); read-only tools run without asking.",
+            "Ask before every tool call, including read-only ones."
+          ],
+          "description": "When HUPI's agent asks before running a tool."
         },
         "hupi.mcp.enabled": {
           "type": "boolean",

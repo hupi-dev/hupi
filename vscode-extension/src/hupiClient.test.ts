@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_REQUEST_TIMEOUT_MS, chat, resolveBaseUrl, streamChat, type ChatAttachment, type ChatMessage } from './hupiClient';
+import { DEFAULT_REQUEST_TIMEOUT_MS, chat, resolveBaseUrl, streamChat, streamChatTurn, type ChatAttachment, type ChatMessage } from './hupiClient';
 
 describe('resolveBaseUrl', () => {
   it('resolves the private route when no teamId is set', () => {
@@ -296,5 +296,59 @@ describe('chat', () => {
     create.mockClear();
     await chat(client as any, { model: '', messages: [{ role: 'user', content: 'hi' }] });
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ attachments: undefined }), expect.anything());
+  });
+});
+
+describe('streamChatTurn', () => {
+  function fakeChunks(chunks: object[]) {
+    return {
+      chat: {
+        completions: {
+          create: vi.fn().mockResolvedValue({
+            [Symbol.asyncIterator]: async function* () {
+              yield* chunks;
+            },
+          }),
+        },
+      },
+    };
+  }
+  const tools = [{ type: 'function' as const, function: { name: 'get_weather', parameters: { type: 'object' } } }];
+
+  it('assembles streamed tool-call fragments by index', async () => {
+    const client = fakeChunks([
+      { choices: [{ delta: { content: 'Checking. ' } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'get_weather', arguments: '' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 1, id: 'c2', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Rome"}' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"city":' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"Oslo"}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    ]);
+    const deltas: string[] = [];
+    const res = await streamChatTurn(client as never, { model: '', messages: [{ role: 'user', content: 'q' }], tools, onDelta: (d) => deltas.push(d) });
+    expect(res.text).toBe('Checking. ');
+    expect(deltas).toEqual(['Checking. ']);
+    expect(res.finishReason).toBe('tool_calls');
+    expect(res.toolCalls).toEqual([
+      { id: 'c1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Oslo"}' } },
+      { id: 'c2', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Rome"}' } },
+    ]);
+    const body = client.chat.completions.create.mock.calls[0][0];
+    expect(body.tools).toEqual(tools);
+    expect(body.stream).toBe(true);
+  });
+
+  it('reads citations from the final chunk and omits tools when none are offered', async () => {
+    const client = fakeChunks([
+      { choices: [{ delta: { content: 'Answer.' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }], hupi_citations: [{ ref: { kind: 'summary', scope: { kind: 'private', owner: 'u' }, id: 's1' }, snippet: 'x' }] },
+    ]);
+    const res = await streamChatTurn(client as never, { model: 'm', messages: [], tools: [], toolChoice: 'none', explain: 'on', onDelta: () => {} });
+    expect(res.citations).toHaveLength(1);
+    expect(res.toolCalls).toEqual([]);
+    const [body, options] = client.chat.completions.create.mock.calls[0];
+    expect(body.tools).toBeUndefined();
+    expect(body.tool_choice).toBeUndefined();
+    expect(options.headers).toEqual({ 'X-Hupi-Explain': 'on' });
   });
 });

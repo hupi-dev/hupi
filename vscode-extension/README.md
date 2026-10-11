@@ -60,6 +60,17 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
   URL, team and credentials as HUPI chat. Turn it off with
   `hupi.mcp.enabled`. It shows up as **HUPI memory** in **MCP: List
   Servers**. See `../docs/MCP.md` for the tools.
+- **HUPI agent (preview)** — turn on `hupi.agent.enabled` and the sidebar
+  chat can use tools from your MCP servers (configured in VS Code's
+  `mcp.json`) to answer.
+  - HUPI starts the servers, offers their tools, runs what the model asks
+    for and sends the results back.
+  - VS Code asks before any tool that changes something.
+  - Only your question and the final answer go into HUPI memory, never
+    tool output.
+  - Related settings: `hupi.agent.maxSteps`,
+    `hupi.agent.maxToolResultChars`, `hupi.agent.vscodeTools`, and
+    `hupi.agent.approval` (`all` asks before every tool).
 
 Not included in v1: fully agentic multi-file edits that plan and apply
 across files with no review step (the multi-file edit above always shows
@@ -83,6 +94,8 @@ a diff first).
      of your private one.
    - `hupi.mcp.enabled` — on by default. Offers HUPI memory to VS Code's
      agent mode as MCP tools; turn off to hide it.
+   - `hupi.agent.enabled` — off by default. A preview that lets the sidebar
+     chat use your MCP servers' tools (see above).
 
 Requires VS Code 1.101 or later.
 

@@ -374,7 +374,66 @@ export class McpHttpServerDefinition {
 }
 
 export const registerMcpServerDefinitionProvider = vi.fn<(id: string, provider: unknown) => Disposable>(() => new Disposable());
-export const lm = { registerMcpServerDefinitionProvider };
+
+// ---- lm tools (the HUPI agent) -------------------------------------------
+
+export class LanguageModelTextPart {
+  constructor(public value: string) {}
+}
+
+export class LanguageModelDataPart {
+  constructor(
+    public data: Uint8Array,
+    public mimeType: string,
+  ) {}
+}
+
+export class LanguageModelPromptTsxPart {
+  constructor(public value: unknown) {}
+}
+
+export class LanguageModelToolResult {
+  constructor(public content: unknown[]) {}
+}
+
+export class CancellationError extends Error {
+  constructor() {
+    super('Canceled');
+    this.name = 'Canceled';
+  }
+}
+
+export class CancellationTokenSource {
+  private listeners: (() => void)[] = [];
+  token = {
+    isCancellationRequested: false,
+    onCancellationRequested: (l: () => void) => {
+      this.listeners.push(l);
+      return new Disposable();
+    },
+  };
+  cancel(): void {
+    this.token.isCancellationRequested = true;
+    this.listeners.forEach((l) => l());
+  }
+  dispose(): void {}
+}
+
+let lmToolsValue: { name: string; description: string; inputSchema?: object; tags: string[] }[] = [];
+/** Test helper: what vscode.lm.tools returns. */
+export function __setLmTools(tools: typeof lmToolsValue): void {
+  lmToolsValue = tools;
+}
+
+export const invokeTool = vi.fn<(name: string, options: unknown, token?: unknown) => Promise<LanguageModelToolResult>>();
+
+export const lm = {
+  registerMcpServerDefinitionProvider,
+  invokeTool,
+  get tools() {
+    return lmToolsValue;
+  },
+};
 
 // ---- reset ----------------------------------------------------------------
 
@@ -404,6 +463,8 @@ export function __resetVscodeMock(): void {
   executeCommand.mockClear();
   createChatParticipant.mockClear();
   registerMcpServerDefinitionProvider.mockClear();
+  invokeTool.mockReset();
+  lmToolsValue = [];
   configListeners = [];
 
   progressCancellationListener = undefined;

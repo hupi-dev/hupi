@@ -66,6 +66,41 @@ set.
 This API needs VS Code 1.101+, which is why `engines.vscode` is
 `^1.101.0`.
 
+**The HUPI agent (preview, `hupi.agent.enabled`, off by default).** With
+the agent on, the sidebar chat can use tools from your MCP servers to
+answer. Each turn:
+1. It starts your configured MCP servers with `workbench.mcp.startServer`.
+   Nothing else starts them in HUPI Code, which has no native Chat view.
+2. It offers the model their tools from `vscode.lm.tools`
+   (`src/agent/toolRegistry.ts`). HUPI memory's own MCP tools are left
+   out, because HUPI chat already injects memory. VS Code's core and
+   internal agent tools are left out too, until each is checked to work
+   without a chat session.
+3. It runs the loop in `src/agent/agentLoop.ts`:
+   - Each request goes through `hupiClient.streamChatTurn`.
+   - Each tool call runs through `vscode.lm.invokeTool` with no chat
+     token (`src/agent/vscodeTools.ts`).
+   - Tool errors and the user declining are sent back to the model as the
+     tool's result, so it can carry on.
+   - Results are cut to `hupi.agent.maxToolResultChars`.
+   - After `hupi.agent.maxSteps` rounds, the model is asked for a final
+     answer with tools off.
+   - The whole turn is capped at 10 minutes, and New Chat or a new message
+     cancels it.
+4. Tool activity shows as short notes in the reply for now.
+5. A failed or cancelled turn is rolled back out of the conversation
+   history in full.
+
+Approval:
+- **VS Code asks first** before running any tool that isn't marked
+  read-only.
+- `hupi.agent.approval: "all"` makes HUPI also ask before read-only tools.
+
+The gateway treats all of a turn's requests as one turn
+([API_REFERENCE.md](API_REFERENCE.md#post-v1chatcompletions)): memory is
+searched once, and only your question and the final answer are
+remembered. Tool arguments and output never are.
+
 ## Scope
 
 **In scope (v1)**:
