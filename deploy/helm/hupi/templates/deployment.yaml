@@ -34,6 +34,8 @@ spec:
               value: {{ .Values.retrieval.enableKeywordSearch | quote }}
             - name: HUPI_ENABLE_MCP
               value: {{ .Values.mcp.enabled | quote }}
+            - name: HUPI_MCP_ENABLE_WRITES
+              value: {{ .Values.mcp.enableWrites | quote }}
             {{- with .Values.mcp.allowedHosts }}
             - name: HUPI_MCP_ALLOWED_HOSTS
               value: {{ . | quote }}

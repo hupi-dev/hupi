@@ -27,9 +27,11 @@ retrieval:
 # keys as the chat route; see docs/MCP.md. allowedHosts is a
 # comma-separated Host allowlist (port ignored): set it to the hostname(s)
 # clients reach the gateway by, so a DNS-rebinding page can't. Empty
-# means no Host check.
+# means no Host check. enableWrites: false makes /mcp read-only (no
+# remember/log_exchange tools).
 mcp:
   enabled: true
+  enableWrites: true
   allowedHosts: ""
 
 # Every entry becomes an env var on the gateway, cronjobs, and admin UI

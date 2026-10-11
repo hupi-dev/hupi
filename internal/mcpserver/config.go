@@ -23,6 +23,9 @@ type Config struct {
 	ContextCharBudget int
 	// MaxBodyBytes caps a single JSON-RPC request body.
 	MaxBodyBytes int64
+	// DisableWrites leaves remember/log_exchange unregistered, so /mcp is
+	// read-only (HUPI_MCP_ENABLE_WRITES=false).
+	DisableWrites bool
 }
 
 const (
@@ -42,6 +45,7 @@ func ConfigFromEnv() Config {
 		AllowedHosts:      splitList(os.Getenv("HUPI_MCP_ALLOWED_HOSTS")),
 		ContextCharBudget: envInt("HUPI_MCP_CONTEXT_CHAR_BUDGET", defaultContextCharBudget),
 		MaxBodyBytes:      int64(envInt("HUPI_MCP_MAX_BODY_BYTES", defaultMaxBodyBytes)),
+		DisableWrites:     os.Getenv("HUPI_MCP_ENABLE_WRITES") == "false",
 	}
 }
 

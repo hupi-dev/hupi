@@ -4,7 +4,7 @@ This document maps HUPI's real product stories (as told in
 [BUSINESS_PROCESS.md](BUSINESS_PROCESS.md)'s scenarios and
 [MEMORY_SCENARIOS.md](MEMORY_SCENARIOS.md)'s question-type-by-question-type
 walkthrough) to the actual, already-existing automated tests that cover
-them — 545 `Test*` functions across 30 packages as of this writing, all
+them — 554 `Test*` functions across 30 packages as of this writing, all
 real-Postgres integration tests where the story needs real data, not
 mocked-everything unit tests pretending to be coverage.
 
@@ -117,6 +117,13 @@ pinned to a session), `TestAuth_MissingOrBadKeyIs401WithChallenge`,
 `TestGuard_OriginAndHost` (browser cross-origin and DNS-rebinding
 requests get 403), `TestHandlerFor_TeamResolver`,
 `TestToolErrors_AreToolResultsWithoutInternals`, the per-tool shape tests;
+the write tools: `TestIntegration_RememberIsSearchableAtOnceAndScoped`
+(real Postgres — stored with `mcp` provenance and importance 0.8,
+keyword-searchable immediately, invisible to another caller),
+`TestWriteTools_RejectSecretsAndBadInput` (credentials refused, never
+stored or echoed), `TestFindSecret_NoFalsePositivesOnOrdinaryText`,
+`TestListTools_WritesOnByDefaultAndKillSwitch`,
+`TestWriteTools_TeamWorkspaceKeepsIndividualActor`;
 `cmd/hupi`'s `TestMountMCP` (route mounted by default, gone with
 `HUPI_ENABLE_MCP=false`, team route only with the Tier-3 hook).
 `master-test.sh` re-runs both packages verbosely and **fails if any of
