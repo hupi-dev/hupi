@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { AgentToolDef } from '../hupiClient';
+import type { HupiTool } from './workspaceTools';
 
 // Which of VS Code's registered tools (vscode.lm.tools) the HUPI agent
 // offers the model. Verified in a HUPI Code build (Phase 0 of the agent
@@ -70,14 +71,35 @@ export function toolDef(name: string, info: vscode.LanguageModelToolInformation)
   };
 }
 
-/** Builds the tool set for one agent turn. Names that collide or don't
+/** Builds the tool set for one agent turn: HUPI's own tools first (so
+ *  they keep their names), then VS Code's. Names that collide or don't
  *  fit the model's pattern are renamed, and runs map back by wire name. */
 export function buildRegistry(
   vscodeTools: readonly vscode.LanguageModelToolInformation[],
   runVscodeTool: (name: string, args: string, signal: AbortSignal) => Promise<string>,
+  hupiTools: readonly HupiTool[] = [],
 ): Map<string, RegisteredTool> {
   const taken = new Set<string>();
   const out = new Map<string, RegisteredTool>();
+  for (const tool of hupiTools) {
+    const name = wireName(tool.name, taken);
+    out.set(name, {
+      wireName: name,
+      def: { type: 'function', function: { name, description: tool.description, parameters: tool.parameters } },
+      run: async (args, signal) => {
+        let parsed: unknown;
+        try {
+          parsed = args.trim() === '' ? {} : JSON.parse(args);
+        } catch {
+          throw new Error(`the tool arguments are not valid JSON: ${args.slice(0, 200)}`);
+        }
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          throw new Error('the tool arguments must be a JSON object');
+        }
+        return tool.run(parsed as Record<string, unknown>, signal);
+      },
+    });
+  }
   for (const info of vscodeTools) {
     const name = wireName(info.name, taken);
     out.set(name, { wireName: name, def: toolDef(name, info), run: (args, signal) => runVscodeTool(info.name, args, signal) });

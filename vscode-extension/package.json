@@ -84,7 +84,7 @@
         "hupi.agent.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Preview: let HUPI's sidebar chat use tools from your MCP servers (configured in VS Code's mcp.json) to answer — HUPI starts the servers, offers their tools, runs what the model asks for and sends the results back. VS Code asks before any tool that changes something. Tool output is never stored in HUPI memory; only your question and the final answer are."
+          "description": "Preview: let HUPI's sidebar chat use tools to answer — HUPI's own read-only workspace tools (read, list and search files, problems, your selection) and your MCP servers' tools (configured in VS Code's mcp.json). HUPI runs what the model asks for and sends the results back. VS Code asks before any tool that changes something. Tool output is never stored in HUPI memory; only your question and the final answer are."
         },
         "hupi.agent.maxSteps": {
           "type": "number",
@@ -98,6 +98,11 @@
           "default": 20000,
           "minimum": 1000,
           "description": "Longest tool result (in characters) sent back to the model; longer results are cut off."
+        },
+        "hupi.agent.workspaceTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "Give HUPI's agent its own read-only workspace tools: read_file, list_files, search_text, get_diagnostics and get_selection. They stay inside the open workspace folders and refuse files that commonly hold secrets (.env, private keys, credentials)."
         },
         "hupi.agent.vscodeTools": {
           "type": "boolean",

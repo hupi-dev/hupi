@@ -14,6 +14,7 @@ import { promptSignInRequired } from './oidcAuth';
 import { runAgentTurn } from './agent/agentLoop';
 import { buildRegistry, selectVscodeTools, startMcpServers } from './agent/toolRegistry';
 import { runVscodeTool } from './agent/vscodeTools';
+import { WORKSPACE_TOOLS } from './agent/workspaceTools';
 
 /** Overall cap on one agent turn, on top of each request's own timeout. */
 export const AGENT_TURN_TIMEOUT_MS = 10 * 60_000;
@@ -277,8 +278,9 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * One agent turn (hupi.agent.enabled): offers the user's MCP tools to
-   * the model and runs what it asks for until it answers. Returns the
+   * One agent turn (hupi.agent.enabled): offers HUPI's read-only
+   * workspace tools and the user's MCP tools to the model, and runs what
+   * it asks for until it answers. Returns the
    * messages to append to history. Each tool call shows as a card in the
    * reply (toolCall, then toolResult).
    */
@@ -294,7 +296,11 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     if (useVscodeTools) {
       await startMcpServers();
     }
-    const registry = buildRegistry(useVscodeTools ? selectVscodeTools(vscode.lm.tools) : [], runVscodeTool);
+    const registry = buildRegistry(
+      useVscodeTools ? selectVscodeTools(vscode.lm.tools) : [],
+      runVscodeTool,
+      settings.get<boolean>('agent.workspaceTools', true) ? WORKSPACE_TOOLS : [],
+    );
     const tools = [...registry.values()].map((t) => t.def);
     const signal = AbortSignal.any([cancel, AbortSignal.timeout(AGENT_TURN_TIMEOUT_MS)]);
     const client = createClient(cfg);

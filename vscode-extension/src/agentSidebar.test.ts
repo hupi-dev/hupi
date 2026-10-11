@@ -81,7 +81,7 @@ describe('HUPI agent in the sidebar', () => {
     const { posted, send } = makeProvider();
     await send('How many open bugs?');
 
-    expect(sent[0].tools).toEqual(['mcp_github_search_issues']);
+    expect(sent[0].tools).toEqual(['read_file', 'list_files', 'search_text', 'get_diagnostics', 'get_selection', 'mcp_github_search_issues']);
     expect(invokeTool).toHaveBeenCalledWith('mcp_github_search_issues', { input: { q: 'bug' }, toolInvocationToken: undefined }, expect.anything());
     expect(sent[1].messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
     expect(posted.find((p) => p.type === 'toolCall')).toEqual({ type: 'toolCall', id: 'c1', name: 'mcp_github_search_issues', argsPreview: '{"q":"bug"}' });
@@ -133,12 +133,17 @@ describe('HUPI agent in the sidebar', () => {
     ]);
   });
 
-  it('offers no VS Code tools when hupi.agent.vscodeTools is off', async () => {
+  it('offers no VS Code tools when hupi.agent.vscodeTools is off, and no HUPI tools when workspaceTools is off', async () => {
     __setConfig({ 'agent.enabled': true, 'agent.vscodeTools': false, 'fileContext.enabled': false });
-    scriptTurns({ text: 'No tools.' });
+    scriptTurns({ text: 'No MCP tools.' });
     const { send } = makeProvider();
     await send('Q');
-    expect(sent[0].tools).toEqual([]);
+    expect(sent[0].tools).toEqual(['read_file', 'list_files', 'search_text', 'get_diagnostics', 'get_selection']);
+
+    __setConfig({ 'agent.enabled': true, 'agent.workspaceTools': false, 'fileContext.enabled': false });
+    scriptTurns({ text: 'Only MCP tools.' });
+    await send('Q2');
+    expect(sent[1].tools).toEqual(['mcp_github_search_issues']);
   });
 });
 

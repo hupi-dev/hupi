@@ -61,8 +61,11 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
   `hupi.mcp.enabled`. It shows up as **HUPI memory** in **MCP: List
   Servers**. See `../docs/MCP.md` for the tools.
 - **HUPI agent (preview)** — turn on `hupi.agent.enabled` and the sidebar
-  chat can use tools from your MCP servers (configured in VS Code's
-  `mcp.json`) to answer.
+  chat can use tools to answer:
+  - HUPI's own read-only workspace tools: read, list and search files,
+    problems, and your selection. They stay inside the workspace and never
+    read `.env` files, keys or credentials.
+  - Tools from your MCP servers (configured in VS Code's `mcp.json`).
   - HUPI starts the servers, offers their tools, runs what the model asks
     for and sends the results back.
   - VS Code asks before any tool that changes something.
@@ -71,7 +74,8 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
   - Only your question and the final answer go into HUPI memory, never
     tool output.
   - Related settings: `hupi.agent.maxSteps`,
-    `hupi.agent.maxToolResultChars`, `hupi.agent.vscodeTools`, and
+    `hupi.agent.maxToolResultChars`, `hupi.agent.workspaceTools`,
+    `hupi.agent.vscodeTools`, and
     `hupi.agent.approval` (`all` asks before every tool).
 
 Not included in v1: fully agentic multi-file edits that plan and apply
