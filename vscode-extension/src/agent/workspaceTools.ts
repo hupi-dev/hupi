@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import * as nodePath from 'node:path';
 import * as vscode from 'vscode';
 
 // HUPI's own read-only workspace tools for the agent. They're internal to
@@ -56,11 +57,15 @@ export function resolveInWorkspace(folders: readonly FolderLike[], input: string
   }
   let p = input.trim().replace(/\\/g, '/');
   let folder = folders[0];
-  const absolute = p.startsWith('/') || /^[a-zA-Z]:\//.test(p);
-  if (absolute) {
+  // A Windows path "C:/x" is "/C:/x" in a Uri's path.
+  if (/^[a-zA-Z]:\//.test(p)) {
+    p = '/' + p;
+  }
+  if (p.startsWith('/')) {
     const match = folders.find((f) => {
       const root = f.uri.path.replace(/\/+$/, '');
-      return p === root || p.startsWith(root + '/');
+      const rest = p.slice(root.length);
+      return samePath(p.slice(0, root.length), root) && (rest === '' || rest.startsWith('/'));
     });
     if (!match) {
       throw new Error(`"${input}" is outside the open workspace`);
@@ -92,6 +97,20 @@ export function resolveInWorkspace(folders: readonly FolderLike[], input: string
   return { folder, uri: segments.length ? vscode.Uri.joinPath(folder.uri, ...segments) : folder.uri, relative: segments.join('/') };
 }
 
+/** Compares two Uri paths; ones on a Windows drive ("/C:/…") ignore case,
+ *  as Windows does. */
+function samePath(a: string, b: string): boolean {
+  return /^\/[a-zA-Z]:(\/|$)/.test(b) ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/** Whether target is root or inside it, for file system paths of the given
+ *  platform's style (node:path's win32 rules ignore case and accept either
+ *  separator). */
+export function isInsideFolder(root: string, target: string, p: typeof nodePath = nodePath): boolean {
+  const rel = p.relative(root, target);
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + p.sep) && !p.isAbsolute(rel));
+}
+
 /** On a local disk, refuses a path whose real location (after symlinks)
  *  is outside its workspace folder. A path that doesn't exist yet passes;
  *  reading it will fail anyway. */
@@ -103,7 +122,7 @@ export async function ensureNoSymlinkEscape(folderPath: string, targetPath: stri
   } catch {
     return;
   }
-  if (real !== root && !real.startsWith(root.endsWith('/') ? root : root + '/')) {
+  if (!isInsideFolder(root, real)) {
     throw new Error('that path links to a location outside the open workspace');
   }
 }
