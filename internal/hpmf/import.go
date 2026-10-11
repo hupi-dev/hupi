@@ -268,9 +268,11 @@ func importEntities(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, keyV
 
 // importSummaries walks summaries/<level>/<period>.json in no particular
 // cross-file order (each file is independent — periods never reference
-// each other), but *within* a file always inserts in array order, since
-// a later version's `supersedes` can only point at an earlier one in the
-// same file (see ImportScope's doc comment).
+// each other), but *within* a file always inserts each version after the
+// one its `supersedes` points at (orderVersionChain — array order alone
+// isn't trusted, see its doc comment), since a later version's
+// `supersedes` can only point at an earlier one in the same file (see
+// ImportScope's doc comment).
 func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, keyVersion int, dir string, scope identity.Scope, stats *ImportStats, summaryIDMap map[string]string) error {
 	files, err := findFiles(filepath.Join(dir, "summaries"), ".json")
 	if err != nil {
@@ -292,6 +294,7 @@ func importSummaries(ctx context.Context, db *sql.DB, enc *crypto.Encryptor, key
 		if len(versions) == 0 {
 			continue
 		}
+		versions = orderVersionChain(versions)
 
 		err = dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
 			exists, err := periodExists(ctx, tx, scope, level, period)

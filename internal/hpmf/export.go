@@ -281,11 +281,44 @@ func exportSummaries(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, sco
 
 	for _, k := range order {
 		path := filepath.Join(dir, "summaries", k.level, k.period+".json")
-		if err := writeJSONFile(path, grouped[k]); err != nil {
+		if err := writeJSONFile(path, orderVersionChain(grouped[k])); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// orderVersionChain reorders one period's versions so every version
+// comes after the version its `supersedes` points at (when that
+// predecessor is in the slice at all), otherwise keeping the input order.
+// The `order by ... created_at` above isn't enough on its own: two
+// versions written in the same transaction share one now(), and Postgres
+// returns such ties in whatever physical order the plan happens to read
+// them — a v2-before-v1 file then imports with v2 unlinked (see
+// importSummaries, which also runs this, so a bundle exported before
+// this fix still imports correctly).
+func orderVersionChain(versions []SummaryRecord) []SummaryRecord {
+	byID := make(map[string]SummaryRecord, len(versions))
+	for _, r := range versions {
+		byID[r.ID] = r
+	}
+	ordered := make([]SummaryRecord, 0, len(versions))
+	visited := make(map[string]bool, len(versions))
+	var visit func(r SummaryRecord)
+	visit = func(r SummaryRecord) {
+		if visited[r.ID] {
+			return
+		}
+		visited[r.ID] = true // marked before recursing, so a malformed cycle terminates
+		if pred, ok := byID[r.Supersedes]; ok && r.Supersedes != "" {
+			visit(pred)
+		}
+		ordered = append(ordered, r)
+	}
+	for _, r := range versions {
+		visit(r)
+	}
+	return ordered
 }
 
 func loadKeyFacts(ctx context.Context, q dbscope.Querier, keys *crypto.KeyStore, scope identity.Scope, summaryID string) ([]KeyFactRecord, error) {
