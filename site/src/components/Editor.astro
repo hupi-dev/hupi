@@ -33,6 +33,11 @@ const features = [
       'Now HUPI can tell you why a decision was taken. Every answer in the sidebar and @hupi comes with a Sources list underneath it — the exact summaries, entities, or past exchanges it actually pulled from, with the real text it read. On by default, free. Turn on hupi.citations.deep for one extra verification pass that marks which sources the answer actually relied on, not just what was available.',
   },
   {
+    title: 'HUPI agent (preview)',
+    body:
+      "Turn on hupi.agent.enabled (it's on by default in HUPI Code) and the sidebar chat can read and search your code, check problems, edit files, run commands, and use your MCP servers' tools. Each call shows as a card. Edits show a diff and commands show the exact command line, and nothing changes until you click Allow. HUPI remembers your question and the answer, never the tool output.",
+  },
+  {
     title: 'Memory tools for Copilot agent mode (MCP)',
     body:
       "The extension registers your gateway's MCP server with VS Code, so its agent mode and any other MCP-aware chat can search your HUPI memory and save to it as tools. No mcp.json to write. It uses the same base URL, team and credentials as HUPI chat. Needs VS Code 1.101+.",
@@ -62,6 +67,11 @@ const settingGroups = [
         name: 'hupi.teamId',
         default: '""',
         body: 'Routes through the team endpoint instead of your private one, for a Tier 3 shared deployment.',
+      },
+      {
+        name: 'hupi.agent.enabled',
+        default: 'false',
+        body: 'Let the sidebar chat use tools: read, search, edit and run in your workspace, plus your MCP servers. Edits and commands always ask first. On by default in HUPI Code.',
       },
       {
         name: 'hupi.mcp.enabled',
