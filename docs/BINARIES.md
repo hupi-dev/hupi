@@ -1,14 +1,17 @@
 # HUPI binaries — what each one does and how to run it
 
 Every `cmd/` binary in this repo, grouped by how you're meant to run it:
-a long-running server, a recurring scheduled job, or a one-off operator/
-benchmark command. For *how these fit together* at a call-chain level,
+a long-running server, a recurring scheduled job, a one-off operator/
+benchmark command, or a client-side tool that runs on a user's own
+machine. For *how these fit together* at a call-chain level,
 see [CODE_GUIDE.md §5](CODE_GUIDE.md); this document is the
 run-it-yourself reference — every flag, every binary-specific env var,
 one real example invocation each.
 
-All 19 binaries call `bootstrap.Load` first, which reads a standard set
-of env vars shared by every one of them (not repeated per-binary below):
+All 21 binaries except `hupi-mcp` call `bootstrap.Load` first, which
+reads a standard set of env vars shared by every one of them (not
+repeated per-binary below). `hupi-mcp` is the exception on purpose: it
+only talks HTTP to a gateway, so it needs none of these.
 
 | Env var | Purpose |
 |---|---|
@@ -150,7 +153,7 @@ probe fails, so it plugs directly into alerting.
 
 ---
 
-## One-off operator commands (12)
+## One-off operator commands (13)
 
 Run by hand, reactively or on demand — not scheduled, not servers.
 
@@ -320,6 +323,30 @@ question into a command.
 
 ---
 
+## Client-side tools (1)
+
+Run on an end user's machine, not on the server. They hold no database
+credentials, encryption keys or LLM keys.
+
+### `cmd/hupi-mcp` — MCP stdio bridge
+
+Lets MCP clients that only launch local processes (Claude Desktop, or
+any client configured with a `command` rather than a `url`) use a
+gateway's `/mcp` endpoint. It relays newline-delimited JSON-RPC from
+stdin to the gateway over HTTP and writes each response to stdout. It
+never interprets messages, so new gateway tools need no bridge update.
+Standard library only; it doesn't call `bootstrap.Load`. See
+[MCP.md](MCP.md).
+
+- **Env vars**: `HUPI_BASE_URL` (default `http://127.0.0.1:8787`),
+  `HUPI_API_KEY` (your own key, sent as a bearer token; omit on Tier
+  1/2), `HUPI_TEAM_ID` (use `/v1/team/{id}/mcp`), `HUPI_MCP_TIMEOUT`
+  (per request, default `2m`). No flags.
+- **Run it**: launched by the MCP client, e.g. Claude Desktop's
+  `"command": "/usr/local/bin/hupi-mcp"`. Logs go to stderr.
+
+---
+
 ## Quick reference
 
 | Binary | Run mode | One-line purpose |
@@ -344,3 +371,4 @@ question into a command.
 | `hupi-reembed` | CLI | Re-embed after a provider/model switch |
 | `hupi-rotate-key` | CLI | Online, resumable per-scope key rotation |
 | `hupi-trace` | CLI | Show exactly what one turn's retrieval saw |
+| `hupi-mcp` | client-side | Stdio bridge from an MCP client to a gateway's `/mcp` |

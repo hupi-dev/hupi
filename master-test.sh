@@ -93,7 +93,7 @@ go test -count=1 ./... || fail "go test"
 # isn't reachable, and go test counts a skip as a pass — so this step
 # re-runs those packages verbosely and fails on any skip at all.
 step "MCP server: /mcp tests, none skipped"
-MCP_OUT="$(go test -count=1 -v ./internal/mcpserver/ ./cmd/hupi/ 2>&1)" \
+MCP_OUT="$(go test -count=1 -v ./internal/mcpserver/ ./cmd/hupi/ ./cmd/hupi-mcp/ 2>&1)" \
   || { echo "$MCP_OUT"; fail "MCP server tests"; }
 if grep -q -- '--- SKIP' <<<"$MCP_OUT"; then
   grep -A2 -- '--- SKIP' <<<"$MCP_OUT" || true

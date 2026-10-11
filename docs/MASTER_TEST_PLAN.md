@@ -4,7 +4,7 @@ This document maps HUPI's real product stories (as told in
 [BUSINESS_PROCESS.md](BUSINESS_PROCESS.md)'s scenarios and
 [MEMORY_SCENARIOS.md](MEMORY_SCENARIOS.md)'s question-type-by-question-type
 walkthrough) to the actual, already-existing automated tests that cover
-them — 554 `Test*` functions across 30 packages as of this writing, all
+them — 562 `Test*` functions across 31 packages as of this writing, all
 real-Postgres integration tests where the story needs real data, not
 mocked-everything unit tests pretending to be coverage.
 
@@ -124,9 +124,15 @@ keyword-searchable immediately, invisible to another caller),
 stored or echoed), `TestFindSecret_NoFalsePositivesOnOrdinaryText`,
 `TestListTools_WritesOnByDefaultAndKillSwitch`,
 `TestWriteTools_TeamWorkspaceKeepsIndividualActor`;
+`cmd/hupi-mcp`'s `TestEndToEnd_SDKClientThroughBridge` (the real MCP SDK
+client over stdio pipes, through the bridge, into the real `/mcp`
+server: list, remember, search, under the bridge's API key), the relay
+tests (auth header, negotiated protocol version, SSE unpacking, gateway
+errors as JSON-RPC errors, cancel while stdin is open) and
+`TestDependencyGuard` (the bridge stays standard-library only);
 `cmd/hupi`'s `TestMountMCP` (route mounted by default, gone with
 `HUPI_ENABLE_MCP=false`, team route only with the Tier-3 hook).
-`master-test.sh` re-runs both packages verbosely and **fails if any of
+`master-test.sh` re-runs those three packages verbosely and **fails if any of
 their tests skipped** — `go test` counts a skip as a pass, and the scope-
 isolation test is the one that matters most here.
 

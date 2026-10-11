@@ -40,6 +40,7 @@ cmd/
   hupi-ingest-turns/     CLI — EvalMem adapter tool: replay a flat turn list into a fresh scope, then consolidate (see docs/EVALMEM_INTEGRATION_PLAN.md)
   hupi-export-memory/    CLI — EvalMem adapter tool: dump a scope's entire decrypted memory (every entity/summary+key-facts/relationship) for external diagnostics
   hupi-answer-question/  CLI — EvalMem adapter tool: answer one question against an already-ingested scope, in native (real retrieval) or oracle (hand-fed context) mode
+  hupi-mcp/              client-side stdio bridge — relays an MCP client's stdin/stdout to a gateway's /mcp over HTTP; standard library only, no DB/keys/providers (see MCP.md)
 
 internal/
   identity/              Scope, Identity, Ref — pure data types, zero dependencies
@@ -68,7 +69,7 @@ schema/                   numbered SQL migrations, applied in order 0001 -> 0021
 docs/                      this file, and everything else under docs/
 bench/                     LoCoMo/LongMemEval benchmark data-fetch scripts, each benchmark's own unmodified upstream scoring code, the EvalMem Python adapter, and archived run results — the non-Go scaffolding cmd/hupi-bench's predictions need to actually get scored; see docs/BENCHMARKS.md and docs/EVALMEM_INTEGRATION_PLAN.md
 
-Dockerfile                 one image, all 11 binaries — gateway is the default ENTRYPOINT, everything else runs via a `command:` override
+Dockerfile                 one image, every deployable binary (see its build loop) — gateway is the default ENTRYPOINT, everything else runs via a `command:` override
 deploy/k8s/                 plain Kubernetes manifests, numbered in apply order
 deploy/helm/hupi/           the same resources as a Helm chart, values.yaml-parameterized
 vscode-extension/           VS Code extension (chat sidebar + inline edit) — see VSCODE_EXTENSION.md
@@ -125,6 +126,7 @@ cmd/hupi-bench         -> bootstrap, auth, dbscope, gateway, identity, store   (
 cmd/hupi-ingest-turns  -> bootstrap, auth, gateway, identity, store   (+ shells out to hupi-consolidate)
 cmd/hupi-export-memory -> bootstrap, identity, store
 cmd/hupi-answer-question -> bootstrap, gateway, identity, store
+cmd/hupi-mcp           (standard library only — enforced by its TestDependencyGuard)
 ```
 
 Note `store` depends on `gateway` (for the `gateway.Episode`,

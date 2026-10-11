@@ -2,7 +2,8 @@
 # Kubernetes Deployment runs the gateway (the default CMD); CronJobs and
 # one-off Jobs run everything else (hupi-consolidate, hupi-selfcheck,
 # hupi-admin, hupi-trace, hupi-correct, hupi-audit, hupi-export,
-# hupi-import, hupi-rotate-key, hupi-reembed, hupi-demo, hupi-demo-sweep)
+# hupi-import, hupi-rotate-key, hupi-reembed, hupi-demo, hupi-demo-sweep,
+# and hupi-mcp, the MCP stdio bridge to a running gateway)
 # from the exact same image via `command:` overrides — one build, one
 # thing to version and scan for vulnerabilities, not twelve.
 
@@ -57,7 +58,7 @@ COPY --from=web-dashboard /src/cmd/hupi-dashboard/web/dist /src/cmd/hupi-dashboa
 RUN mkdir -p /out && \
     for cmd in hupi hupi-consolidate hupi-selfcheck hupi-trace hupi-correct \
                hupi-admin hupi-admin-ui hupi-dashboard hupi-audit hupi-export hupi-import hupi-rotate-key hupi-reembed \
-               hupi-demo hupi-demo-sweep; do \
+               hupi-demo hupi-demo-sweep hupi-mcp; do \
       CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "/out/$cmd" "./cmd/$cmd"; \
     done
 
