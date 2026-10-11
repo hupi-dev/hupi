@@ -169,6 +169,18 @@ something worth making async:
   disconnect, gateway restart mid-stream), the partial text is still
   captured with `"truncated": true` rather than discarded — a partial
   memory beats no memory.
+- **Agent turns** (tool calling, `internal/gateway/agentturn.go`) are the
+  exception to "one request, one episode".
+  - One user question can take several requests: tool calls, then their
+    results, then the answer. It's captured **once**, at the final text
+    answer: the question plus that answer, tagged `agent` and
+    `tool:<name>` for each tool used.
+  - Tool arguments and results are never stored. They can be large,
+    secret, or hostile.
+  - An agent turn that ends before its final answer stores nothing; a
+    partial agent run isn't a memory worth keeping.
+  - Retrieval likewise runs once per turn, cached for the turn's later
+    requests.
 - Net effect: capture is both *faster* than the original async design (no
   scheduling/queue overhead), and strictly more durable, because durability
   no longer depends on a background worker running before the next crash.

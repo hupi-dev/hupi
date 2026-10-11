@@ -19,10 +19,7 @@ const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
 	// RoleTool carries a tool's result back to the model, answering one
-	// of the previous assistant message's ToolCalls (see tools.go). Not
-	// accepted by Valid yet: the gateway can't relay tool_call_id until
-	// its own wire types carry it, so a client's tool message still gets
-	// a clear 400 there rather than a confusing upstream error.
+	// of the previous assistant message's ToolCalls (see tools.go).
 	RoleTool Role = "tool"
 )
 
@@ -34,7 +31,7 @@ const (
 // clear 400 here).
 func (r Role) Valid() bool {
 	switch r {
-	case RoleSystem, RoleUser, RoleAssistant:
+	case RoleSystem, RoleUser, RoleAssistant, RoleTool:
 		return true
 	default:
 		return false

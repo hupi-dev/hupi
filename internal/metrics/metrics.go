@@ -48,6 +48,20 @@ var (
 		Help: `Retrieval gate outcomes per chat turn: gate is "skipped", "partial", or "full".`,
 	}, []string{"gate"})
 
+	// AgentStepsTotal and AgentTurnCacheTotal cover tool-calling requests
+	// (internal/gateway/agentturn.go): how many steps of an agent turn
+	// ended in tool calls vs. a final answer, and how often a turn's
+	// later steps reused its first step's retrieval.
+	AgentStepsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hupi_agent_steps_total",
+		Help: `Chat requests that took part in tool calling, by outcome: "tool_calls" (the model asked for tools) or "final" (a text answer).`,
+	}, []string{"outcome"})
+
+	AgentTurnCacheTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "hupi_agent_turn_cache_total",
+		Help: `Per-turn retrieval cache lookups for tool-calling requests: result is "hit" (retrieval reused) or "miss" (retrieval ran).`,
+	}, []string{"result"})
+
 	ProviderCallDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "hupi_provider_call_duration_seconds",
 		Help: "LLM provider call latency in seconds, by provider profile name, vendor, and whether it was streamed.",
