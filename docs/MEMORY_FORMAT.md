@@ -230,6 +230,10 @@ mutated in place (corrections are new records referencing the old `id`).
   attached to the *summary* that references this episode, not by rewriting
   this record. This is what makes capture both durable and fast — see
   [ARCHITECTURE.md § Capture](../ARCHITECTURE.md#capture-durable-and-synchronous).
+- `context_tags` labels where an episode came from, e.g. `["mcp",
+  "remember"]` for a fact saved through HUPI's MCP server. Empty for turns
+  captured through `/v1/chat/completions`. Exported and imported by HPMF
+  as an optional field.
 - `truncated: true` marks a streamed response that was cut off (client
   disconnected, gateway restarted mid-stream) — the partial text is still
   captured rather than lost, just flagged as incomplete.

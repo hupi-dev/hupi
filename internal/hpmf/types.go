@@ -70,7 +70,7 @@ func dirName(scope identity.Scope) string {
 // plaintext (decrypted), matching MEMORY_FORMAT.md's episode record 1:1
 // with the live episodes table, minus embedding (never exported — see
 // package doc comment) and the columns the application never actually
-// writes (context_tags, provider_endpoint, externalized, episodes.supersedes).
+// writes (provider_endpoint, externalized, episodes.supersedes).
 type EpisodeRecord struct {
 	ID             string         `json:"id"`
 	TS             time.Time      `json:"ts"`
@@ -87,6 +87,7 @@ type EpisodeRecord struct {
 	RefersTo       string         `json:"refers_to,omitempty"`
 	Rating         string         `json:"rating,omitempty"`
 	Note           string         `json:"note,omitempty"`
+	ContextTags    []string       `json:"context_tags,omitempty"`
 }
 
 // SummaryRecord is one summaries/<level>/<period>.json — the summary
