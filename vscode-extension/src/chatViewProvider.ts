@@ -1,7 +1,37 @@
 import * as vscode from 'vscode';
-import { createClient, streamChat, type ChatAttachment, type ChatMessage, type Citation } from './hupiClient';
+import {
+  createClient,
+  streamChat,
+  streamChatTurn,
+  type AgentMessage,
+  type ChatAttachment,
+  type ChatMessage,
+  type Citation,
+  type HupiConfig,
+} from './hupiClient';
 import { loadConfig, OidcSignInRequiredError } from './config';
 import { promptSignInRequired } from './oidcAuth';
+import { runAgentTurn } from './agent/agentLoop';
+import { makeApprover } from './agent/approval';
+import { buildRegistry, selectVscodeTools, startMcpServers } from './agent/toolRegistry';
+import { runVscodeTool } from './agent/vscodeTools';
+
+/** Overall cap on one agent turn, on top of each request's own timeout. */
+export const AGENT_TURN_TIMEOUT_MS = 10 * 60_000;
+
+/** The plain-chat view of a history that may hold agent turns: tool
+ *  results and tool-call-only assistant messages are dropped, so the
+ *  string-only streamChat path never sees them. */
+export function textOnly(history: AgentMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of history) {
+    if (m.role === 'tool' || ('tool_calls' in m && m.tool_calls.length > 0)) {
+      continue;
+    }
+    out.push({ role: m.role, content: m.content ?? '' });
+  }
+  return out;
+}
 
 // Message shapes crossing the extension-host <-> webview boundary
 // (postMessage/onDidReceiveMessage). Kept as a tiny discriminated union
@@ -61,7 +91,7 @@ export function currentFileContext(): FileContext | undefined {
 export class HupiChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'hupi.chatView';
 
-  private history: ChatMessage[] = [];
+  private history: AgentMessage[] = [];
   private webviewView?: vscode.WebviewView;
   // Only one response should ever be in flight at a time — without this,
   // sending a second message (or hitting "New Chat") before the first
@@ -113,6 +143,13 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     const fileContextEnabled = settings.get<boolean>('fileContext.enabled', true);
     const context = fileContextEnabled ? currentFileContext() : undefined;
     const userContent = context ? `${context.text}\n\n${trimmed}` : trimmed;
+    // Any failure or cancellation rolls the history back to here, so a
+    // failed turn (including every message an agent turn added) never
+    // poisons the conversation sent on the next try.
+    const historyBefore = this.history.length;
+    const rollback = () => {
+      this.history.length = historyBefore;
+    };
     this.history.push({ role: 'user', content: userContent });
     if (context) {
       this.post(webview, { type: 'fileContext', relativePath: context.relativePath });
@@ -122,6 +159,7 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
     try {
       cfg = await loadConfig(this.context);
     } catch (err) {
+      rollback();
       if (err instanceof OidcSignInRequiredError) {
         this.post(webview, { type: 'error', message: err.message });
         promptSignInRequired();
@@ -136,21 +174,27 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
 
     const controller = new AbortController();
     this.inFlight = controller;
-    const client = createClient(cfg);
-    let assistantText = '';
+    const explain = citationsEnabled ? (deepCitations ? 'deep' : 'on') : undefined;
+    const turnAttachments = attachments && attachments.length > 0 ? attachments : undefined;
     try {
-      assistantText = await streamChat(client, {
-        model: cfg.model,
-        messages: this.history,
-        signal: controller.signal,
-        onDelta: (delta) => this.post(webview, { type: 'delta', text: delta }),
-        explain: citationsEnabled ? (deepCitations ? 'deep' : 'on') : undefined,
-        onCitations: (items) => this.post(webview, { type: 'citations', items }),
-        attachments: attachments && attachments.length > 0 ? attachments : undefined,
-        onAttachmentWarnings: (warnings) => this.post(webview, { type: 'attachmentWarnings', warnings }),
-      });
+      if (settings.get<boolean>('agent.enabled', false)) {
+        this.history.push(...(await this.runAgent(cfg, settings, webview, controller.signal, explain, turnAttachments)));
+      } else {
+        const assistantText = await streamChat(createClient(cfg), {
+          model: cfg.model,
+          messages: textOnly(this.history),
+          signal: controller.signal,
+          onDelta: (delta) => this.post(webview, { type: 'delta', text: delta }),
+          explain,
+          onCitations: (items) => this.post(webview, { type: 'citations', items }),
+          attachments: turnAttachments,
+          onAttachmentWarnings: (warnings) => this.post(webview, { type: 'attachmentWarnings', warnings }),
+        });
+        this.history.push({ role: 'assistant', content: assistantText });
+      }
       this.post(webview, { type: 'done' });
     } catch (err) {
+      rollback();
       // A deliberate abort (superseded by a newer send, or "New Chat") is
       // not a failure worth surfacing — the webview already moved on.
       if (controller.signal.aborted) {
@@ -160,16 +204,84 @@ export class HupiChatViewProvider implements vscode.WebviewViewProvider {
         type: 'error',
         message: `HUPI request failed: ${(err as Error).message}. Check hupi.baseUrl and your API key (HUPI: Set API Key) or sign-in (HUPI: Sign In).`,
       });
-      // Roll back the just-added user turn so a failed request doesn't
-      // silently poison the conversation history sent on the next try.
-      this.history.pop();
       return;
     } finally {
       if (this.inFlight === controller) {
         this.inFlight = undefined;
       }
     }
-    this.history.push({ role: 'assistant', content: assistantText });
+  }
+
+  /**
+   * One agent turn (hupi.agent.enabled): offers the user's MCP tools to
+   * the model and runs what it asks for until it answers. Returns the
+   * messages to append to history. Tool activity shows as short notes in
+   * the reply for now.
+   */
+  private async runAgent(
+    cfg: HupiConfig,
+    settings: vscode.WorkspaceConfiguration,
+    webview: vscode.Webview,
+    cancel: AbortSignal,
+    explain: 'on' | 'deep' | undefined,
+    attachments: ChatAttachment[] | undefined,
+  ): Promise<AgentMessage[]> {
+    const useVscodeTools = settings.get<boolean>('agent.vscodeTools', true);
+    if (useVscodeTools) {
+      await startMcpServers();
+    }
+    const registry = buildRegistry(useVscodeTools ? selectVscodeTools(vscode.lm.tools) : [], runVscodeTool);
+    const tools = [...registry.values()].map((t) => t.def);
+    const signal = AbortSignal.any([cancel, AbortSignal.timeout(AGENT_TURN_TIMEOUT_MS)]);
+    const client = createClient(cfg);
+    const note = (text: string) => this.post(webview, { type: 'delta', text });
+
+    const turn = await runAgentTurn(
+      this.history,
+      {
+        send: (messages, offered, toolChoice) =>
+          streamChatTurn(client, {
+            model: cfg.model,
+            messages,
+            tools: offered,
+            toolChoice,
+            signal,
+            onDelta: note,
+            explain,
+            attachments,
+          }),
+        runTool: (call, toolSignal) => {
+          const tool = registry.get(call.function.name);
+          if (!tool) {
+            return Promise.reject(new Error(`unknown tool "${call.function.name}"`));
+          }
+          return tool.run(call.function.arguments, toolSignal);
+        },
+        approve: makeApprover(settings.get<string>('agent.approval', 'changes')),
+        onToolCall: (call) => note(`\n\n> Running tool \`${call.function.name}\`…\n\n`),
+        onToolResult: (call, ok, text) => {
+          if (!ok) {
+            note(`> \`${call.function.name}\`: ${text.split('\n')[0].slice(0, 200)}\n\n`);
+          }
+        },
+      },
+      {
+        tools,
+        maxSteps: settings.get<number>('agent.maxSteps', 10),
+        maxToolResultChars: settings.get<number>('agent.maxToolResultChars', 20_000),
+        signal,
+      },
+    );
+    if (turn.hitStepLimit) {
+      note('\n\n_Stopped after the maximum number of tool steps (hupi.agent.maxSteps)._');
+    }
+    if (turn.final.citations.length > 0) {
+      this.post(webview, { type: 'citations', items: turn.final.citations });
+    }
+    if (turn.final.attachmentWarnings.length > 0) {
+      this.post(webview, { type: 'attachmentWarnings', warnings: turn.final.attachmentWarnings });
+    }
+    return turn.added;
   }
 
   private renderHtml(webview: vscode.Webview): string {

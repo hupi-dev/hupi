@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.16
+
+- **Preview: the HUPI agent.** With the new `hupi.agent.enabled` setting
+  on (it's off by default), the sidebar chat can use tools from your MCP
+  servers to answer.
+  - HUPI starts the servers configured in VS Code's `mcp.json` and offers
+    their tools to the model.
+  - It runs the calls the model asks for and sends the results back,
+    until the model answers.
+  - VS Code asks before any tool that changes something;
+    `hupi.agent.approval: "all"` asks before every tool.
+  - `hupi.agent.maxSteps` (default 10) and `hupi.agent.maxToolResultChars`
+    (default 20000) bound a turn.
+  - HUPI memory's own MCP tools aren't offered, since the chat already
+    uses your memory.
+  - HUPI memory stores only your question and the final answer, never
+    tool output.
+  - Tool activity shows as short notes in the reply for now.
+- A failed or cancelled reply is now always removed from the
+  conversation history, including after a config or sign-in error, so the
+  next message isn't sent with a dangling question.
+
 ## 0.1.15
 
 - Registers your HUPI gateway's MCP server with VS Code
