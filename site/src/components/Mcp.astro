@@ -1,0 +1,165 @@
+---
+import { GITHUB_URL, docFileURL } from '../lib/links.js';
+
+const clients = [
+  { name: 'Claude Code', how: 'one command, over HTTP' },
+  { name: 'Cursor', how: 'one entry in mcp.json' },
+  { name: 'VS Code agent mode', how: 'registered by the HUPI extension' },
+  { name: 'Claude Desktop', how: 'via the hupi-mcp bridge' },
+];
+
+const tools = [
+  {
+    name: 'search_memory',
+    body: 'Searches past conversations, daily summaries, and known people and projects. It always searches, so a plain keyword phrase like "postgres migration plan" is found too.',
+  },
+  {
+    name: 'get_entity',
+    body: 'One person, project, or preference: its current fact-checked attributes, plus its relationships and the dates they were true.',
+  },
+  {
+    name: 'list_entities',
+    body: 'Everyone and everything HUPI knows about, most recently updated first, filtered by kind or name.',
+  },
+  {
+    name: 'recent_memory',
+    body: 'What you have been working on lately: recent daily summaries and their fact-checked key facts.',
+  },
+  {
+    name: 'remember',
+    body: 'Saves one fact you ask your AI to keep. Every other tool can find it straight away, and it is fact-checked at the next nightly consolidation.',
+  },
+  {
+    name: 'log_exchange',
+    body: 'Records a conversation from your IDE, so the next tool you open can recall it.',
+  },
+];
+
+const guarantees = [
+  {
+    title: 'Same keys, same scoping',
+    body: "MCP uses the same API keys (or SSO) as chat, and checks identity on every request. A tool only ever sees the caller's own memory, or a team workspace they actually belong to.",
+  },
+  {
+    title: 'Every read audited',
+    body: 'Each tool call writes an audit-log entry tagged as MCP, just like a chat turn. Writes are tagged with where they came from.',
+  },
+  {
+    title: 'No secrets in memory',
+    body: 'Text that looks like an API key, token, or private key is refused before it is stored. Turn writes off entirely with one environment variable for a read-only endpoint.',
+  },
+  {
+    title: 'Built in, free',
+    body: "The MCP endpoint ships inside the same MIT-licensed gateway binary you already run, and it's on by default. There's nothing new to deploy except the optional hupi-mcp bridge for Claude Desktop.",
+  },
+];
+---
+
+<section id="mcp" class="border-b border-white/5">
+  <div class="mx-auto grid max-w-6xl gap-12 px-6 py-20 sm:py-28 md:grid-cols-2 md:items-center">
+    <div>
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-ember-500">In every AI tool — via MCP</h2>
+      <p class="text-balance mt-3 text-2xl font-bold text-fog-100 sm:text-3xl">
+        One memory for Claude Code, Cursor, VS Code, and Claude Desktop.
+      </p>
+      <p class="mt-5 leading-relaxed text-fog-300">
+        Tools that bring their own model can't route chat through HUPI. Instead, they connect
+        to HUPI's built-in <a href="https://modelcontextprotocol.io" class="text-ember-400 underline decoration-dotted hover:text-ember-300">Model Context Protocol</a> server
+        and call your memory as tools. They search it before answering, look up the people and
+        projects you mention, and save what you ask them to remember.
+      </p>
+      <p class="mt-4 leading-relaxed text-fog-300">
+        It's the same memory every other HUPI client builds: shared across your tools and
+        machines, fact-checked by consolidation, scoped to you or your team, and audited.
+        A decision you made in one tool is there in the next one.
+      </p>
+      <div class="mt-6 flex flex-wrap gap-3">
+        <a
+          href={docFileURL('MCP.md')}
+          class="rounded-lg bg-ember-500 px-5 py-2.5 text-center text-sm font-semibold text-ink shadow-lg shadow-ember-600/20 transition-all hover:bg-ember-400"
+        >
+          Read the docs
+        </a>
+        <a
+          href={`${GITHUB_URL}/tree/main/internal/mcpserver`}
+          class="rounded-lg border border-white/15 px-5 py-2.5 text-center text-sm font-semibold text-fog-100 transition-colors hover:border-white/30 hover:bg-white/5"
+        >
+          View source
+        </a>
+      </div>
+    </div>
+
+    <figure class="rounded-xl border border-white/10 bg-navy-900/70 p-5 shadow-2xl shadow-black/40">
+      <p class="font-mono-tight text-xs text-fog-700">Claude Code, in a later session</p>
+      <div class="font-mono-tight mt-3 space-y-3 text-sm">
+        <p class="text-fog-100"><span class="text-ember-400">&gt;</span> What's my merge preference for HUPI PRs?</p>
+        <p class="rounded-md border border-white/10 bg-ink px-3 py-2 text-xs text-fog-300">
+          <span class="text-ember-400">hupi</span> · search_memory(<span class="text-fog-100">"merge preference HUPI PRs"</span>)
+        </p>
+        <p class="leading-relaxed text-fog-300">
+          You prefer <span class="font-semibold text-fog-100">squash merges</span> for all HUPI pull requests. You asked for that to be remembered on Oct 11.
+        </p>
+      </div>
+      <figcaption class="mt-4 border-t border-white/10 pt-3 text-xs text-fog-700">
+        Illustration of a real exchange from testing: the fact was saved with{' '}
+        <span class="text-ember-400">remember</span> in one session and found in another.
+      </figcaption>
+    </figure>
+  </div>
+
+  <div class="mx-auto max-w-6xl px-6 pb-20 sm:pb-28">
+    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {
+        clients.map((c) => (
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 px-5 py-4">
+            <p class="font-semibold text-fog-100">{c.name}</p>
+            <p class="mt-1 text-sm text-fog-300">{c.how}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <h3 class="mt-14 text-lg font-semibold text-fog-100">Six tools, one memory</h3>
+    <div class="mt-5 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+      {
+        tools.map((t) => (
+          <div class="rounded-xl border border-white/10 bg-navy-900/60 p-6">
+            <h4 class="font-mono-tight text-base font-semibold text-ember-400">{t.name}</h4>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">{t.body}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <div class="mt-10 grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+      {
+        guarantees.map((g) => (
+          <div class="rounded-xl border border-white/10 bg-navy-900/40 p-6">
+            <h4 class="text-base font-semibold text-fog-100">{g.title}</h4>
+            <p class="mt-2 text-sm leading-relaxed text-fog-300">{g.body}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <div class="mt-10 rounded-xl border border-white/10 bg-navy-900/70 p-6">
+      <p class="font-mono-tight mb-3 text-xs text-fog-700">Connect — your gateway already serves it at /mcp</p>
+      <pre class="font-mono-tight overflow-x-auto rounded-lg border border-white/10 bg-ink px-4 py-3 text-sm text-fog-300"><code>{`# Claude Code
+claude mcp add --transport http hupi http://127.0.0.1:8787/mcp \\
+  --header "Authorization: Bearer $HUPI_API_KEY"
+
+# Cursor — ~/.cursor/mcp.json
+{ "mcpServers": { "hupi": { "url": "http://127.0.0.1:8787/mcp" } } }
+
+# Claude Desktop — claude_desktop_config.json
+{ "mcpServers": { "hupi": { "command": "/usr/local/bin/hupi-mcp",
+    "env": { "HUPI_BASE_URL": "https://hupi.example.com", "HUPI_API_KEY": "hupi_sk_..." } } } }`}</code></pre>
+      <p class="mt-4 text-xs leading-relaxed text-fog-700">
+        In VS Code, the HUPI extension (0.1.15+, VS Code 1.101+) registers it for you. It shows
+        up as <span class="text-ember-400">HUPI memory</span> in MCP: List Servers. Leave out the
+        API key on a free single-user install. Team workspaces (Tier 3) use{' '}
+        <span class="text-ember-400">/v1/team/&lbrace;id&rbrace;/mcp</span>.
+      </p>
+    </div>
+  </div>
+</section>
