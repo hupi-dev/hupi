@@ -15,6 +15,7 @@ import (
 	"hupi/internal/crypto"
 	"hupi/internal/dbscope"
 	"hupi/internal/identity"
+	"hupi/internal/pgfmt"
 )
 
 // See internal/store/scope_isolation_test.go's doc comment for how to run
@@ -384,6 +385,51 @@ func TestExportImportRoundTrip_PreservesKeyFactFields(t *testing.T) {
 // cross-version remapping), and a key-fact-to-attribute `derives` edge
 // — then confirms both resolve correctly against the freshly-imported
 // data in a different target scope.
+func TestExportImportRoundTrip_PreservesContextTags(t *testing.T) {
+	db, keys := testDB(t)
+	ctx := context.Background()
+
+	src := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-hpmf-context-tags-src"}
+	dst := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-hpmf-context-tags-dst"}
+	t.Cleanup(func() { cleanupScope(t, db, src); cleanupScope(t, db, dst) })
+
+	enc, keyVersion, err := keys.GetOrCreate(ctx, src)
+	if err != nil {
+		t.Fatalf("resolve key: %v", err)
+	}
+	inputCT, _ := enc.Encrypt("Prefers pnpm over npm.")
+	outputCT, _ := enc.Encrypt("")
+	if err := dbscope.Run(ctx, db, src, src, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			insert into episodes (id, ts, type, input_text, output_text, hash, scope_kind, scope_owner, key_version, context_tags)
+			values ('ep_hpmf_tags_1', '2026-10-10T10:00:00Z', 'interaction', $1, $2, 'sha256:hpmf-tags-1', $3, $4, $5, '{mcp,remember}')
+		`, inputCT, outputCT, src.Kind, src.Owner, keyVersion)
+		return err
+	}); err != nil {
+		t.Fatalf("seed tagged episode: %v", err)
+	}
+
+	dir := t.TempDir()
+	if _, err := ExportScope(ctx, db, keys, src, dir, "test"); err != nil {
+		t.Fatalf("ExportScope: %v", err)
+	}
+	if _, err := ImportScope(ctx, db, keys, dir, dst, false, "test"); err != nil {
+		t.Fatalf("ImportScope: %v", err)
+	}
+
+	var tagsLit string
+	if err := dbscope.Run(ctx, db, dst, dst, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			select context_tags from episodes where scope_kind = $1 and scope_owner = $2
+		`, dst.Kind, dst.Owner).Scan(&tagsLit)
+	}); err != nil {
+		t.Fatalf("read imported episode: %v", err)
+	}
+	if got := pgfmt.ParseTextArray(tagsLit); len(got) != 2 || got[0] != "mcp" || got[1] != "remember" {
+		t.Errorf("imported context_tags = %v, want [mcp remember]", got)
+	}
+}
+
 func TestExportImportRoundTrip_PreservesMemoryRelations(t *testing.T) {
 	db, keys := testDB(t)
 	ctx := context.Background()

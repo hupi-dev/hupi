@@ -295,32 +295,36 @@ func looksLikeCountingRequest(query string) bool {
 // of which of retrieve's return paths fired — see retrieve's doc comment
 // for the retrieval logic itself.
 func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (gateway.RetrievalResult, error) {
-	result, err := s.retrieve(ctx, actingUser, workspace, messages, now)
+	result, _, err := s.retrieve(ctx, actingUser, workspace, messages, now, retrieveOptions{})
 	if err != nil {
 		return result, err
 	}
+	s.auditRead(ctx, actingUser, workspace, map[string]any{
+		"gate":      string(result.Gate),
+		"ref_count": len(result.Refs),
+	})
+	return result, nil
+}
 
-	// A separate transaction, not folded into retrieve's own (read-only)
-	// ones: this is the first and only write Retrieve makes. Best-effort
-	// — an audit-logging failure degrades observability, not the chat
-	// turn itself, same availability-over-durability posture Capture
-	// takes for the episode write (docs/GAP_CLOSURE_PLAN.md §4.3).
+// auditRead writes one `retrieve` audit row for a memory read. A separate
+// transaction, not folded into the read's own (read-only) ones: this is
+// the only write a read makes. Best-effort — an audit-logging failure
+// degrades observability, not the request itself, same
+// availability-over-durability posture Capture takes for the episode
+// write (docs/GAP_CLOSURE_PLAN.md §4.3).
+func (s *Store) auditRead(ctx context.Context, actingUser, workspace identity.Scope, detail map[string]any) {
 	auditErr := dbscope.Run(ctx, s.db, actingUser, workspace, func(tx *sql.Tx) error {
 		return audit.Write(ctx, tx, audit.Entry{
 			EventType:      audit.EventRetrieve,
 			Actor:          actingUser.Owner,
 			ActingScope:    actingUser,
 			WorkspaceScope: workspace,
-			Detail: map[string]any{
-				"gate":      string(result.Gate),
-				"ref_count": len(result.Refs),
-			},
+			Detail:         detail,
 		})
 	})
 	if auditErr != nil {
 		slog.Default().Error("audit log write failed for retrieval", "error", auditErr)
 	}
-	return result, nil
 }
 
 // retrieve is Store.Retrieve's actual implementation, split out so
@@ -343,7 +347,14 @@ func (s *Store) Retrieve(ctx context.Context, actingUser, workspace identity.Sco
 // around the embedding call in the middle (docs/HARDENING_PLAN.md D3):
 // never hold a Postgres transaction open across a network call to an
 // external provider.
-func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time) (gateway.RetrievalResult, error) {
+// retrieveOptions are knobs only explicit-search callers (Store.Search) set; Retrieve passes the zero value.
+type retrieveOptions struct {
+	forceSearch bool // skip stage 1's "nothing worth searching" early return
+	charBudget  int  // context budget override; 0 = contextCharBudget()
+}
+
+// retrieve also returns how many leading Citations are the fixed anchor (self_model + latest-summary pointer).
+func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Scope, messages []provider.Message, now time.Time, opts retrieveOptions) (gateway.RetrievalResult, int, error) {
 	var anchor string
 	var anchorRefs []identity.Ref
 	var anchorCitations []gateway.Citation
@@ -447,18 +458,18 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		return nil
 	})
 	if err != nil {
-		return gateway.RetrievalResult{}, fmt.Errorf("store: %w", err)
+		return gateway.RetrievalResult{}, 0, fmt.Errorf("store: %w", err)
 	}
 
 	if query == "" {
-		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs, Citations: anchorCitations}, nil
+		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs, Citations: anchorCitations}, len(anchorCitations), nil
 	}
 
 	hasSignal := stage1KeywordSignal(query) || stage1QuestionSignal(query)
 
 	// Stage 1 found nothing at all: skipped, no search ever ran.
-	if len(matchedEntities) == 0 && !hasSignal {
-		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs, Citations: anchorCitations}, nil
+	if len(matchedEntities) == 0 && !hasSignal && !opts.forceSearch {
+		return gateway.RetrievalResult{Gate: gateway.GateSkipped, ContextMessage: anchor, Refs: anchorRefs, Citations: anchorCitations}, len(anchorCitations), nil
 	}
 
 	// Stage 2: something looked worth searching for.
@@ -539,10 +550,10 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 	}
 	embedResp, err := s.embedder.Embed(ctx, provider.EmbedRequest{Input: embedInputs})
 	if err != nil {
-		return gateway.RetrievalResult{}, fmt.Errorf("store: embed query: %w", err)
+		return gateway.RetrievalResult{}, 0, fmt.Errorf("store: embed query: %w", err)
 	}
 	if len(embedResp.Vectors) == 0 {
-		return gateway.RetrievalResult{}, errors.New("store: embedder returned no vectors")
+		return gateway.RetrievalResult{}, 0, errors.New("store: embedder returned no vectors")
 	}
 	queryVector := pgfmt.VectorLiteral(embedResp.Vectors[0])
 	queryVectors := make([]string, len(embedResp.Vectors))
@@ -666,7 +677,12 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		return nil
 	})
 	if err != nil {
-		return gateway.RetrievalResult{}, fmt.Errorf("store: %w", err)
+		return gateway.RetrievalResult{}, 0, fmt.Errorf("store: %w", err)
+	}
+
+	budget := contextCharBudget()
+	if opts.charBudget > 0 {
+		budget = opts.charBudget
 	}
 
 	gate := gateway.GatePartial
@@ -676,7 +692,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 
 	return gateway.RetrievalResult{
 		Gate:           gate,
-		ContextMessage: truncateToBudget(sb.String(), contextCharBudget()),
+		ContextMessage: truncateToBudget(sb.String(), budget),
 		Refs:           refs,
 		Citations:      citations,
 		// len(countingFacts) > 0, not just isCountingQuery: the aggregation
@@ -685,7 +701,7 @@ func (s *Store) retrieve(ctx context.Context, actingUser, workspace identity.Sco
 		// a counting-shaped question with no resolved single entity gets
 		// no special context, so there's nothing for it to add here.
 		NeedsAggregationPass: isOrderingQuery || len(countingFacts) > 0,
-	}, nil
+	}, len(anchorCitations), nil
 }
 
 // buildAnchor loads the fixed, unconditional part of the context: the

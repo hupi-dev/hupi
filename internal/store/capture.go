@@ -83,13 +83,13 @@ func (s *Store) Capture(ctx context.Context, scope identity.Scope, ep gateway.Ep
 				input_text, output_text, importance, hash, truncated,
 				memory_gate, retrieved_refs,
 				refers_to, rating, note,
-				scope_kind, scope_owner, key_version
+				scope_kind, scope_owner, key_version, context_tags
 			) values (
 				$1, $2, $3, $4, $5,
 				$6, $7, $8, $9, $10,
 				$11, $12,
 				$13, $14, $15,
-				$16, $17, $18
+				$16, $17, $18, $19::text[]
 			)
 			on conflict (id) do nothing
 		`,
@@ -97,10 +97,14 @@ func (s *Store) Capture(ctx context.Context, scope identity.Scope, ep gateway.Ep
 			inputCT, outputCT, ep.Importance, ep.Hash, ep.Truncated,
 			pgfmt.Nullable(string(ep.MemoryGate)), refsJSON,
 			pgfmt.Nullable(ep.RefersTo), pgfmt.Nullable(string(ep.Rating)), noteCT,
-			scope.Kind, scope.Owner, keyVersion,
+			scope.Kind, scope.Owner, keyVersion, pgfmt.TextArray(ep.ContextTags),
 		)
 		if err != nil {
 			return err
+		}
+		detail := map[string]any{"episode_type": ep.Type}
+		if len(ep.ContextTags) > 0 {
+			detail["context_tags"] = ep.ContextTags
 		}
 		// Logged in the same transaction as the episode insert (not a
 		// separate round trip) so the two can never disagree about
@@ -116,7 +120,7 @@ func (s *Store) Capture(ctx context.Context, scope identity.Scope, ep gateway.Ep
 			ActingScope:    scope,
 			WorkspaceScope: scope,
 			TargetRef:      &identity.Ref{Kind: identity.RefKindEpisode, Scope: scope, ID: ep.ID},
-			Detail:         map[string]any{"episode_type": ep.Type},
+			Detail:         detail,
 		})
 	})
 	if err != nil {

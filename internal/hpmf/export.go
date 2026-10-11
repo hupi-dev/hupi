@@ -89,7 +89,8 @@ func exportEpisodes(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scop
 	return dbscope.Run(ctx, db, scope, scope, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			select id, ts, type, provider_vendor, provider_model, input_text, output_text,
-			       importance, hash, truncated, memory_gate, retrieved_refs, refers_to, rating, note, key_version
+			       importance, hash, truncated, memory_gate, retrieved_refs, refers_to, rating, note, key_version,
+			       context_tags
 			from episodes where scope_kind = $1 and scope_owner = $2 order by ts asc
 		`, scope.Kind, scope.Owner)
 		if err != nil {
@@ -114,11 +115,13 @@ func exportEpisodes(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scop
 				inputCT, outputCT, noteCT     []byte
 				refsJSON                      []byte
 				keyVersion                    int
+				contextTagsLit                string
 			)
 			if err := rows.Scan(
 				&r.ID, &r.TS, &r.Type, &providerVendor, &providerModel,
 				&inputCT, &outputCT, &importance, &r.Hash, &r.Truncated,
 				&memoryGate, &refsJSON, &refersTo, &rating, &noteCT, &keyVersion,
+				&contextTagsLit,
 			); err != nil {
 				return fmt.Errorf("hpmf: scan episode: %w", err)
 			}
@@ -130,6 +133,7 @@ func exportEpisodes(ctx context.Context, db *sql.DB, keys *crypto.KeyStore, scop
 			r.MemoryGate = memoryGate.String
 			r.RefersTo = refersTo.String
 			r.Rating = rating.String
+			r.ContextTags = pgfmt.ParseTextArray(contextTagsLit)
 
 			enc, err := keys.GetVersion(ctx, scope, keyVersion)
 			if err != nil {

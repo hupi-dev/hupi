@@ -192,6 +192,8 @@ type Episode struct {
 	Truncated      bool
 	MemoryGate     MemoryGate
 	RetrievedRefs  []identity.Ref
+	// ContextTags labels where an episode came from (e.g. "mcp", "remember"); stored in episodes.context_tags.
+	ContextTags []string
 
 	// ActorUserID is the caller's own private-scope owner — always equal
 	// to the capture Scope's owner for a private-scope request, but
@@ -229,6 +231,9 @@ type Authenticator interface {
 // mount," the correct Tier 1/2 state, not an error.
 var MountTeamRoutes func(mux *http.ServeMux, h *Handler)
 
+// ResolveTeamScope is nil in the OSS build — set by team.go's init() so routes outside this package (cmd/hupi's /mcp) can reuse the Tier-3 membership check.
+var ResolveTeamScope func(h *Handler, r *http.Request) (actingUser, workspace identity.Scope, status int, err error)
+
 // Handler serves /v1/chat/completions. Mount it with, e.g.:
 //
 //	mux.HandleFunc("/v1/chat/completions", handler.HandleChatCompletions)
@@ -238,7 +243,7 @@ type Handler struct {
 	Capturer  Capturer
 	Auth      Authenticator    // nil = Tier 1/2 mode, no auth required
 	Now       func() time.Time // seam for tests; nil uses time.Now
-	NewID     func() string    // seam for tests; nil uses newEpisodeID
+	NewID     func() string    // seam for tests; nil uses NewEpisodeID
 	Logger    *slog.Logger     // nil uses slog.Default()
 	// OnRetrieve, if set, is called with the exact RetrievalResult this
 	// request's own retrieval step computed (including ContextMessage —
@@ -263,7 +268,7 @@ func (h *Handler) newID() string {
 	if h.NewID != nil {
 		return h.NewID()
 	}
-	return newEpisodeID(h.now())
+	return NewEpisodeID(h.now())
 }
 
 func (h *Handler) log() *slog.Logger {
@@ -414,26 +419,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 // before Tier 3 existed. With h.Auth set, a valid
 // `Authorization: Bearer <key>` header is required.
 func (h *Handler) resolveIdentity(r *http.Request) (identity.Identity, error) {
-	if h.Auth == nil {
-		return identity.Identity{UserID: identity.DefaultUserID}, nil
-	}
-	token := bearerToken(r)
-	if token == "" {
-		metrics.AuthResolveTotal.WithLabelValues("missing").Inc()
-		return identity.Identity{}, errors.New("missing Authorization: Bearer <api key> header")
-	}
-	id, err := h.Auth.Resolve(r.Context(), token)
-	if err != nil {
-		// The real reason (wrong audience, expired, JWKS fetch failure,
-		// unknown key hash, ...) is deliberately not returned to the
-		// caller — that would let an attacker probe why a token was
-		// rejected. It's still worth an operator being able to see it.
-		h.log().Warn("auth: token rejected", "err", err)
-		metrics.AuthResolveTotal.WithLabelValues("invalid").Inc()
-		return identity.Identity{}, errors.New("invalid API key")
-	}
-	metrics.AuthResolveTotal.WithLabelValues("ok").Inc()
-	return id, nil
+	return ResolveIdentity(r, h.Auth, h.log())
 }
 
 // resolveScope determines the scope for a private-route request: always
@@ -444,17 +430,6 @@ func (h *Handler) resolveScope(r *http.Request) (identity.Scope, error) {
 		return identity.Scope{}, err
 	}
 	return id.PrivateScope(), nil
-}
-
-// bearerToken extracts the token from an `Authorization: Bearer <token>`
-// header, or "" if the header is missing or malformed.
-func bearerToken(r *http.Request) string {
-	const prefix = "Bearer "
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, prefix) {
-		return ""
-	}
-	return strings.TrimPrefix(h, prefix)
 }
 
 // resolveProvider maps the client's `model` field to a configured profile
@@ -759,21 +734,12 @@ func (h *Handler) buildEpisode(
 	truncated bool,
 	actor string,
 ) Episode {
-	return Episode{
-		ID:             id,
-		TS:             h.now(),
-		Type:           "interaction",
-		ProviderVendor: p.Vendor(),
-		ProviderModel:  p.Model(),
-		InputText:      inputText,
-		OutputText:     outputText,
-		Importance:     estimateImportance(inputText, outputText),
-		Hash:           hashText(inputText + "\x00" + outputText),
-		Truncated:      truncated,
-		MemoryGate:     result.Gate,
-		RetrievedRefs:  result.Refs,
-		ActorUserID:    actor,
-	}
+	ep := NewInteractionEpisode(id, h.now(), p.Vendor(), p.Model(), inputText, outputText)
+	ep.Truncated = truncated
+	ep.MemoryGate = result.Gate
+	ep.RetrievedRefs = result.Refs
+	ep.ActorUserID = actor
+	return ep
 }
 
 func writeSSEChunk(w http.ResponseWriter, chunk chatCompletionChunk) {
