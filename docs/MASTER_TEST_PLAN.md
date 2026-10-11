@@ -4,7 +4,7 @@ This document maps HUPI's real product stories (as told in
 [BUSINESS_PROCESS.md](BUSINESS_PROCESS.md)'s scenarios and
 [MEMORY_SCENARIOS.md](MEMORY_SCENARIOS.md)'s question-type-by-question-type
 walkthrough) to the actual, already-existing automated tests that cover
-them — 507 `Test*` functions across 28 packages as of this writing, all
+them — 545 `Test*` functions across 30 packages as of this writing, all
 real-Postgres integration tests where the story needs real data, not
 mocked-everything unit tests pretending to be coverage.
 
@@ -14,8 +14,10 @@ story below has no real test backing it, that's stated plainly as a gap,
 not papered over with an inferred "probably fine."
 
 **The gate itself** is [`master-test.sh`](../master-test.sh) — gofmt,
-`go build ./...`, `go vet ./...`, and the full `go test ./...` against a
-real Postgres instance, in that order, any failure stops the gate. It's
+`go build ./...`, `go vet ./...`, the full `go test ./...` against a
+real Postgres instance, then a no-skip re-run of the MCP server's tests
+(see "An AI IDE reads memory over MCP" below), in that order, any
+failure stops the gate. It's
 the same steps `.github/workflows/ci.yml`'s `go` job runs, factored out
 so they're identical in CI and on your own machine:
 
@@ -96,11 +98,30 @@ independent of which vendor is configured) plus
 suite's own provider-agnostic design (never hardcodes a vendor).
 
 ### "Running it day to day" (§10) — backup/restore, re-embedding, ops
-The full `internal/hpmf` export/import suite (12 tests, including
-the two newest: `TestExportImportRoundTrip_PreservesKeyFactFields`,
-`TestExportImportRoundTrip_PreservesMemoryRelations`), `internal/reembed`,
+The full `internal/hpmf` export/import suite (15 tests, including
+`TestExportImportRoundTrip_PreservesKeyFactFields`,
+`TestExportImportRoundTrip_PreservesMemoryRelations`, and the two newest:
+`TestExportImport_SameTransactionVersionsKeepLineage`,
+`TestOrderVersionChain`), `internal/reembed`,
 `internal/backfillmemories` (5 tests), `cmd/hupi-dashboard` (12 tests —
 the ops-visibility surface itself).
+
+### "An AI IDE reads memory over MCP" ([MCP.md](MCP.md))
+`internal/mcpserver`: `TestIntegration_SearchMemoryIsScopedPerCaller`
+(real Postgres — two API keys through `/mcp`; each caller's
+`search_memory`/`get_entity`/`list_entities` sees only their own memory,
+a plain keyword query the chat route's stage-1 gate would skip is still
+found, every read is audited `via: mcp`),
+`TestAuth_EachRequestUsesItsOwnIdentity` (identity is per request, never
+pinned to a session), `TestAuth_MissingOrBadKeyIs401WithChallenge`,
+`TestGuard_OriginAndHost` (browser cross-origin and DNS-rebinding
+requests get 403), `TestHandlerFor_TeamResolver`,
+`TestToolErrors_AreToolResultsWithoutInternals`, the per-tool shape tests;
+`cmd/hupi`'s `TestMountMCP` (route mounted by default, gone with
+`HUPI_ENABLE_MCP=false`, team route only with the Tier-3 hook).
+`master-test.sh` re-runs both packages verbosely and **fails if any of
+their tests skipped** — `go test` counts a skip as a pass, and the scope-
+isolation test is the one that matters most here.
 
 ### Tier 3 / shared-team specifics
 `TestEntityRelationships_AllowsValidDateOrderingsAndUnknownEnds`,

@@ -59,7 +59,8 @@ internal/
   selfcheck/              probe runner used by cmd/hupi-selfcheck
   bootstrap/              startup wiring: config, DB connection, key store
   demo/                   anonymous guest-session lifecycle (create/resolve/sweep) backing the public hosted demo — used by cmd/hupi-demo, cmd/hupi-demo-sweep
-  metrics/                every Prometheus metric HUPI exposes at /metrics, plus an http.HandlerFunc-wrapping helper — used by cmd/hupi, cmd/hupi-demo, internal/gateway
+  metrics/                every Prometheus metric HUPI exposes at /metrics, plus an http.HandlerFunc-wrapping helper — used by cmd/hupi, cmd/hupi-demo, internal/gateway, internal/mcpserver
+  mcpserver/              the gateway's /mcp endpoint: HUPI memory as read-only MCP tools for AI IDEs (official Go SDK), see MCP.md
 
 schema/                   numbered SQL migrations, applied in order 0001 -> 0021
                           migrate.sh — POSIX-sh idempotent runner used by the Docker image/Kubernetes migrate Job (install.sh's bash equivalent is for bare-metal; kept as two separate implementations on purpose, see migrate.sh's own comment)
@@ -104,8 +105,9 @@ bootstrap  -> identity, crypto, provider   (+ blank-imports the pgx driver)
 
 demo       -> identity, auth, dbscope
 metrics    (no internal deps — only prometheus/client_golang + net/http)
+mcpserver  -> identity, gateway, store, metrics   (+ github.com/modelcontextprotocol/go-sdk)
 
-cmd/hupi               -> bootstrap, gateway, store, auth, metrics
+cmd/hupi               -> bootstrap, gateway, store, auth, metrics, mcpserver, identity
 cmd/hupi-demo          -> bootstrap, auth, consolidation, demo, gateway, metrics, store
 cmd/hupi-demo-sweep    -> bootstrap, auth, demo
 cmd/hupi-consolidate   -> bootstrap, consolidation, identity
@@ -146,7 +148,7 @@ ever needing to know Postgres exists.
 | `ingest` | Convert one uploaded file's raw bytes to plain text, once, at ingest time | `Extract` (dispatches on sniffed magic bytes — `.txt`/`.docx`/`.pdf` — never on caller-supplied filename/content-type alone), `Attachment`, `Result` (`Text` + an optional non-fatal `Warning`, e.g. a scanned/image-only PDF with no extractable text layer) |
 | `auth` | Scope provisioning + operator credentials (this repo); real end-user/team auth is a separate, commercially-licensed extension — see §6 | `Store` (`CreateUser`, `CreateTeam`, `ListUsers`, `ListTeams`, `CreateOperator`, `ResolveOperator`, `ListOperators`, `RevokeOperator`); `TeamAuthenticator` interface + `NewTeamAuthenticator` hook (nil unless the Tier 3 extension is present) |
 | `gateway` | The HTTP surface + the interfaces storage must implement | `Handler`, `Retriever`, `Capturer`, `Authenticator`, `Episode`, `RetrievalResult`; `mergeAttachments` (`attachments.go`) — merges file/image attachments into the last user message's content before capture, via `internal/ingest` for documents and `provider.VisionCapable.DescribeImage` for images |
-| `store` | Postgres+pgvector implementation of retrieval/capture/trace | `Store` (`Retrieve`, `Capture`, `Trace`) |
+| `store` | Postgres+pgvector implementation of retrieval/capture/trace | `Store` (`Retrieve`, `Capture`, `Trace`; `Search`, `LookupEntity`, `ListEntities`, `RecentSummaries` for explicit lookups like MCP's) |
 | `consolidation` | Nightly rollup: episodes -> grounded summaries | `Runner` (`RunDaily`, `RunRollup`, `Correct`) |
 | `hpmf` | Portable memory format read/write (MEMORY_FORMAT.md) + age packaging | `ExportScope`, `ExportBundle`, `ImportScope`, `PackAndEncrypt`, `DecryptAndUnpack`, `Manifest` |
 | `rotate` | Online, resumable per-scope key rotation | `Runner` (`Start`, `Continue`, `Status`, `Prune`), `MaxBatchSize` (5000, enforced by `clampBatchSize` at the top of `Continue` — a caller-requested batch above the cap is silently capped, non-positive is coerced to 1) |
@@ -154,7 +156,8 @@ ever needing to know Postgres exists.
 | `selfcheck` | Run probes against a live `Retriever` | `Probe`, `Result`, `Run` |
 | `bootstrap` | Read config, connect Postgres, build the `KeyStore`; register `identity.DefaultUserID` in `users` on every startup (idempotent — `ensureDefaultUser`, not just the one-time legacy-DEK migration path) | `Deps`, `Load` |
 | `demo` | Anonymous guest-session lifecycle (create/resolve/sweep), capped usage — backs the public hosted demo | `Store` (`CreateSession`, `Resolve`, `ConsolidateNow`, `Sweep`), `IPRateLimiter` |
-| `metrics` | Every Prometheus metric HUPI exposes at `/metrics`, plus a handler-wrapping helper | `InstrumentHandler`, `RetrievalGateTotal`, `AuthResolveTotal`, `ProviderCallDuration`, `ProviderCallErrorsTotal`, `CaptureTotal`, `CaptureDuration`, `ConsolidationRunsTotal`, `ConsolidationDuration`, `GroundingFactsTotal`, `RollupRunsTotal` |
+| `metrics` | Every Prometheus metric HUPI exposes at `/metrics`, plus a handler-wrapping helper | `InstrumentHandler`, `RetrievalGateTotal`, `AuthResolveTotal`, `ProviderCallDuration`, `ProviderCallErrorsTotal`, `CaptureTotal`, `CaptureDuration`, `ConsolidationRunsTotal`, `ConsolidationDuration`, `GroundingFactsTotal`, `RollupRunsTotal`, `MCPToolCallsTotal`, `MCPToolCallDuration` |
+| `mcpserver` | Serve memory over MCP at the gateway's `/mcp`: per-request auth and scope, Origin/Host guard, four read-only tools ([MCP.md](MCP.md)) | `Server` (`New`, `Handler`, `HandlerFor`), `Backend`, `Config`, `ConfigFromEnv`, `Enabled` |
 
 ## 4. Cross-cutting concerns (these three show up in nearly every call chain)
 
@@ -580,6 +583,7 @@ The full set of hooks, all following this pattern:
 | Hook (declared here) | Set by (in `hupi-t3`) | Nil behavior |
 |---|---|---|
 | `gateway.MountTeamRoutes` | `internal/gateway/team.go` | `/v1/team/...` never mounted |
+| `gateway.ResolveTeamScope` | `internal/gateway/team.go` | `/v1/team/{team_id}/mcp` never mounted (`cmd/hupi`'s `mountMCP`); `/mcp` itself is unaffected |
 | `auth.NewTeamAuthenticator` | `internal/auth/team.go` (dispatches to `internal/auth/oidc.go` too, when OIDC env vars are set — see [OIDC.md](OIDC.md)) | `HUPI_REQUIRE_AUTH=true` fails at startup with a clear error (`cmd/hupi/main.go`'s `resolveAuth`) instead of silently granting no-auth access |
 | `consolidation`'s `teamPromptProvider` | `internal/consolidation/team.go` | Every summary uses `summarySystemPrompt`, even for a `shared` scope — harmless, since Tier 1/2 never produces one |
 | `cmd/hupi-admin`'s `runAddMember`/`runCreateKey` | `cmd/hupi-admin/team.go` | Those two subcommands return "requires the HUPI Enterprise build" instead of running |

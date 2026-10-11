@@ -22,6 +22,8 @@ import (
 	"hupi/internal/auth"
 	"hupi/internal/bootstrap"
 	"hupi/internal/gateway"
+	"hupi/internal/identity"
+	"hupi/internal/mcpserver"
 	"hupi/internal/metrics"
 	"hupi/internal/store"
 )
@@ -72,6 +74,11 @@ func run() error {
 	if gateway.MountTeamRoutes != nil {
 		gateway.MountTeamRoutes(mux, handler)
 	}
+	// docs/MCP.md: the same memory, served over the Model Context Protocol
+	// to AI IDEs that bring their own model (Claude Code, Cursor). Same
+	// auth as the chat route; on unless HUPI_ENABLE_MCP=false. The team
+	// route needs the Tier-3 extension's ResolveTeamScope hook.
+	mountMCP(mux, st, teamAuth, handler)
 	// docs/GAP_CLOSURE_PLAN.md §5: Kubernetes liveness/readiness probes,
 	// not part of the OpenAI-compatible surface above — deliberately kept
 	// out of internal/gateway, which owns that API, not deployment
@@ -109,6 +116,22 @@ func run() error {
 			return nil
 		}
 		return err
+	}
+}
+
+// mountMCP mounts /mcp (and, with the Tier-3 hook, /v1/team/{team_id}/mcp)
+// unless HUPI_ENABLE_MCP=false.
+func mountMCP(mux *http.ServeMux, b mcpserver.Backend, auth gateway.Authenticator, handler *gateway.Handler) {
+	if !mcpserver.Enabled() {
+		return
+	}
+	ms := mcpserver.New(b, auth, mcpserver.ConfigFromEnv())
+	mux.HandleFunc("/mcp", metrics.InstrumentHandler("/mcp", ms.Handler().ServeHTTP))
+	if gateway.ResolveTeamScope != nil {
+		team := ms.HandlerFor(func(r *http.Request) (identity.Scope, identity.Scope, int, error) {
+			return gateway.ResolveTeamScope(handler, r)
+		})
+		mux.HandleFunc("/v1/team/{team_id}/mcp", metrics.InstrumentHandler("/v1/team/{team_id}/mcp", team.ServeHTTP))
 	}
 }
 

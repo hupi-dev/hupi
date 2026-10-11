@@ -129,6 +129,7 @@ Kubernetes/Helm.
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | The gateway's HTTP routes, call chain by call chain |
 | [docs/ADMIN_UI.md](docs/ADMIN_UI.md) | The operator admin console |
 | [docs/VSCODE_EXTENSION.md](docs/VSCODE_EXTENSION.md) | The VS Code extension — chat sidebar and inline edit |
+| [docs/MCP.md](docs/MCP.md) | HUPI memory in Claude Code, Cursor and other MCP clients, via the gateway's `/mcp` endpoint |
 | [docs/CODE_GUIDE.md](docs/CODE_GUIDE.md) | Project layout and package dependency graph |
 | [docs/MEMORY_FORMAT.md](docs/MEMORY_FORMAT.md) | The portable memory format (HPMF) |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Real, independently-reproducible LoCoMo/LongMemEval scores and how to reproduce them |
