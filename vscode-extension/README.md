@@ -66,6 +66,8 @@ https://marketplace.visualstudio.com/items?itemName=hupi.hupi-vscode.
   - HUPI starts the servers, offers their tools, runs what the model asks
     for and sends the results back.
   - VS Code asks before any tool that changes something.
+  - Each tool call shows as a card (arguments, status, result), and
+    **Stop** cancels a reply mid-way.
   - Only your question and the final answer go into HUPI memory, never
     tool output.
   - Related settings: `hupi.agent.maxSteps`,

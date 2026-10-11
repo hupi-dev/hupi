@@ -17,7 +17,7 @@ import { createClient, streamChat, streamChatTurn, type AgentMessage, type Strea
 import { loadConfig } from './config';
 import { HupiChatViewProvider, textOnly } from './chatViewProvider';
 
-type Posted = { type: string; text?: string; message?: string; items?: unknown[] };
+type Posted = { type: string; text?: string; message?: string; items?: unknown[]; id?: string; name?: string; argsPreview?: string; ok?: boolean; summary?: string };
 
 function makeProvider() {
   const posted: Posted[] = [];
@@ -39,7 +39,7 @@ function makeProvider() {
   const context = { extensionUri: { path: '/fake' } } as unknown as vscode.ExtensionContext;
   const provider = new HupiChatViewProvider(context, context.extensionUri as unknown as vscode.Uri);
   provider.resolveWebviewView({ webview } as unknown as vscode.WebviewView);
-  return { posted, send: (text: string) => receive!({ type: 'send', text }) };
+  return { posted, send: (text: string) => receive!({ type: 'send', text }), message: (m: unknown) => receive!(m) };
 }
 
 let sent: { messages: AgentMessage[]; tools: string[]; toolChoice?: string }[];
@@ -84,7 +84,9 @@ describe('HUPI agent in the sidebar', () => {
     expect(sent[0].tools).toEqual(['mcp_github_search_issues']);
     expect(invokeTool).toHaveBeenCalledWith('mcp_github_search_issues', { input: { q: 'bug' }, toolInvocationToken: undefined }, expect.anything());
     expect(sent[1].messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
-    expect(posted.some((p) => p.type === 'delta' && p.text?.includes('Running tool `mcp_github_search_issues`'))).toBe(true);
+    expect(posted.find((p) => p.type === 'toolCall')).toEqual({ type: 'toolCall', id: 'c1', name: 'mcp_github_search_issues', argsPreview: '{"q":"bug"}' });
+    expect(posted.find((p) => p.type === 'toolResult')).toEqual({ type: 'toolResult', id: 'c1', ok: true, summary: '3 open bugs' });
+    expect(posted.findIndex((p) => p.type === 'toolCall')).toBeLessThan(posted.findIndex((p) => p.type === 'toolResult'));
     expect(posted.filter((p) => p.type === 'citations')).toHaveLength(1);
     expect(posted[posted.length - 1]).toEqual({ type: 'done' });
 
@@ -137,6 +139,73 @@ describe('HUPI agent in the sidebar', () => {
     const { send } = makeProvider();
     await send('Q');
     expect(sent[0].tools).toEqual([]);
+  });
+});
+
+describe('Stop and sidebar approval', () => {
+  const toolTurn = () =>
+    scriptTurns({ text: '', calls: [{ id: 'c1', name: 'mcp_github_search_issues', args: '{"q":"x"}' }] }, { text: 'Final.' });
+
+  it('Stop cancels the turn, answers "stopped", and rolls the turn back', async () => {
+    // A tool that runs until it's cancelled.
+    invokeTool.mockImplementation(
+      (_n, _o, token) =>
+        new Promise((_resolve, reject) => {
+          (token as vscode.CancellationToken).onCancellationRequested(() => reject(new Error('cancelled')));
+        }),
+    );
+    toolTurn();
+    const { posted, send, message } = makeProvider();
+    const turn = send('Q');
+    await vi.waitFor(() => expect(posted.some((p) => p.type === 'toolCall')).toBe(true));
+    await message({ type: 'cancel' });
+    await turn;
+    expect(posted[posted.length - 1]).toEqual({ type: 'stopped' });
+    expect(posted.some((p) => p.type === 'error' || p.type === 'done')).toBe(false);
+
+    scriptTurns({ text: 'Next answer.' });
+    await send('Next');
+    expect(sent[sent.length - 1].messages).toEqual([{ role: 'user', content: 'Next' }]);
+  });
+
+  it('with approval "all", waits for Allow in the sidebar before running the tool', async () => {
+    __setConfig({ 'agent.enabled': true, 'agent.approval': 'all', 'fileContext.enabled': false });
+    invokeTool.mockResolvedValue(new LanguageModelToolResult([new LanguageModelTextPart('ok')]));
+    toolTurn();
+    const { posted, send, message } = makeProvider();
+    const turn = send('Q');
+    await vi.waitFor(() => expect(posted.some((p) => p.type === 'approvalRequest')).toBe(true));
+    expect(posted.find((p) => p.type === 'approvalRequest')).toEqual({ type: 'approvalRequest', id: 'c1', name: 'mcp_github_search_issues', argsPreview: '{"q":"x"}' });
+    expect(invokeTool).not.toHaveBeenCalled();
+    await message({ type: 'approve', id: 'c1' });
+    await turn;
+    expect(invokeTool).toHaveBeenCalledTimes(1);
+    expect(posted[posted.length - 1]).toEqual({ type: 'done' });
+  });
+
+  it('with approval "all", Deny skips the tool and tells the model', async () => {
+    __setConfig({ 'agent.enabled': true, 'agent.approval': 'all', 'fileContext.enabled': false });
+    toolTurn();
+    const { posted, send, message } = makeProvider();
+    const turn = send('Q');
+    await vi.waitFor(() => expect(posted.some((p) => p.type === 'approvalRequest')).toBe(true));
+    await message({ type: 'deny', id: 'c1' });
+    await turn;
+    expect(invokeTool).not.toHaveBeenCalled();
+    expect(sent[1].messages[2]).toEqual({ role: 'tool', tool_call_id: 'c1', content: 'The user declined to run this tool.' });
+    expect(posted.find((p) => p.type === 'toolResult')).toMatchObject({ id: 'c1', ok: false });
+  });
+
+  it('New Chat while waiting for approval denies it and drops the turn', async () => {
+    __setConfig({ 'agent.enabled': true, 'agent.approval': 'all', 'fileContext.enabled': false });
+    toolTurn();
+    const { posted, send, message } = makeProvider();
+    const turn = send('Q');
+    await vi.waitFor(() => expect(posted.some((p) => p.type === 'approvalRequest')).toBe(true));
+    await message({ type: 'clear' });
+    await turn;
+    expect(invokeTool).not.toHaveBeenCalled();
+    expect(posted.some((p) => p.type === 'done' || p.type === 'stopped' || p.type === 'error')).toBe(false);
   });
 });
 

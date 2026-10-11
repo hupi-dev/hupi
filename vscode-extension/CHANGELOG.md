@@ -10,14 +10,20 @@
   - It runs the calls the model asks for and sends the results back,
     until the model answers.
   - VS Code asks before any tool that changes something;
-    `hupi.agent.approval: "all"` asks before every tool.
+    `hupi.agent.approval: "all"` also asks before read-only tools.
   - `hupi.agent.maxSteps` (default 10) and `hupi.agent.maxToolResultChars`
     (default 20000) bound a turn.
   - HUPI memory's own MCP tools aren't offered, since the chat already
     uses your memory.
   - HUPI memory stores only your question and the final answer, never
     tool output.
-  - Tool activity shows as short notes in the reply for now.
+  - Each tool call shows as a card in the reply, with its arguments, its
+    status (running, done, failed or stopped) and a collapsible result.
+    Tool output is always shown as plain text.
+  - With `hupi.agent.approval: "all"`, the card asks Allow/Deny right in
+    the sidebar.
+- A Stop button replaces Send while a reply streams. It works for plain
+  replies too, and stopping a turn rolls it out of the conversation.
 - A failed or cancelled reply is now always removed from the
   conversation history, including after a config or sign-in error, so the
   next message isn't sent with a dangling question.
