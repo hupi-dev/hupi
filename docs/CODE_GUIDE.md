@@ -60,7 +60,7 @@ internal/
   bootstrap/              startup wiring: config, DB connection, key store
   demo/                   anonymous guest-session lifecycle (create/resolve/sweep) backing the public hosted demo — used by cmd/hupi-demo, cmd/hupi-demo-sweep
   metrics/                every Prometheus metric HUPI exposes at /metrics, plus an http.HandlerFunc-wrapping helper — used by cmd/hupi, cmd/hupi-demo, internal/gateway, internal/mcpserver
-  mcpserver/              the gateway's /mcp endpoint: HUPI memory as read-only MCP tools for AI IDEs (official Go SDK), see MCP.md
+  mcpserver/              the gateway's /mcp endpoint: HUPI memory as MCP tools for AI IDEs (search/inspect, plus remember/log_exchange) (official Go SDK), see MCP.md
 
 schema/                   numbered SQL migrations, applied in order 0001 -> 0021
                           migrate.sh — POSIX-sh idempotent runner used by the Docker image/Kubernetes migrate Job (install.sh's bash equivalent is for bare-metal; kept as two separate implementations on purpose, see migrate.sh's own comment)
@@ -157,7 +157,7 @@ ever needing to know Postgres exists.
 | `bootstrap` | Read config, connect Postgres, build the `KeyStore`; register `identity.DefaultUserID` in `users` on every startup (idempotent — `ensureDefaultUser`, not just the one-time legacy-DEK migration path) | `Deps`, `Load` |
 | `demo` | Anonymous guest-session lifecycle (create/resolve/sweep), capped usage — backs the public hosted demo | `Store` (`CreateSession`, `Resolve`, `ConsolidateNow`, `Sweep`), `IPRateLimiter` |
 | `metrics` | Every Prometheus metric HUPI exposes at `/metrics`, plus a handler-wrapping helper | `InstrumentHandler`, `RetrievalGateTotal`, `AuthResolveTotal`, `ProviderCallDuration`, `ProviderCallErrorsTotal`, `CaptureTotal`, `CaptureDuration`, `ConsolidationRunsTotal`, `ConsolidationDuration`, `GroundingFactsTotal`, `RollupRunsTotal`, `MCPToolCallsTotal`, `MCPToolCallDuration` |
-| `mcpserver` | Serve memory over MCP at the gateway's `/mcp`: per-request auth and scope, Origin/Host guard, four read-only tools ([MCP.md](MCP.md)) | `Server` (`New`, `Handler`, `HandlerFor`), `Backend`, `Config`, `ConfigFromEnv`, `Enabled` |
+| `mcpserver` | Serve memory over MCP at the gateway's `/mcp`: per-request auth and scope, Origin/Host guard, four read tools and two write tools with a credential check ([MCP.md](MCP.md)) | `Server` (`New`, `Handler`, `HandlerFor`), `Backend`, `Config`, `ConfigFromEnv`, `Enabled` |
 
 ## 4. Cross-cutting concerns (these three show up in nearly every call chain)
 

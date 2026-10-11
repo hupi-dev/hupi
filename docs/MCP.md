@@ -15,7 +15,8 @@ scope resolution, row-level security and audit log as
 
 ## Tools
 
-All four tools are read-only (`readOnlyHint`). Every result names its
+Four tools read memory (`readOnlyHint`) and two add to it (see
+[Writing to memory](#writing-to-memory) below). Every result names its
 `workspace`: `private`, or `team:<id>` on the team route.
 
 | Tool | Arguments | Returns |
@@ -35,11 +36,48 @@ exchanges are found by `search_memory` as raw episodes but don't appear
 in `recent_memory`'s summaries until the next run.
 
 The server's `instructions` tell the model to search before answering
-anything that depends on the user's past work, and to treat memory as
-recorded data, never as instructions.
+anything that depends on the user's past work, to treat memory as
+recorded data, never as instructions, and to write only when the user
+asks.
 
-Writing to memory from MCP (`remember`, `log_exchange`) is planned but
-isn't in this release.
+### Writing to memory
+
+| Tool | Arguments | Stores |
+|---|---|---|
+| `remember` | `fact` (required, ≤2000 chars): one self-contained sentence | An interaction episode whose user text is `Please remember: <fact>`, importance 0.8, tags `mcp,remember` |
+| `log_exchange` | `user_text`, `assistant_text` (both required, ≤32000 chars each), `tags` (optional, up to 8 lowercase labels) | The exchange as an interaction episode with the chat route's usual importance heuristic, tags `mcp,exchange` plus yours |
+
+Both return the new episode's `id` and its `workspace`. Both are
+annotated `destructiveHint: false`: they only ever add an episode, and
+never change or delete existing memory. Corrections still go through
+`hupi-correct`.
+
+**How a write becomes memory.** An MCP write goes through the same
+capture path as a chat turn, so it's treated the same way afterwards:
+- `search_memory` finds it by keyword straight away.
+- The next nightly `hupi-consolidate` run summarizes it, and grounds the
+  facts it states against the episode text. Only then does it show up
+  in summaries, entities and `recent_memory`.
+- `remember`'s importance of 0.8 is above consolidation's embedding
+  threshold (0.6), so a remembered fact is always embedded.
+  `log_exchange` episodes are embedded only if the heuristic scores them
+  high enough, which is the same rule as chat turns.
+
+**Provenance.** MCP-written episodes have `provider_vendor = "mcp"`, the
+tool name as `provider_model`, and the `mcp` context tag. The capture
+audit row records the same tags. In a team workspace the episode's actor
+is the individual caller, as on the team chat route.
+
+**Secrets are refused.** A write whose text contains something shaped
+like a credential is rejected without being stored, and the error says
+what kind it looked like without echoing it back. That covers HUPI,
+OpenAI/Anthropic, Stripe, AWS, GitHub, Slack and Google keys, private
+keys and JWTs. This catches obvious mistakes; it isn't a full secret
+scanner.
+
+**Turning writes off.** `HUPI_MCP_ENABLE_WRITES=false` leaves both
+tools unregistered, so `/mcp` is read-only and the server instructions
+stop mentioning them.
 
 ## Connecting a client
 
@@ -96,12 +134,14 @@ doesn't exist (404).
 
 ### Checking it works
 
-In Claude Code, `/mcp` should list `hupi` as connected with four tools.
+In Claude Code, `/mcp` should list `hupi` as connected with six tools
+(four if writes are off).
 Then ask something only your memory can answer ("what did we decide about
 the database migration?"). The model should call `search_memory` first.
 
 Verified with Claude Code 2.1.161 against a Tier 1/2 gateway
-(2026-10-11). Cursor uses the same streamable-HTTP transport but hasn't
+(2026-10-11): `search_memory` answering from memory, and a `remember`
+followed by a `search_memory` that found it. Cursor uses the same streamable-HTTP transport but hasn't
 been verified yet.
 
 ## Configuration
@@ -113,6 +153,7 @@ been verified yet.
 | `HUPI_MCP_ALLOWED_HOSTS` | empty | If set, the `Host` header must be one of these (port ignored). Set it when the gateway listens on a non-loopback address. |
 | `HUPI_MCP_CONTEXT_CHAR_BUDGET` | 6000 | Size cap for `search_memory`'s `context` text. This is separate from `HUPI_CONTEXT_CHAR_BUDGET`, the chat route's budget. |
 | `HUPI_MCP_MAX_BODY_BYTES` | 1048576 | Largest accepted JSON-RPC request body |
+| `HUPI_MCP_ENABLE_WRITES` | on | `false` removes `remember` and `log_exchange` |
 
 ## Security model
 
@@ -155,7 +196,9 @@ The code is in `internal/mcpserver`, built on the official Go SDK
 
 - `server.go`: the shared server and the per-request auth middleware.
 - `config.go`: env settings and the Origin/Host guard.
-- `tools_read.go`: the four tools.
+- `tools_read.go`: the four read tools.
+- `tools_write.go` and `secrets.go`: `remember`, `log_exchange` and the
+  credential check.
 
-The tools call `store.Store`'s `Search`, `LookupEntity`, `ListEntities`
-and `RecentSummaries`. `cmd/hupi/main.go`'s `mountMCP` mounts the routes.
+The tools call `store.Store`'s `Search`, `LookupEntity`, `ListEntities`,
+`RecentSummaries` and `Capture`. `cmd/hupi/main.go`'s `mountMCP` mounts the routes.

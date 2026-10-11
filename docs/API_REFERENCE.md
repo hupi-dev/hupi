@@ -1,7 +1,7 @@
 # API Reference — Routes, Triggers, and Call Chains
 
 The gateway (`cmd/hupi`) exposes exactly two memory/chat routes in this
-OSS build, plus the read-only MCP endpoint `/mcp` (covered in its own
+OSS build, plus the MCP endpoint `/mcp` (covered in its own
 document, [MCP.md](MCP.md)) and two Kubernetes probe endpoints that carry
 no application logic. This document covers each of the two in full: when it's
 triggered, what it expects and returns, every status code it can
@@ -18,9 +18,11 @@ mux.HandleFunc("POST /v1/feedback",         handler.HandleFeedback)
 
 No other methods are accepted on either path (`405 Method Not Allowed`
 otherwise). The one other *memory-bearing* route in this OSS build is
-`/mcp`, mounted by `mountMCP` unless `HUPI_ENABLE_MCP=false`. It reads
-memory for AI IDEs over the Model Context Protocol and writes nothing;
-see [MCP.md](MCP.md) for its tools, auth and Origin/Host guard. The
+`/mcp`, mounted by `mountMCP` unless `HUPI_ENABLE_MCP=false`. It serves
+memory to AI IDEs over the Model Context Protocol: four read tools, plus
+`remember`/`log_exchange`, which capture episodes through the same
+`Store.Capture` as chat (off with `HUPI_MCP_ENABLE_WRITES=false`). See
+[MCP.md](MCP.md) for its tools, auth and Origin/Host guard. The
 gateway is deliberately a narrow surface.
 
 **Team-scoped routes aren't part of this OSS build.** `cmd/hupi` also

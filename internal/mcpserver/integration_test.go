@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -170,5 +171,52 @@ func TestIntegration_SearchMemoryIsScopedPerCaller(t *testing.T) {
 	}
 	if n < 3 {
 		t.Errorf("mcp audit rows for alice = %d, want >= 3", n)
+	}
+}
+
+func TestIntegration_RememberIsSearchableAtOnceAndScoped(t *testing.T) {
+	pg := testPG(t)
+	alice := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-mcp-w-alice"}
+	bob := identity.Scope{Kind: identity.ScopeKindPrivate, Owner: "user:test-mcp-w-bob"}
+	pg.cleanup(t, alice, bob)
+	t.Cleanup(func() { pg.cleanup(t, alice, bob) })
+
+	s := quietServer(pg.st, fakeAuth{"ka": alice.Owner, "kb": bob.Owner}, Config{})
+	asAlice := connect(t, s.Handler(), "ka")
+	asBob := connect(t, s.Handler(), "kb")
+
+	var w WriteOutput
+	if res := call(t, asAlice, "remember", map[string]any{"fact": "The capybara reporting job runs at 02:00 UTC."}, &w); res.IsError {
+		t.Fatalf("remember: %s", resultText(res))
+	}
+
+	var vendor, model string
+	var importance float64
+	var tags string
+	if err := dbscope.Run(context.Background(), pg.db, alice, alice, func(tx *sql.Tx) error {
+		return tx.QueryRow(`select provider_vendor, provider_model, importance, array_to_string(context_tags, ',') from episodes where id = $1`, w.ID).
+			Scan(&vendor, &model, &importance, &tags)
+	}); err != nil {
+		t.Fatalf("read stored episode: %v", err)
+	}
+	if vendor != "mcp" || model != "remember" || math.Abs(importance-rememberImportance) > 1e-6 || tags != "mcp,remember" {
+		t.Errorf("stored episode: vendor %q model %q importance %v tags %q", vendor, model, importance, tags)
+	}
+
+	var hits SearchMemoryOutput
+	call(t, asAlice, "search_memory", map[string]any{"query": "capybara reporting job"}, &hits)
+	found := false
+	for _, h := range hits.Hits {
+		found = found || h.ID == w.ID
+	}
+	if !found {
+		t.Errorf("alice can't find what she just remembered: %+v", hits)
+	}
+
+	call(t, asBob, "search_memory", map[string]any{"query": "capybara reporting job"}, &hits)
+	for _, h := range hits.Hits {
+		if h.ID == w.ID {
+			t.Errorf("CROSS-SCOPE LEAK: bob found alice's remembered fact")
+		}
 	}
 }

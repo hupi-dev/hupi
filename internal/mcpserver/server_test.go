@@ -34,7 +34,23 @@ type fakeBackend struct {
 	lastQuery string
 	lastLimit int
 	lastSince time.Time
+	captured  []capturedEpisode
 	err       error
+}
+
+type capturedEpisode struct {
+	scope identity.Scope
+	ep    gateway.Episode
+}
+
+func (f *fakeBackend) Capture(_ context.Context, sc identity.Scope, ep gateway.Episode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.captured = append(f.captured, capturedEpisode{sc, ep})
+	return nil
 }
 
 func (f *fakeBackend) record(call string, ws identity.Scope, ra store.ReadAudit) {
@@ -143,7 +159,7 @@ func resultText(res *mcp.CallToolResult) string {
 }
 
 func TestListTools_ReadToolsAreReadOnlyWithSchemas(t *testing.T) {
-	cs := connect(t, quietServer(&fakeBackend{}, nil, Config{}).Handler(), "")
+	cs := connect(t, quietServer(&fakeBackend{}, nil, Config{DisableWrites: true}).Handler(), "")
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
