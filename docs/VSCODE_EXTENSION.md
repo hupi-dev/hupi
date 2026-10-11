@@ -66,7 +66,9 @@ set.
 This API needs VS Code 1.101+, which is why `engines.vscode` is
 `^1.101.0`.
 
-**The HUPI agent (preview, `hupi.agent.enabled`, off by default).** With
+**The HUPI agent (preview, `hupi.agent.enabled`, off by default; on in
+HUPI Code).** The user-facing guide is [AGENT.md](AGENT.md); this section
+covers how it's built. With
 the agent on, the sidebar chat can use tools from your MCP servers to
 answer. Each turn:
 1. It starts your configured MCP servers with `workbench.mcp.startServer`.
