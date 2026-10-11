@@ -1,5 +1,11 @@
 package gateway
 
+import (
+	"encoding/json"
+
+	"hupi/internal/provider"
+)
+
 // Wire-format types for the client-facing /v1/chat/completions endpoint —
 // deliberately separate from provider.ChatRequest/ChatResponse
 // (internal/provider). This is the shape any OpenAI SDK sends and expects
@@ -9,6 +15,17 @@ package gateway
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// Tool calling, in OpenAI's shape (provider/tools.go has the types):
+	// an assistant message asking for tools carries ToolCalls, and a
+	// role "tool" message answering one carries ToolCallID.
+	ToolCalls  []provider.ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string              `json:"tool_call_id,omitempty"`
+}
+
+// MarshalJSON writes "content": null for an assistant message that only
+// carries tool calls, as OpenAI clients expect.
+func (m chatMessage) MarshalJSON() ([]byte, error) {
+	return json.Marshal(provider.Message{Role: provider.Role(m.Role), Content: m.Content, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID})
 }
 
 // chatAttachment is additive, optional file/image content attached to a
@@ -33,6 +50,11 @@ type chatCompletionRequest struct {
 	Stream      bool             `json:"stream"`
 	Temperature *float64         `json:"temperature,omitempty"`
 	MaxTokens   *int             `json:"max_tokens,omitempty"`
+	// Tool calling, relayed to the provider as-is (see agentturn.go for
+	// how HUPI remembers a multi-request agent turn).
+	Tools             []provider.ToolDef `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage    `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool              `json:"parallel_tool_calls,omitempty"`
 }
 
 type chatCompletionChoice struct {
@@ -68,7 +90,23 @@ type chatCompletionResponse struct {
 }
 
 type chatCompletionChunkDelta struct {
-	Content string `json:"content,omitempty"`
+	Content   string                  `json:"content,omitempty"`
+	ToolCalls []chatToolCallDeltaWire `json:"tool_calls,omitempty"`
+}
+
+// chatToolCallDeltaWire is one streamed tool-call fragment, in OpenAI's
+// shape: index groups fragments of the same call; id, type and name come
+// once, arguments arrives in pieces.
+type chatToolCallDeltaWire struct {
+	Index    int                      `json:"index"`
+	ID       string                   `json:"id,omitempty"`
+	Type     string                   `json:"type,omitempty"`
+	Function chatToolCallFunctionPart `json:"function"`
+}
+
+type chatToolCallFunctionPart struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 type chatCompletionChunkChoice struct {

@@ -108,6 +108,41 @@ before retrieval's query is built — see ARCHITECTURE.md § Attachments.
 Capped at 5 attachments per request and 8 MiB per attachment (checked
 after base64 decode, before any parsing/upstream call).
 
+**Tool calling** (optional, OpenAI's shape) is relayed to the model;
+HUPI never runs a tool itself.
+- **Request:** `tools` (at most 128; names must match
+  `^[a-zA-Z0-9_-]{1,64}$`), `tool_choice` and `parallel_tool_calls`.
+- **Messages:** an assistant message can carry `tool_calls` (each with an
+  `id` and a function name), and a `role: "tool"` message carrying the
+  answering `tool_call_id` returns its result.
+- **Response:** `message.tool_calls` and `finish_reason: "tool_calls"`
+  when the model asks for tools. In a stream, `delta.tool_calls`
+  fragments are forwarded as they arrive.
+- **Refused with 400:** a profile with `supports_tools: false`, and the
+  public demo (`cmd/hupi-demo`).
+
+**How an agent turn is remembered.** An agent turn is one user question
+answered over several requests: the model asks for tools, the client
+sends their results back, and so on until a text answer. HUPI treats it
+as one turn (`internal/gateway/agentturn.go`):
+- **Retrieval runs once per turn.** The aggregation pass and attachment
+  merging do too. The first request computes them, and later requests of
+  the same turn reuse the result from a small in-process cache (15
+  minutes). The cache key is the conversation up to the user's question,
+  plus the scope and the provider profile. So every step sees the same
+  injected memory.
+- **Capture happens once, at the final answer.**
+  - What's stored: the user's question and the final text, tagged
+    `context_tags = ["agent", "tool:<name>", …]` with the tools the turn
+    used.
+  - Never stored: tool arguments and results.
+  - Responses that only ask for tools aren't captured.
+  - A turn cancelled or failing before its final answer stores nothing.
+    A plain reply cut off mid-stream is still stored, marked truncated,
+    as before.
+- **Plain chat is unchanged:** no `tools` and no tool messages means none
+  of this applies.
+
 **Optional header**: `X-Hupi-Memory: off` — bypasses retrieval entirely
 for this one request (not even the anchor is injected).
 
@@ -156,7 +191,7 @@ OpenAI-shaped `data: {...}` chunks, terminated by `data: [DONE]`.
 | Code | When |
 |---|---|
 | 200 | Success (streaming or not) |
-| 400 | Malformed JSON body, `messages` is empty, an invalid message `role`, or a malformed `attachments` entry (more than 5, over 8 MiB, bad base64, disallowed image MIME, or attachments present with no user message to attach them to) |
+| 400 | Malformed JSON body, `messages` is empty, an invalid message `role`, a malformed `attachments` entry (more than 5, over 8 MiB, bad base64, disallowed image MIME, or attachments present with no user message to attach them to), or an invalid tool request (a `tool` message without `tool_call_id`, a tool call without an id or name or on a non-assistant message, more than 128 tools, a bad tool name, a non-`function` tool, or tools sent to a `supports_tools: false` profile or the public demo) |
 | 401 | `HUPI_REQUIRE_AUTH=true` and the `Authorization` header is missing or the key is invalid |
 | 405 | Any method other than POST |
 | 413 | Request body exceeds the configured size limit (`HUPI_MAX_REQUEST_BODY_BYTES`, default 20 MiB) |

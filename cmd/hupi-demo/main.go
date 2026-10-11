@@ -76,6 +76,10 @@ func run() error {
 		Retriever: st,
 		Capturer:  st,
 		Auth:      demoStore,
+		// The public demo relays no tool calling: arbitrary tool traffic
+		// widens what an anonymous endpoint carries, and every agent step
+		// would spend a guest's message cap.
+		DisallowTools: true,
 	}
 
 	allowedOrigin := envOr("HUPI_DEMO_ALLOWED_ORIGIN", "https://hupi.dev")

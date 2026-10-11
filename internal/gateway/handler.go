@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"hupi/internal/identity"
@@ -245,6 +246,10 @@ type Handler struct {
 	Now       func() time.Time // seam for tests; nil uses time.Now
 	NewID     func() string    // seam for tests; nil uses NewEpisodeID
 	Logger    *slog.Logger     // nil uses slog.Default()
+	// DisallowTools refuses tool calling with a 400 — set by the public
+	// demo (cmd/hupi-demo), which shouldn't relay arbitrary tool traffic
+	// and counts every request against a guest's message cap.
+	DisallowTools bool
 	// OnRetrieve, if set, is called with the exact RetrievalResult this
 	// request's own retrieval step computed (including ContextMessage —
 	// what step 3 below actually injects), right before that context gets
@@ -255,6 +260,14 @@ type Handler struct {
 	// silently drifting from what the request actually saw. nil by
 	// default: zero behavior change for every real deployment.
 	OnRetrieve func(RetrievalResult)
+
+	agentTurnsOnce sync.Once
+	agentTurns     *agentTurnCache
+}
+
+func (h *Handler) turnCache() *agentTurnCache {
+	h.agentTurnsOnce.Do(func() { h.agentTurns = newAgentTurnCache() })
+	return h.agentTurns
 }
 
 func (h *Handler) now() time.Time {
@@ -317,7 +330,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	}
 	for _, m := range req.Messages {
 		if !provider.Role(m.Role).Valid() {
-			http.Error(w, fmt.Sprintf("invalid message role %q: must be one of %s, %s, %s", m.Role, provider.RoleSystem, provider.RoleUser, provider.RoleAssistant), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("invalid message role %q: must be one of %s, %s, %s, %s", m.Role, provider.RoleSystem, provider.RoleUser, provider.RoleAssistant, provider.RoleTool), http.StatusBadRequest)
 			return
 		}
 	}
@@ -325,10 +338,60 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	ctx := r.Context()
 	messages := toProviderMessages(req.Messages)
 
+	// Tool calling (agentturn.go): relayed, never run here. agent marks a
+	// request that's part of an agent turn; plain chat skips all of this.
+	agent := usesTools(req, messages)
+	if agent && h.DisallowTools {
+		http.Error(w, "tool calling is not available on this endpoint", http.StatusBadRequest)
+		return
+	}
+	if err := validateToolRequest(req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid tool request: %v", err), http.StatusBadRequest)
+		return
+	}
+	// Step 1 (model name -> provider profile), resolved early so a tool
+	// request to a profile without tool calling fails before any work.
+	target := h.resolveProvider(req.Model)
+	if agent && !provider.SupportsTools(target) {
+		http.Error(w, fmt.Sprintf("provider profile %q does not support tool calling (supports_tools: false)", target.Name()), http.StatusBadRequest)
+		return
+	}
+	turn := agentTurnInfo{agent: agent, continuation: isContinuation(messages)}
+	if agent {
+		turn.tags = agentTags(messages)
+	}
+
+	// An agent turn's later requests reuse what its first request
+	// computed: the same retrieval, aggregation hint and merged
+	// attachments, so memory is searched once per turn and every step
+	// sees the same context.
+	var (
+		turnKey            string
+		cached             agentTurnState
+		haveCached         bool
+		result             = RetrievalResult{Gate: GateSkipped}
+		aggregationHint    string
+		attachmentWarnings []string
+	)
+	if agent {
+		turnKey = agentTurnKey(actingUser, workspace, target.Name(), req.Messages, req.Attachments)
+		cached, haveCached = h.turnCache().get(turnKey, h.now())
+		if haveCached {
+			metrics.AgentTurnCacheTotal.WithLabelValues("hit").Inc()
+		} else {
+			metrics.AgentTurnCacheTotal.WithLabelValues("miss").Inc()
+		}
+	}
+	if haveCached {
+		result, aggregationHint, attachmentWarnings = cached.result, cached.aggregationHint, cached.attachmentWarnings
+		if i := lastUserIndex(messages); i >= 0 {
+			messages[i].Content = cached.mergedUserContent
+		}
+	}
+
 	// Request lifecycle step 2: retrieval, unless the client opted out
 	// (ARCHITECTURE.md § Retrieval Engine, "Per-request opt-out").
-	result := RetrievalResult{Gate: GateSkipped}
-	if !strings.EqualFold(r.Header.Get("X-Hupi-Memory"), "off") {
+	if !haveCached && !strings.EqualFold(r.Header.Get("X-Hupi-Memory"), "off") {
 		var err error
 		result, err = h.Retriever.Retrieve(ctx, actingUser, workspace, messages, h.now())
 		if err != nil {
@@ -338,9 +401,11 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 			result = RetrievalResult{Gate: GateSkipped}
 		}
 	}
-	metrics.RetrievalGateTotal.WithLabelValues(string(result.Gate)).Inc()
-	if h.OnRetrieve != nil {
-		h.OnRetrieve(result)
+	if !haveCached {
+		metrics.RetrievalGateTotal.WithLabelValues(string(result.Gate)).Inc()
+		if h.OnRetrieve != nil {
+			h.OnRetrieve(result)
+		}
 	}
 
 	// Separate, orthogonal opt-out from retrieval above: skips writing this
@@ -376,8 +441,7 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// bad MIME, no user message present) is a 400; a per-attachment
 	// extraction/captioning failure degrades to a placeholder marker
 	// instead (see mergeAttachments' own doc comment).
-	var attachmentWarnings []string
-	if len(req.Attachments) > 0 {
+	if len(req.Attachments) > 0 && !haveCached {
 		var err error
 		messages, attachmentWarnings, err = h.mergeAttachments(ctx, messages, req.Attachments)
 		if err != nil {
@@ -386,8 +450,6 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Step 1 (model name -> provider profile) + step 4 (forward upstream).
-	target := h.resolveProvider(req.Model)
 	inputText := lastUserMessage(messages)
 
 	// Answer-time aggregation reasoning pass (Gap 4 mechanism 2,
@@ -398,19 +460,71 @@ func (h *Handler) handleChatCompletionsScoped(w http.ResponseWriter, r *http.Req
 	// means no hint gets added, never a blocked turn. Reuses target, the
 	// same provider already answering this turn — no separate "judge"
 	// provider role, same reasoning as attributionCheck's own choice.
-	if result.NeedsAggregationPass && result.ContextMessage != "" {
-		if hint := AggregationHint(ctx, target, inputText, result.ContextMessage, h.now()); hint != "" {
-			systemMessages = append(systemMessages, provider.Message{Role: provider.RoleSystem, Content: hint})
+	if !haveCached && result.NeedsAggregationPass && result.ContextMessage != "" {
+		aggregationHint = AggregationHint(ctx, target, inputText, result.ContextMessage, h.now())
+	}
+	if aggregationHint != "" {
+		systemMessages = append(systemMessages, provider.Message{Role: provider.RoleSystem, Content: aggregationHint})
+	}
+	if agent && !haveCached {
+		st := agentTurnState{result: result, aggregationHint: aggregationHint, attachmentWarnings: attachmentWarnings}
+		if i := lastUserIndex(messages); i >= 0 {
+			st.mergedUserContent = messages[i].Content
 		}
+		h.turnCache().put(turnKey, st, h.now())
 	}
 
 	augmented := append(systemMessages, messages...)
 
 	if req.Stream {
-		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode, attachmentWarnings)
+		h.handleStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode, attachmentWarnings, turn)
 		return
 	}
-	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode, attachmentWarnings)
+	h.handleNonStream(w, ctx, workspace, req, augmented, target, result, inputText, actingUser.Owner, skipCapture, explainMode, attachmentWarnings, turn)
+}
+
+// agentTurnInfo is what handleStream/handleNonStream need to know about
+// an agent turn (agentturn.go).
+type agentTurnInfo struct {
+	agent        bool     // tools offered, or this continues an agent turn
+	continuation bool     // tool calls/results already follow the user's question
+	tags         []string // context_tags for the captured turn
+}
+
+// chatRequestFor builds the upstream request. Model is left blank on
+// purpose: req.Model was used only to pick a provider profile
+// (resolveProvider) and may be a profile name like "personal-claude"
+// rather than a real vendor model id — the adapter falls back to its own
+// configured Model (see Provider.Model's doc comment).
+func chatRequestFor(req chatCompletionRequest, augmented []provider.Message) provider.ChatRequest {
+	return provider.ChatRequest{
+		Messages:          augmented,
+		Temperature:       req.Temperature,
+		MaxTokens:         req.MaxTokens,
+		Tools:             req.Tools,
+		ToolChoice:        req.ToolChoice,
+		ParallelToolCalls: req.ParallelToolCalls,
+	}
+}
+
+// capture writes ep unless the client opted out, recording metrics. A
+// capture failure is logged, not returned: losing this one turn's memory
+// is preferable to losing the answer the user is waiting on
+// (ARCHITECTURE.md § Capture).
+func (h *Handler) capture(ctx context.Context, scope identity.Scope, ep Episode, skip bool) {
+	if skip {
+		metrics.CaptureTotal.WithLabelValues("skipped").Inc()
+		return
+	}
+	captureStart := time.Now()
+	err := h.Capturer.Capture(ctx, scope, ep)
+	metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
+	if err != nil {
+		metrics.CaptureTotal.WithLabelValues("error").Inc()
+		h.log().Error("capture failed", "episode_id", ep.ID, "error", err)
+		return
+	}
+	metrics.CaptureTotal.WithLabelValues("ok").Inc()
 }
 
 // resolveIdentity authenticates a request. With h.Auth nil (Tier 1/2
@@ -520,18 +634,10 @@ func (h *Handler) handleNonStream(
 	skipCapture bool,
 	explainMode string,
 	attachmentWarnings []string,
+	turn agentTurnInfo,
 ) {
-	// Model is left blank here on purpose: req.Model was used above only
-	// to pick a provider profile (resolveProvider) and may well be a
-	// profile name like "personal-claude" rather than a real vendor model
-	// id — the adapter falls back to its own configured Model in that
-	// case (see Provider.Model's doc comment).
 	callStart := time.Now()
-	resp, err := target.ChatCompletion(ctx, provider.ChatRequest{
-		Messages:    augmented,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	})
+	resp, err := target.ChatCompletion(ctx, chatRequestFor(req, augmented))
 	if err != nil {
 		metrics.ProviderCallErrorsTotal.WithLabelValues(target.Name(), target.Vendor()).Inc()
 		http.Error(w, fmt.Sprintf("upstream provider error: %v", err), http.StatusBadGateway)
@@ -539,37 +645,31 @@ func (h *Handler) handleNonStream(
 	}
 	metrics.ProviderCallDuration.WithLabelValues(target.Name(), target.Vendor(), "false").Observe(time.Since(callStart).Seconds())
 
-	id := h.newID()
-	ep := h.buildEpisode(id, target, inputText, resp.Message.Content, result, false, actor)
+	// A tool-call step isn't an answer yet: nothing is captured until the
+	// agent turn's final text answer (agentturn.go).
+	toolStep := len(resp.Message.ToolCalls) > 0 || resp.FinishReason == provider.FinishToolCalls
+	recordAgentStep(turn, toolStep)
 
-	// Capture is awaited, not fired-and-forgotten (ARCHITECTURE.md §
-	// Capture), but a capture failure logs rather than fails the user's
-	// request — losing this one turn's memory is preferable to losing the
-	// answer the user is waiting on. That's a deliberate availability vs.
-	// durability call, not an oversight.
-	if skipCapture {
-		metrics.CaptureTotal.WithLabelValues("skipped").Inc()
-	} else {
-		captureStart := time.Now()
-		captureErr := h.Capturer.Capture(ctx, scope, ep)
-		metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
-		if captureErr != nil {
-			metrics.CaptureTotal.WithLabelValues("error").Inc()
-			h.log().Error("capture failed", "episode_id", ep.ID, "error", captureErr)
-		} else {
-			metrics.CaptureTotal.WithLabelValues("ok").Inc()
-		}
+	id := h.newID()
+	if !toolStep {
+		ep := h.buildEpisode(id, target, inputText, resp.Message.Content, result, false, actor)
+		ep.ContextTags = turn.tags
+		h.capture(ctx, scope, ep, skipCapture)
 	}
 
+	finish := resp.FinishReason
+	if finish == "" {
+		finish = provider.FinishStop
+	}
 	out := chatCompletionResponse{
-		ID:      ep.ID,
+		ID:      id,
 		Object:  "chat.completion",
 		Created: h.now().Unix(),
 		Model:   resp.Model,
 		Choices: []chatCompletionChoice{{
 			Index:        0,
-			Message:      chatMessage{Role: string(resp.Message.Role), Content: resp.Message.Content},
-			FinishReason: "stop",
+			Message:      chatMessage{Role: string(resp.Message.Role), Content: resp.Message.Content, ToolCalls: resp.Message.ToolCalls},
+			FinishReason: finish,
 		}},
 		Usage: chatCompletionUsage{
 			PromptTokens:     resp.Usage.PromptTokens,
@@ -578,27 +678,42 @@ func (h *Handler) handleNonStream(
 		},
 		AttachmentWarnings: attachmentWarnings,
 	}
-	if explainMode != "" {
-		citations := append([]Citation{}, result.Citations...)
-		if explainMode == "deep" && len(citations) > 0 {
-			used, attrErr := attributionCheck(ctx, target, resp.Message.Content, citations)
-			if attrErr != nil {
-				// Same availability-over-durability call as capture above:
-				// a failed attribution check degrades to Phase 1's plain
-				// citation list (Used left nil, i.e. "not checked"), not a
-				// failed response — the user's answer is already in hand.
-				h.log().Error("attribution check failed, returning citations without Used", "error", attrErr)
-			} else {
-				for i := range citations {
-					u := used[i]
-					citations[i].Used = &u
-				}
-			}
-		}
-		out.Citations = citations
+	if explainMode != "" && !toolStep {
+		out.Citations = h.explainCitations(ctx, target, explainMode, resp.Message.Content, result)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// explainCitations returns the turn's citations for X-Hupi-Explain, with
+// "deep" also running attributionCheck. A failed attribution check
+// degrades to the plain citation list (Used left nil, i.e. "not
+// checked"), never a failed response — the answer is already in hand.
+func (h *Handler) explainCitations(ctx context.Context, target provider.Provider, explainMode, answer string, result RetrievalResult) []Citation {
+	citations := append([]Citation{}, result.Citations...)
+	if explainMode == "deep" && len(citations) > 0 {
+		used, attrErr := attributionCheck(ctx, target, answer, citations)
+		if attrErr != nil {
+			h.log().Error("attribution check failed, returning citations without Used", "error", attrErr)
+		} else {
+			for i := range citations {
+				u := used[i]
+				citations[i].Used = &u
+			}
+		}
+	}
+	return citations
+}
+
+func recordAgentStep(turn agentTurnInfo, toolStep bool) {
+	if !turn.agent {
+		return
+	}
+	outcome := "final"
+	if toolStep {
+		outcome = "tool_calls"
+	}
+	metrics.AgentStepsTotal.WithLabelValues(outcome).Inc()
 }
 
 func (h *Handler) handleStream(
@@ -614,6 +729,7 @@ func (h *Handler) handleStream(
 	skipCapture bool,
 	explainMode string,
 	attachmentWarnings []string,
+	turn agentTurnInfo,
 ) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -621,15 +737,8 @@ func (h *Handler) handleStream(
 		return
 	}
 
-	// See the comment in handleNonStream: Model is left blank so the
-	// adapter uses its own configured model rather than whatever profile
-	// name the client sent as req.Model.
 	streamStart := time.Now()
-	chunks, err := target.StreamChatCompletion(ctx, provider.ChatRequest{
-		Messages:    augmented,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	})
+	chunks, err := target.StreamChatCompletion(ctx, chatRequestFor(req, augmented))
 	if err != nil {
 		metrics.ProviderCallErrorsTotal.WithLabelValues(target.Name(), target.Vendor()).Inc()
 		http.Error(w, fmt.Sprintf("upstream provider error: %v", err), http.StatusBadGateway)
@@ -645,6 +754,8 @@ func (h *Handler) handleStream(
 
 	var buf strings.Builder
 	truncated := false
+	sawToolCalls := false
+	finish := ""
 
 drain:
 	for {
@@ -652,7 +763,8 @@ drain:
 		case <-ctx.Done():
 			// Client disconnected or the request was cancelled: whatever
 			// arrived so far is still captured, flagged truncated — a
-			// partial memory beats none (ARCHITECTURE.md § Capture).
+			// partial memory beats none (ARCHITECTURE.md § Capture). Not
+			// for an agent turn, though: see the capture rule below.
 			truncated = true
 			break drain
 		case chunk, more := <-chunks:
@@ -665,11 +777,23 @@ drain:
 				truncated = true
 				break drain
 			}
-			if chunk.Delta != "" {
+			if chunk.FinishReason != "" {
+				finish = chunk.FinishReason
+			}
+			if chunk.Delta != "" || len(chunk.ToolCalls) > 0 {
 				buf.WriteString(chunk.Delta)
+				delta := chatCompletionChunkDelta{Content: chunk.Delta}
+				for _, tc := range chunk.ToolCalls {
+					sawToolCalls = true
+					part := chatToolCallDeltaWire{Index: tc.Index, ID: tc.ID, Function: chatToolCallFunctionPart{Name: tc.Name, Arguments: tc.Arguments}}
+					if tc.ID != "" {
+						part.Type = "function"
+					}
+					delta.ToolCalls = append(delta.ToolCalls, part)
+				}
 				writeSSEChunk(w, chatCompletionChunk{
 					ID: id, Object: "chat.completion.chunk", Created: created, Model: target.Model(),
-					Choices: []chatCompletionChunkChoice{{Index: 0, Delta: chatCompletionChunkDelta{Content: chunk.Delta}}},
+					Choices: []chatCompletionChunkChoice{{Index: 0, Delta: delta}},
 				})
 				flusher.Flush()
 			}
@@ -681,45 +805,33 @@ drain:
 
 	metrics.ProviderCallDuration.WithLabelValues(target.Name(), target.Vendor(), "true").Observe(time.Since(streamStart).Seconds())
 
-	ep := h.buildEpisode(id, target, inputText, buf.String(), result, truncated, actor)
-	if skipCapture {
-		metrics.CaptureTotal.WithLabelValues("skipped").Inc()
-	} else {
-		captureStart := time.Now()
-		captureErr := h.Capturer.Capture(ctx, scope, ep)
-		metrics.CaptureDuration.Observe(time.Since(captureStart).Seconds())
-		if captureErr != nil {
-			metrics.CaptureTotal.WithLabelValues("error").Inc()
-			h.log().Error("capture failed", "episode_id", ep.ID, "error", captureErr)
-		} else {
-			metrics.CaptureTotal.WithLabelValues("ok").Inc()
-		}
+	// Capture rules (agentturn.go): a tool-call step isn't an answer yet,
+	// and an agent turn cut off mid-way stores nothing. A plain reply cut
+	// off mid-stream is still captured, flagged truncated, as before.
+	toolStep := sawToolCalls || finish == provider.FinishToolCalls
+	if !truncated {
+		recordAgentStep(turn, toolStep)
+	}
+	if !toolStep && !(truncated && turn.continuation) {
+		ep := h.buildEpisode(id, target, inputText, buf.String(), result, truncated, actor)
+		ep.ContextTags = turn.tags
+		h.capture(ctx, scope, ep, skipCapture)
 	}
 
 	// The terminal [DONE] is held back until capture has been attempted:
 	// ARCHITECTURE.md's "before the turn is considered done" means before
 	// the client is *told* the turn is done, not merely before the content
 	// finishes arriving — the content itself was already streamed above.
-	finish := "stop"
+	if finish == "" {
+		finish = provider.FinishStop
+	}
 	terminal := chatCompletionChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: target.Model(),
 		Choices:            []chatCompletionChunkChoice{{Index: 0, Delta: chatCompletionChunkDelta{}, FinishReason: &finish}},
 		AttachmentWarnings: attachmentWarnings,
 	}
-	if explainMode != "" {
-		citations := append([]Citation{}, result.Citations...)
-		if explainMode == "deep" && len(citations) > 0 {
-			used, attrErr := attributionCheck(ctx, target, buf.String(), citations)
-			if attrErr != nil {
-				h.log().Error("attribution check failed, returning citations without Used", "error", attrErr)
-			} else {
-				for i := range citations {
-					u := used[i]
-					citations[i].Used = &u
-				}
-			}
-		}
-		terminal.Citations = citations
+	if explainMode != "" && !toolStep {
+		terminal.Citations = h.explainCitations(ctx, target, explainMode, buf.String(), result)
 	}
 	writeSSEChunk(w, terminal)
 	fmt.Fprint(w, "data: [DONE]\n\n")
@@ -753,7 +865,7 @@ func writeSSEChunk(w http.ResponseWriter, chunk chatCompletionChunk) {
 func toProviderMessages(msgs []chatMessage) []provider.Message {
 	out := make([]provider.Message, len(msgs))
 	for i, m := range msgs {
-		out[i] = provider.Message{Role: provider.Role(m.Role), Content: m.Content}
+		out[i] = provider.Message{Role: provider.Role(m.Role), Content: m.Content, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
 	}
 	return out
 }
