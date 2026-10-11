@@ -71,12 +71,27 @@ the agent on, the sidebar chat can use tools from your MCP servers to
 answer. Each turn:
 1. It starts your configured MCP servers with `workbench.mcp.startServer`.
    Nothing else starts them in HUPI Code, which has no native Chat view.
-2. It offers the model their tools from `vscode.lm.tools`
+2. It offers the model HUPI's own read-only workspace tools
+   (`src/agent/workspaceTools.ts`, `hupi.agent.workspaceTools`, default on):
+   `read_file` (with an optional line range), `list_files` (glob),
+   `search_text` (plain or regex), `get_diagnostics` and `get_selection`.
+   - They're internal to HUPI, not registered with VS Code, so other agents
+     gain nothing through them.
+   - They stay inside the open workspace folders: `..` can't climb out,
+     absolute paths must be inside a folder, and on a local disk a symlink
+     pointing outside is refused, in both read and search.
+   - They skip `node_modules`, `.git` and build output.
+   - They refuse files that commonly hold secrets: `.env*` (except
+     `.example`/`.sample`/`.template`), private keys and keystores,
+     `.ssh/`, `.aws/credentials`, `.netrc`, `.npmrc`, `.pypirc` and
+     `.git-credentials`. Their contents would otherwise go to the model
+     provider.
+3. It also offers the model the MCP tools from `vscode.lm.tools`
    (`src/agent/toolRegistry.ts`). HUPI memory's own MCP tools are left
    out, because HUPI chat already injects memory. VS Code's core and
    internal agent tools are left out too, until each is checked to work
    without a chat session.
-3. It runs the loop in `src/agent/agentLoop.ts`:
+4. It runs the loop in `src/agent/agentLoop.ts`:
    - Each request goes through `hupiClient.streamChatTurn`.
    - Each tool call runs through `vscode.lm.invokeTool` with no chat
      token (`src/agent/vscodeTools.ts`).
@@ -87,7 +102,7 @@ answer. Each turn:
      answer with tools off.
    - The whole turn is capped at 10 minutes, and New Chat or a new message
      cancels it.
-4. Each tool call shows as a card in the reply:
+5. Each tool call shows as a card in the reply:
    - the tool name, an argument preview and its status (running, done,
      failed, denied or stopped);
    - a collapsible result preview.
@@ -96,9 +111,9 @@ answer. Each turn:
    `deny` or `cancel`. A reply bubble is a sequence of text segments and
    cards, so markdown re-renders never wipe a card. Everything from a tool
    is set as plain text, never rendered as HTML or markdown.
-5. The **Stop** button replaces Send while any reply streams. It aborts
+6. The **Stop** button replaces Send while any reply streams. It aborts
    the turn (including a running tool) and is answered with `stopped`.
-6. A failed, stopped or cancelled turn is rolled back out of the
+7. A failed, stopped or cancelled turn is rolled back out of the
    conversation history in full.
 
 Approval:

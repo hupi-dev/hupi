@@ -93,7 +93,8 @@ export const window = {
   },
 };
 
-export const languages = { registerInlineCompletionItemProvider };
+export const getDiagnostics = vi.fn<(uri?: unknown) => unknown>(() => []);
+export const languages = { registerInlineCompletionItemProvider, getDiagnostics };
 
 export const ProgressLocation = { Notification: 15 };
 export const ViewColumn = { Beside: -2 };
@@ -125,9 +126,25 @@ export const commands = { registerCommand, executeCommand };
 
 // ---- workspace.* ---------------------------------------------------------
 
-function asRelativePath(uri: { path?: string } | string): string {
-  return typeof uri === 'string' ? uri : (uri.path ?? String(uri));
+// Workspace folders for tests (__setWorkspaceFolders); none by default.
+let workspaceFoldersValue: { name: string; uri: Uri; index: number }[] | undefined;
+export function __setWorkspaceFolders(folders: { name: string; uri: Uri }[] | undefined): void {
+  workspaceFoldersValue = folders?.map((f, index) => ({ ...f, index }));
 }
+
+function asRelativePath(uri: { path?: string } | string, includeWorkspaceFolder?: boolean): string {
+  const p = typeof uri === 'string' ? uri : (uri.path ?? String(uri));
+  for (const f of workspaceFoldersValue ?? []) {
+    const root = f.uri.path.replace(/\/+$/, '');
+    if (p.startsWith(root + '/')) {
+      const rel = p.slice(root.length + 1);
+      return includeWorkspaceFolder ? `${f.name}/${rel}` : rel;
+    }
+  }
+  return p;
+}
+
+export const findFiles = vi.fn<(include: string, exclude?: string, max?: number) => Promise<Uri[]>>(async () => []);
 
 let textDocumentsValue: unknown[] = [];
 export function __setTextDocuments(docs: unknown[]): void {
@@ -185,6 +202,13 @@ function onDidChangeConfiguration(listener: (typeof configListeners)[number]) {
 export const workspace = {
   getConfiguration,
   onDidChangeConfiguration,
+  findFiles,
+  getWorkspaceFolder(uri: { path?: string }) {
+    return workspaceFoldersValue?.find((f) => (uri.path ?? '').startsWith(f.uri.path.replace(/\/+$/, '') + '/'));
+  },
+  get workspaceFolders() {
+    return workspaceFoldersValue;
+  },
   asRelativePath,
   registerTextDocumentContentProvider,
   applyEdit,
@@ -465,6 +489,9 @@ export function __resetVscodeMock(): void {
   registerMcpServerDefinitionProvider.mockClear();
   invokeTool.mockReset();
   lmToolsValue = [];
+  workspaceFoldersValue = undefined;
+  findFiles.mockReset().mockResolvedValue([]);
+  getDiagnostics.mockReset().mockReturnValue([]);
   configListeners = [];
 
   progressCancellationListener = undefined;

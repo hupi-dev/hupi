@@ -3,8 +3,13 @@
 ## 0.1.16
 
 - **Preview: the HUPI agent.** With the new `hupi.agent.enabled` setting
-  on (it's off by default), the sidebar chat can use tools from your MCP
-  servers to answer.
+  on (it's off by default), the sidebar chat can use tools to answer:
+  - HUPI's own read-only workspace tools (`read_file`, `list_files`,
+    `search_text`, `get_diagnostics`, `get_selection`;
+    `hupi.agent.workspaceTools`). They stay inside the open workspace
+    (no `..`, no symlinks pointing out) and refuse files that commonly
+    hold secrets (`.env`, private keys, credentials).
+  - Tools from your MCP servers.
   - HUPI starts the servers configured in VS Code's `mcp.json` and offers
     their tools to the model.
   - It runs the calls the model asks for and sends the results back,
