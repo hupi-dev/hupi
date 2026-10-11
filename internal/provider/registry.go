@@ -28,6 +28,10 @@ type ProfileConfig struct {
 	// DescribeImage calls — falls back to Model when empty. See
 	// OpenAICompatConfig/AnthropicConfig's own VisionModel field.
 	VisionModel string
+	// NoTools marks a profile that can't do tool calling (providers.yaml
+	// `supports_tools: false`); requests with tools are then refused
+	// rather than silently losing their tools. See SupportsTools.
+	NoTools bool
 }
 
 // Config mirrors providers.yaml: named profiles, plus which named profile
@@ -109,11 +113,11 @@ func build(name string, pc ProfileConfig) (Provider, error) {
 	switch pc.Kind {
 	case KindOpenAICompat:
 		return NewOpenAICompat(OpenAICompatConfig{
-			Name: name, Vendor: pc.Vendor, Model: pc.Model, BaseURL: pc.BaseURL, APIKey: pc.APIKey, VisionModel: pc.VisionModel,
+			Name: name, Vendor: pc.Vendor, Model: pc.Model, BaseURL: pc.BaseURL, APIKey: pc.APIKey, VisionModel: pc.VisionModel, NoTools: pc.NoTools,
 		}), nil
 	case KindAnthropic:
 		return NewAnthropic(AnthropicConfig{
-			Name: name, Vendor: pc.Vendor, Model: pc.Model, BaseURL: pc.BaseURL, APIKey: pc.APIKey, APIVersion: pc.APIVersion, VisionModel: pc.VisionModel,
+			Name: name, Vendor: pc.Vendor, Model: pc.Model, BaseURL: pc.BaseURL, APIKey: pc.APIKey, APIVersion: pc.APIVersion, VisionModel: pc.VisionModel, NoTools: pc.NoTools,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", pc.Kind)

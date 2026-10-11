@@ -387,6 +387,7 @@ providers:
     api_key_env: OPENAI_API_KEY
     model: gpt-4.1
     vision_model: gpt-4.1  # optional — omit to reuse this profile's own model, if it's already vision-capable
+    # supports_tools: false  # optional — for a model without tool calling
 
   personal-claude:
     kind: anthropic
@@ -413,6 +414,21 @@ providers:
 
 Switching your daily driver model is changing `active_chat_provider` and
 restarting the gateway — the memory bundle doesn't care what produced it.
+
+**Tool calling** passes through in OpenAI's shape (`internal/provider/tools.go`).
+That covers `tools`, `tool_choice` and `parallel_tool_calls` on the request,
+`tool_calls` on assistant messages, `role: "tool"` results, and a real
+`finish_reason`, both streamed and not.
+- **OpenAI-compatible adapter:** relays these as they are.
+- **Anthropic adapter:** translates them to and from `tool_use` and
+  `tool_result` content blocks. Consecutive tool results are merged into one
+  user turn, and streamed `input_json_delta` fragments are re-indexed to
+  OpenAI's per-call numbering.
+- **Unsupported models:** a profile with `supports_tools: false` reports
+  `provider.SupportsTools(p) == false`, so a tool request can be refused
+  clearly instead of silently losing its tools.
+
+HUPI never runs a tool itself. The client runs them and sends the results back.
 
 `active_consolidation_provider` is deliberately a **separate, more stable**
 setting. Consolidation is where summaries — and therefore the "voice" and

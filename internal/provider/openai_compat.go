@@ -25,6 +25,7 @@ type OpenAICompat struct {
 	baseURL     string
 	apiKey      string
 	client      *http.Client
+	noTools     bool
 }
 
 type OpenAICompatConfig struct {
@@ -38,6 +39,9 @@ type OpenAICompatConfig struct {
 	// DescribeImage calls (e.g. the profile's own Model is a non-vision
 	// model) — falls back to Model when empty, see resolveVisionModel.
 	VisionModel string
+	// NoTools marks a profile whose model can't do tool calling
+	// (providers.yaml `supports_tools: false`), see SupportsTools.
+	NoTools bool
 }
 
 func NewOpenAICompat(cfg OpenAICompatConfig) *OpenAICompat {
@@ -53,8 +57,12 @@ func NewOpenAICompat(cfg OpenAICompatConfig) *OpenAICompat {
 		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
 		apiKey:      cfg.APIKey,
 		client:      client,
+		noTools:     cfg.NoTools,
 	}
 }
+
+// SupportsTools implements ToolCapable.
+func (p *OpenAICompat) SupportsTools() bool { return !p.noTools }
 
 func (p *OpenAICompat) Vendor() string { return p.vendor }
 func (p *OpenAICompat) Model() string  { return p.model }
@@ -86,17 +94,34 @@ func (p *OpenAICompat) resolveVisionModel() string {
 func (p *OpenAICompat) Name() string { return p.name }
 
 type openAIChatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Stream      bool      `json:"stream"`
-	Temperature *float64  `json:"temperature,omitempty"`
-	MaxTokens   *int      `json:"max_tokens,omitempty"`
+	Model             string          `json:"model"`
+	Messages          []Message       `json:"messages"`
+	Stream            bool            `json:"stream"`
+	Temperature       *float64        `json:"temperature,omitempty"`
+	MaxTokens         *int            `json:"max_tokens,omitempty"`
+	Tools             []ToolDef       `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+}
+
+func (p *OpenAICompat) chatBody(req ChatRequest, stream bool) openAIChatRequest {
+	return openAIChatRequest{
+		Model:             p.resolveModel(req.Model),
+		Messages:          req.Messages,
+		Stream:            stream,
+		Temperature:       req.Temperature,
+		MaxTokens:         req.MaxTokens,
+		Tools:             req.Tools,
+		ToolChoice:        req.ToolChoice,
+		ParallelToolCalls: req.ParallelToolCalls,
+	}
 }
 
 type openAIChatResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
-		Message Message `json:"message"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 	Usage Usage `json:"usage"`
 }
@@ -197,19 +222,14 @@ func (p *OpenAICompat) DescribeImage(ctx context.Context, img ImageInput, instru
 
 func (p *OpenAICompat) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
 	var raw openAIChatResponse
-	body := openAIChatRequest{
-		Model:       p.resolveModel(req.Model),
-		Messages:    req.Messages,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	}
-	if err := p.do(ctx, http.MethodPost, "/chat/completions", false, body, &raw); err != nil {
+	if err := p.do(ctx, http.MethodPost, "/chat/completions", false, p.chatBody(req, false), &raw); err != nil {
 		return ChatResponse{}, err
 	}
 	if len(raw.Choices) == 0 {
 		return ChatResponse{}, fmt.Errorf("provider %s: empty choices in response", p.name)
 	}
-	return ChatResponse{Model: raw.Model, Message: raw.Choices[0].Message, Usage: raw.Usage}, nil
+	c := raw.Choices[0]
+	return ChatResponse{Model: raw.Model, Message: c.Message, Usage: raw.Usage, FinishReason: c.FinishReason}, nil
 }
 
 // StreamChatCompletion issues a streamed request and translates the
@@ -217,14 +237,7 @@ func (p *OpenAICompat) ChatCompletion(ctx context.Context, req ChatRequest) (Cha
 // channel — it's closed once a Done/Err chunk has been sent — or the
 // response body leaks.
 func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
-	body := openAIChatRequest{
-		Model:       p.resolveModel(req.Model),
-		Messages:    req.Messages,
-		Stream:      true,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-	}
-	buf, err := json.Marshal(body)
+	buf, err := json.Marshal(p.chatBody(req, true))
 	if err != nil {
 		return nil, fmt.Errorf("provider %s: encode request: %w", p.name, err)
 	}
@@ -286,8 +299,17 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 			var chunk struct {
 				Choices []struct {
 					Delta struct {
-						Content string `json:"content"`
+						Content   string `json:"content"`
+						ToolCalls []struct {
+							Index    int    `json:"index"`
+							ID       string `json:"id"`
+							Function struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							} `json:"function"`
+						} `json:"tool_calls"`
 					} `json:"delta"`
+					FinishReason *string `json:"finish_reason"`
 				} `json:"choices"`
 				Usage *Usage `json:"usage"`
 			}
@@ -296,7 +318,15 @@ func (p *OpenAICompat) StreamChatCompletion(ctx context.Context, req ChatRequest
 				return
 			}
 			if len(chunk.Choices) > 0 {
-				if !send(StreamChunk{Delta: chunk.Choices[0].Delta.Content, Usage: chunk.Usage}) {
+				c := chunk.Choices[0]
+				sc := StreamChunk{Delta: c.Delta.Content, Usage: chunk.Usage}
+				for _, tc := range c.Delta.ToolCalls {
+					sc.ToolCalls = append(sc.ToolCalls, ToolCallDelta{Index: tc.Index, ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+				}
+				if c.FinishReason != nil {
+					sc.FinishReason = *c.FinishReason
+				}
+				if !send(sc) {
 					return
 				}
 			}
