@@ -127,5 +127,12 @@ each turn HUPI starts them and offers their tools.
   - `internal/gateway/agentturn.go`: the gateway's memory rules;
   - `internal/provider/tools.go`: tool calling for OpenAI-compatible
     providers and Anthropic.
+- **Tests:**
+  - unit tests with a mocked VS Code: `npm test` in `vscode-extension/`;
+  - the gateway's memory rules: `internal/gateway`'s agent-turn tests, run
+    by `master-test.sh`;
+  - a Windows end-to-end suite that drives the real sidebar in stock VS
+    Code and in HUPI Code:
+    [vscode-extension/e2e/windows/](../vscode-extension/e2e/windows/README.md).
 - **Details:** [VSCODE_EXTENSION.md](VSCODE_EXTENSION.md) and
   [ARCHITECTURE.md](../ARCHITECTURE.md).
